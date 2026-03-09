@@ -1,0 +1,10 @@
+defaults:
+  websocket:
+    bind: 127.0.0.1
+    port: 8765
+    access_token_env: ""
+    admin_token_env: ""
+    auto_approve_loopback: true
+  runtime:
+    poll_interval_seconds: 0.05
+robots: []

@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.venv/
+.env
+*.egg-info/
+dist/
+build/
+robot_events.jsonl
+patch-test.txt
