@@ -10,6 +10,8 @@ from src.domain import ExecutionContext, MessageRecord, ReplyTarget, RobotEvent
 from src.gateways import ChannelHub, TelegramChannel, WebSocketChannel
 from src.governance.composite import CompositeToolExecutionGuard
 from src.memory import InMemoryMemoryStore, PersistentMemoryStore
+from src.llm import StubLLMProvider
+from src.llm.ports import LLMPort
 from src.planners import LLMPlanner
 from src.robot import DigitalRobot
 from src.runtime import RuntimeEventLoop
@@ -164,6 +166,7 @@ def build_websocket_service(
     admin_token: str = "",
     auto_approve_loopback: bool = True,
     home_dir: str | Path | None = None,
+    llm: LLMPort | None = None,
 ) -> RobotService:
     instance = resolve_robot_instance(
         robot_id=robot_id,
@@ -213,7 +216,7 @@ def build_websocket_service(
         message_delivery=channel_hub,
         tool_executor=tool_executor,
         context_assembler=context_assembler,
-        planner=LLMPlanner(),
+        planner=LLMPlanner(llm=llm),
         memory=memory_store,
         telemetry=telemetry,
         bus=bus,
