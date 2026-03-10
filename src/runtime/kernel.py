@@ -312,11 +312,6 @@ class DigitalRobotKernel:
             user_text=event.text or event.event_type,
             robot_text=outbound.text,
         )
-        self.memory.infer_and_store_preferences(
-            user_id,
-            event.text or event.event_type,
-            outbound.text,
-        )
         self.telemetry.emit(
             ctx=ctx,
             event_type="memory.updated",

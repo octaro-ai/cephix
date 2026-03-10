@@ -8,9 +8,14 @@
 - Revisit dynamic tool availability once a real MCS/MCP-backed `ToolExecutionPort` is integrated.
 - Mid term:
   - wire the persistent event, episode, profile, and procedure stores into the runtime path
-  - add a memory manager that assembles planning context from firmware plus selected memory layers
-  - add policy-controlled memory updates so the robot can suggest firmware changes without mutating human-owned files directly
+  - ~~add a memory manager that assembles planning context from firmware plus selected memory layers~~ (done: DefaultContextAssembler with General Mode + System Tools)
+  - ~~add policy-controlled memory updates so the robot can suggest firmware changes without mutating human-owned files directly~~ (done: procedure.propose tool, status: proposed -> human approves -> active)
+  - connect the real LLM planner so it can use all mounted tools (current planner is a keyword-matching stub)
+  - add a human-facing review interface for proposed procedures (approve/reject/edit)
+  - add a heartbeat SOP example (heartbeat.check.v1) with configurable intervals and active hours
 - Long term:
   - define a formal robot brain package for cloning, transfer, and tenant-safe distribution
   - support backend adapters for alternative memory implementations without changing robot internals
   - add memory classification for cloneable, tenant-bound, and sensitive knowledge
+  - add a `REFLECTING` state to the kernel (post-run self-evaluation, feeding back into procedural memory)
+  - evaluate per-SOP autonomy level override (SOP metadata can set a max level for its workflow)

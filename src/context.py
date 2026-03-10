@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.domain import PlanningContext, ReplyTarget, RobotEvent
+from src.domain import AutonomyLevel, PlanningContext, ReplyTarget, RobotEvent
 from src.ports import ContextAssemblerPort, FirmwarePort, HeartbeatPort, MemoryDocumentPort, MemoryPort
 from src.skills.ports import SkillResolverPort
 from src.sop.ports import SOPResolverPort
-from src.tools.ports import ToolRegistryPort
+from src.tools.ports import ToolCatalogPort, ToolRegistryPort
 from src.utils import new_id
 
 
@@ -66,6 +66,9 @@ class DefaultContextAssembler:
         sop_resolver: SOPResolverPort | None = None,
         skill_resolver: SkillResolverPort | None = None,
         tool_registry: ToolRegistryPort | None = None,
+        tool_catalog: ToolCatalogPort | None = None,
+        system_tool_definitions: list[object] | None = None,
+        autonomy_level: AutonomyLevel = AutonomyLevel.CREATIVE,
     ) -> None:
         self.firmware = firmware
         self.memory_documents = memory_documents
@@ -73,6 +76,9 @@ class DefaultContextAssembler:
         self.sop_resolver = sop_resolver
         self.skill_resolver = skill_resolver
         self.tool_registry = tool_registry
+        self.tool_catalog = tool_catalog
+        self.system_tool_definitions = system_tool_definitions or []
+        self.autonomy_level = autonomy_level
 
     def assemble(self, event: RobotEvent, user_id: str) -> PlanningContext:
         firmware_documents = dict(self.firmware.get_base_guidance())
@@ -98,8 +104,8 @@ class DefaultContextAssembler:
 
         tool_schemas: list[dict] = []
         if self.tool_registry is not None:
-            for tool_name in all_required_tools:
-                self.tool_registry.mount(tool_name)
+            self.tool_registry.unmount_all()
+            self._mount_tools(active_sops, all_required_tools)
             tool_schemas = self.tool_registry.get_schemas()
 
         return PlanningContext(
@@ -110,6 +116,47 @@ class DefaultContextAssembler:
             active_skills=active_skills,
             active_sops=active_sops,
         )
+
+    def _mount_tools(self, active_sops: list, all_required_tools: set[str]) -> None:
+        """Mount tools according to the autonomy level.
+
+        SCRIPTED   -- Only SOP-required tools. No system tools.
+        GUIDED     -- SOP-required tools + system tools (memory, procedure).
+        AUTONOMOUS -- If SOP matches: SOP tools. Otherwise: full catalog.
+                      System tools always included.
+        CREATIVE   -- Like AUTONOMOUS, plus procedure.propose.
+                      This is the default -- the robot can learn.
+
+        In AUTONOMOUS and CREATIVE, when no SOP matches (General Mode),
+        the full catalog is mounted so the LLM can reason freely.
+        """
+        assert self.tool_registry is not None
+        level = self.autonomy_level
+
+        if level == AutonomyLevel.SCRIPTED:
+            # Only what the SOP prescribes -- nothing else
+            for tool_name in all_required_tools:
+                self.tool_registry.mount(tool_name)
+            return
+
+        # GUIDED, AUTONOMOUS, CREATIVE: mount SOP tools or full catalog
+        system_names = {s.name for s in self.system_tool_definitions}  # type: ignore[union-attr]
+
+        if active_sops or all_required_tools:
+            for tool_name in all_required_tools:
+                self.tool_registry.mount(tool_name)
+        elif level in (AutonomyLevel.AUTONOMOUS, AutonomyLevel.CREATIVE) and self.tool_catalog is not None:
+            # General Mode: mount domain tools from catalog (system tools handled below)
+            for tool_def in self.tool_catalog.list_available():
+                if tool_def.name not in system_names:
+                    self.tool_registry.mount(tool_def.name)
+
+        # System tools: mount based on level
+        for sys_tool in self.system_tool_definitions:
+            name = sys_tool.name  # type: ignore[union-attr]
+            if name == "procedure.propose" and level not in (AutonomyLevel.CREATIVE,):
+                continue
+            self.tool_registry.mount(name)
 
 
 class FirmwareHeartbeat:

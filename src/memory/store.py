@@ -51,13 +51,6 @@ class InMemoryMemoryStore:
                 return
         facts.append(MemoryFact(kind=kind, content=content, score=score))
 
-    def infer_and_store_preferences(self, user_id: str, user_text: str, robot_text: str) -> None:
-        lowered = (user_text + "\n" + robot_text).lower()
-        if "kurz" in lowered:
-            self.remember_fact(user_id, "response_style", "prefers concise answers", score=0.8)
-        if "zusammenfassung" in lowered:
-            self.remember_fact(user_id, "task_preference", "likes summaries", score=0.7)
-
     @staticmethod
     def _conversation_key(user_id: str, conversation_id: str | None) -> str:
         return conversation_id or f"user:{user_id}"

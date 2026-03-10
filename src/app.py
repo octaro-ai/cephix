@@ -18,6 +18,7 @@ from src.telemetry import EventLog, FanoutEventSink, Telemetry
 from src.tools.executor import GovernedToolExecutor
 from src.tools.models import ToolDefinition, ToolParameter
 from src.tools.registry import InMemoryToolRegistry
+from src.tools.system_tools import ALL_SYSTEM_TOOLS, SystemToolHandlers
 from src.utils import new_id
 from typing import Any
 
@@ -68,8 +69,8 @@ def _mail_list_handler(ctx: ExecutionContext, arguments: dict[str, Any]) -> list
     return [m for m in _DEMO_MESSAGES if m.unread][:limit]
 
 
-def _build_demo_tool_executor() -> GovernedToolExecutor:
-    catalog = _InlineCatalog([
+def _build_demo_catalog() -> _InlineCatalog:
+    return _InlineCatalog([
         ToolDefinition(
             name="mail.list_new_messages",
             description="List new/unread messages from the inbox",
@@ -77,13 +78,24 @@ def _build_demo_tool_executor() -> GovernedToolExecutor:
                 ToolParameter(name="limit", type="integer", description="Max messages to return", required=False),
             ],
         ),
+        *ALL_SYSTEM_TOOLS,
     ])
+
+
+def _build_demo_tool_executor(
+    catalog: _InlineCatalog,
+    memory: InMemoryMemoryStore,
+) -> GovernedToolExecutor:
     registry = InMemoryToolRegistry(catalog)
-    registry.mount("mail.list_new_messages")
     guard = CompositeToolExecutionGuard()
     executor = GovernedToolExecutor(registry=registry, guard=guard)
     executor.register_handler("mail.list_new_messages", _mail_list_handler)
-    return executor
+
+    system_handlers = SystemToolHandlers(memory=memory)
+    for tool_name, handler in system_handlers.get_handlers().items():
+        executor.register_handler(tool_name, handler)
+
+    return executor, registry, catalog
 
 
 def build_demo_robot(event_log_path: str | Path = "robot_events.jsonl") -> DigitalRobot:
@@ -101,11 +113,15 @@ def build_demo_robot(event_log_path: str | Path = "robot_events.jsonl") -> Digit
         conversation_id="tg-conv-001",
         mode="notify",
     )
-    tool_executor = _build_demo_tool_executor()
+    catalog = _build_demo_catalog()
+    tool_executor, registry, catalog = _build_demo_tool_executor(catalog, memory_store)
     context_assembler = DefaultContextAssembler(
         firmware=firmware,
         memory_documents=memory_documents,
         memory_store=memory_store,
+        tool_registry=registry,
+        tool_catalog=catalog,
+        system_tool_definitions=ALL_SYSTEM_TOOLS,
     )
     heartbeat = FirmwareHeartbeat(firmware=firmware, default_output_target=default_output_target)
     pairing_registry = InMemoryPairingRegistry()
@@ -168,11 +184,15 @@ def build_websocket_service(
     memory_store = InMemoryMemoryStore()
     memory_documents = MarkdownMemoryDocumentStore(instance.paths.memory_dir)
     default_output_target = None
-    tool_executor = _build_demo_tool_executor()
+    catalog = _build_demo_catalog()
+    tool_executor, registry, catalog = _build_demo_tool_executor(catalog, memory_store)
     context_assembler = DefaultContextAssembler(
         firmware=firmware,
         memory_documents=memory_documents,
         memory_store=memory_store,
+        tool_registry=registry,
+        tool_catalog=catalog,
+        system_tool_definitions=ALL_SYSTEM_TOOLS,
     )
     heartbeat = FirmwareHeartbeat(firmware=firmware, default_output_target=default_output_target)
     pairing_registry = InMemoryPairingRegistry()

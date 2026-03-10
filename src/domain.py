@@ -118,6 +118,23 @@ class InteractionRecord:
     timestamp: str = field(default_factory=utc_now_iso)
 
 
+class AutonomyLevel(str, Enum):
+    """How much freedom the LLM gets during a run.
+
+    SCRIPTED   -- SOP determines everything, LLM only formulates responses.
+    GUIDED     -- SOP provides the frame, LLM chooses from available tools.
+    AUTONOMOUS -- No SOP required; LLM plans freely, governance checks every step.
+    CREATIVE   -- Like AUTONOMOUS, plus the LLM can propose new procedures and
+                  actively read/write memory.  Closest to full agent autonomy,
+                  but the LLM still cannot create tools or modify its own config.
+    """
+
+    SCRIPTED = "SCRIPTED"
+    GUIDED = "GUIDED"
+    AUTONOMOUS = "AUTONOMOUS"
+    CREATIVE = "CREATIVE"
+
+
 class RobotState(str, Enum):
     IDLE = "IDLE"
     OBSERVING = "OBSERVING"

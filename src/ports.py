@@ -156,9 +156,6 @@ class MemoryPort(Protocol):
     def remember_fact(self, user_id: str, kind: str, content: str, score: float = 1.0) -> None:
         ...
 
-    def infer_and_store_preferences(self, user_id: str, user_text: str, robot_text: str) -> None:
-        ...
-
 
 class PlannerPort(Protocol):
     def create_initial_plan(

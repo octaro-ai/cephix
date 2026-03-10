@@ -9,3 +9,4 @@ dist/
 build/
 robot_events.jsonl
 patch-test.txt
+.claude

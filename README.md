@@ -12,7 +12,7 @@ Cephix builds exactly that employee -- only digital, infinitely scalable, and en
 
 And that is just the beginning.
 
-A digital robot is any autonomous unit that can **perceive, plan, act, learn, and be held accountable**. The same architecture that powers a digital customer service worker can just as easily power:
+A digital robot is an autonomous unit that can **perceive, plan, act, learn, and be held accountable**. The same architecture that powers a digital customer service worker can just as easily power:
 
 - a **sentinel** living inside your log streams -- detecting anomalies, healing infrastructure, adapting to system changes autonomously,
 - an **autonomous crawler** that traverses APIs and websites, adapts to structural changes on its own, and makes semantic decisions about what matters,
@@ -278,6 +278,56 @@ python -m src chat --url ws://127.0.0.1:8765/ws --debug
 # Tests
 python -m pytest tests/ -v
 ```
+
+---
+
+## LLM Freedom: SOPs Are Focus Control, Not a Muzzle
+
+A digital robot must be capable of more than following scripts. The LLM is the most powerful component in the system -- restricting it to predefined workflows wastes its core strength: semantic reasoning across novel situations.
+
+### The Autonomy Dial
+
+Cephix does not have an on/off switch for LLM autonomy. It has a dial with four positions:
+
+| Level | LLM Gets | Use Case |
+|-------|----------|----------|
+| **SCRIPTED** | Only SOP-required tools. No system tools. | Certified workflows, compliance-critical processes |
+| **GUIDED** | SOP tools + memory tools (read/write/search). No procedure proposals. | Standard operations with learning |
+| **AUTONOMOUS** | If SOP matches: SOP tools. Otherwise: full catalog. Memory tools included. | Open-ended tasks, customer service |
+| **CREATIVE** | Like AUTONOMOUS, plus `procedure.propose`. Full self-learning. | Training phase, exploration, adaptation |
+
+The level is set per robot (constructor injection). Governance guards remain active at every boundary regardless of the level. The kernel still controls execution. The difference is **focus, not permission**.
+
+On CREATIVE, the robot is almost as powerful as a pure agent framework -- but it still cannot create its own tools or modify its own config files. Those capabilities can be provided via tools if desired.
+
+### System Tools: Always Available
+
+Four tools are always mounted, regardless of mode:
+
+| Tool | Purpose |
+|------|---------|
+| `memory.read` | Read stored facts and recent interactions |
+| `memory.write` | Store new observations and preferences |
+| `memory.search` | Search memory by content |
+| `procedure.propose` | Suggest a new reusable work pattern |
+
+These are the foundation for self-learning: the LLM can actively read and update its memory during a run, and propose new procedures based on observed patterns.
+
+### The Self-Learning Loop
+
+```
+User interacts -> Robot observes patterns
+  -> Robot proposes procedure (status: proposed)
+  -> Human reviews and approves (status: active)
+  -> SOPResolver can now match the new procedure
+  -> Robot improves over time
+```
+
+The LLM suggests. The human decides. The robot improves. This follows the core policy: **"Do not mutate human-owned firmware without explicit approval."**
+
+### Heartbeat: Proactive Behavior
+
+When idle, the robot checks memory for pending items and acts on them -- without being asked. The `HEARTBEAT.md` firmware document controls what the robot does on each tick. Silent completion is the default; notifications only when something is actionable.
 
 ---
 

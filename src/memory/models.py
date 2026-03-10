@@ -39,6 +39,7 @@ class ProcedureRecord:
     steps: list[str] = field(default_factory=list)
     source_episode_ids: list[str] = field(default_factory=list)
     confidence: float = 0.5
+    status: str = "active"
     updated_at: str = field(default_factory=utc_now_iso)
 
 

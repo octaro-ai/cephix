@@ -7,6 +7,7 @@ dependencies = ["aiohttp>=3.9", "PyYAML>=6.0"]
 
 [project.optional-dependencies]
 cli = ["rich>=13.7"]
+dev = ["pytest>=8.0"]
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 from src.bus import SemanticBus
-from src.context import DefaultContextAssembler
+from src.context import DefaultContextAssembler, FirmwareHeartbeat
 from src.domain import Plan, PlanningContext, ReplyTarget, RobotEvent
 from src.governance.composite import CompositeToolExecutionGuard
 from src.gateways import ChannelHub, TelegramChannel
@@ -26,9 +26,45 @@ class _EmptyToolExecutor:
 
 class RuntimeTests(unittest.TestCase):
     def test_idle_loop_is_zero_work_without_input(self) -> None:
+        """When no external events exist and HEARTBEAT.md is empty, nothing runs."""
+
+        class StubFirmware:
+            def get_base_guidance(self) -> dict[str, str]:
+                return {}
+
+            def get_event_instruction(self, event_type: str) -> str:
+                return ""
+
+        class StubMemoryDocuments:
+            def get_documents(self, event, user_id) -> dict[str, str]:
+                return {}
+
+        from src.context import DefaultContextAssembler, FirmwareHeartbeat
+
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = Path(tmpdir) / "events.jsonl"
-            runtime, bus = build_demo_runtime(log_path)
+            firmware = StubFirmware()
+            memory_store = InMemoryMemoryStore()
+            telegram_channel = TelegramChannel()
+            channel_hub = ChannelHub(ingress_ports=[telegram_channel], egress_ports={"telegram": telegram_channel})
+            bus = SemanticBus()
+            kernel = DigitalRobotKernel(
+                robot_id="robot-1",
+                default_output_target=ReplyTarget(channel="telegram", recipient_id="user-1", mode="notify"),
+                message_delivery=channel_hub,
+                tool_executor=_EmptyToolExecutor(),
+                context_assembler=DefaultContextAssembler(
+                    firmware=firmware,
+                    memory_documents=StubMemoryDocuments(),
+                    memory_store=memory_store,
+                ),
+                planner=LLMPlanner(),
+                memory=memory_store,
+                telemetry=Telemetry(EventLog(str(log_path))),
+                bus=bus,
+            )
+            heartbeat = FirmwareHeartbeat(firmware=firmware)
+            runtime = RuntimeEventLoop(kernel, channel_hub, heartbeat)
 
             did_run = runtime.run_once()
 
