@@ -88,10 +88,42 @@ PROCEDURE_PROPOSE = ToolDefinition(
     metadata={"system_tool": True},
 )
 
+CORE_MEMORY_READ = ToolDefinition(
+    name="core_memory.read",
+    description="Read the user's core memory -- the curated essentials the robot knows about this person.",
+    parameters=[
+        ToolParameter(name="user_id", type="string", description="User ID to read core memory for"),
+    ],
+    metadata={"system_tool": True},
+)
+
+CORE_MEMORY_UPDATE = ToolDefinition(
+    name="core_memory.update",
+    description=(
+        "Replace the user's core memory with updated content. "
+        "Core memory is a short, curated text block (max 2000 chars) "
+        "containing the most important facts about this user. "
+        "You are responsible for deciding what stays and what gets removed."
+    ),
+    parameters=[
+        ToolParameter(name="user_id", type="string", description="User ID to update core memory for"),
+        ToolParameter(
+            name="content",
+            type="string",
+            description="The new core memory content (replaces existing). Max 2000 characters.",
+        ),
+    ],
+    metadata={"system_tool": True},
+)
+
+CORE_MEMORY_BUDGET = 2000
+
 ALL_SYSTEM_TOOLS: list[ToolDefinition] = [
     MEMORY_READ,
     MEMORY_WRITE,
     MEMORY_SEARCH,
+    CORE_MEMORY_READ,
+    CORE_MEMORY_UPDATE,
     PROCEDURE_PROPOSE,
 ]
 
@@ -123,6 +155,8 @@ class SystemToolHandlers:
             "memory.read": self._handle_memory_read,
             "memory.write": self._handle_memory_write,
             "memory.search": self._handle_memory_search,
+            "core_memory.read": self._handle_core_memory_read,
+            "core_memory.update": self._handle_core_memory_update,
             "procedure.propose": self._handle_procedure_propose,
         }
 
@@ -165,6 +199,30 @@ class SystemToolHandlers:
 
         matches = [f for f in facts if query in str(f.get("content", "")).lower()]
         return {"matches": matches, "total_searched": len(facts)}
+
+    # -- core_memory.read ----------------------------------------------------
+
+    def _handle_core_memory_read(self, ctx: ExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        user_id = str(arguments.get("user_id", ctx.user_id))
+        content = self._memory.get_core_memory(user_id)
+        return {"user_id": user_id, "content": content, "length": len(content), "budget": CORE_MEMORY_BUDGET}
+
+    # -- core_memory.update --------------------------------------------------
+
+    def _handle_core_memory_update(self, ctx: ExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        user_id = str(arguments.get("user_id", ctx.user_id))
+        content = str(arguments["content"])
+
+        if len(content) > CORE_MEMORY_BUDGET:
+            return {
+                "stored": False,
+                "error": f"Content exceeds budget ({len(content)}/{CORE_MEMORY_BUDGET} chars). Shorten it.",
+                "length": len(content),
+                "budget": CORE_MEMORY_BUDGET,
+            }
+
+        self._memory.set_core_memory(user_id, content)
+        return {"stored": True, "user_id": user_id, "length": len(content), "budget": CORE_MEMORY_BUDGET}
 
     # -- procedure.propose ---------------------------------------------------
 

@@ -73,6 +73,9 @@ class RobotService:
             if not device_id:
                 return {"type": "error", "content": "device_id is required."}
             return {"type": "admin.pairing.approve", **self.robot.control_plane.approve_pairing(device_id)}
+        if request.request_type == "session.list":
+            conversations = self.robot.kernel.memory.list_conversations()
+            return {"type": "session.list", "conversations": conversations}
         return {"type": "error", "content": f"Unknown control request type: {request.request_type}"}
 
     def _refresh_public_info(self) -> None:

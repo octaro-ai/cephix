@@ -156,6 +156,15 @@ class MemoryPort(Protocol):
     def remember_fact(self, user_id: str, kind: str, content: str, score: float = 1.0) -> None:
         ...
 
+    def get_core_memory(self, user_id: str) -> str:
+        ...
+
+    def set_core_memory(self, user_id: str, content: str) -> None:
+        ...
+
+    def list_conversations(self) -> list[str]:
+        ...
+
 
 class PlannerPort(Protocol):
     def create_initial_plan(

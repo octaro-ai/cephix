@@ -9,7 +9,7 @@ from src.context import DefaultContextAssembler, FirmwareHeartbeat, MarkdownFirm
 from src.domain import ExecutionContext, MessageRecord, ReplyTarget, RobotEvent
 from src.gateways import ChannelHub, TelegramChannel, WebSocketChannel
 from src.governance.composite import CompositeToolExecutionGuard
-from src.memory import InMemoryMemoryStore
+from src.memory import InMemoryMemoryStore, PersistentMemoryStore
 from src.planners import LLMPlanner
 from src.robot import DigitalRobot
 from src.runtime import RuntimeEventLoop
@@ -181,7 +181,7 @@ def build_websocket_service(
     event_log = EventLog(str(log_path))
     bus = SemanticBus()
     firmware = MarkdownFirmwareStore(instance.paths.firmware_dir)
-    memory_store = InMemoryMemoryStore()
+    memory_store = PersistentMemoryStore(instance.paths.workspace_dir / "memory_data")
     memory_documents = MarkdownMemoryDocumentStore(instance.paths.memory_dir)
     default_output_target = None
     catalog = _build_demo_catalog()

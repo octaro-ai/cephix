@@ -225,6 +225,14 @@ class WebSocketChannel:
             await self._handle_admin_message(session, data)
             return
 
+        if msg_type == "session.new":
+            await self._handle_session_new(session)
+            return
+
+        if msg_type == "session.list":
+            await self._handle_session_list(session, data)
+            return
+
         if msg_type != "message":
             await self._send_json(session.ws, {"type": "error", "content": f"Unknown message type: {msg_type}"})
             return
@@ -265,6 +273,24 @@ class WebSocketChannel:
         )
         self._incoming_events.append(event)
         await self._send_json(session.ws, {"type": "ack", "content": "message_queued", "event_id": event.event_id})
+
+    async def _handle_session_new(self, session: _ClientSession) -> None:
+        conversation_id = new_id("conv")
+        await self._send_json(
+            session.ws,
+            {"type": "session.new", "conversation_id": conversation_id},
+        )
+
+    async def _handle_session_list(self, session: _ClientSession, data: dict[str, Any]) -> None:
+        self._incoming_control_requests.append(
+            ControlRequest(
+                request_id=new_id("ctrl"),
+                source_channel=self.channel_id,
+                recipient_id=session.client_id,
+                request_type="session.list",
+                payload={},
+            )
+        )
 
     async def _handle_auth_hello(self, session: _ClientSession, data: dict[str, Any]) -> None:
         requested_scopes = self._normalize_scopes(data.get("requested_scopes"))
