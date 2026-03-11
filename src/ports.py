@@ -24,6 +24,12 @@ class ChannelEgressPort(Protocol):
     def send(self, target: ReplyTarget, message: OutboundMessage) -> None:
         ...
 
+    def send_chunk(self, target: ReplyTarget, token: str) -> None:
+        ...
+
+    def send_chunk_clear(self, target: ReplyTarget) -> None:
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Composite / routing ports used by the kernel and runtime
@@ -39,6 +45,12 @@ class MessageDeliveryPort(Protocol):
     """Routes an outbound message to the correct channel (e.g. ChannelHub)."""
 
     def send(self, target: ReplyTarget, message: OutboundMessage) -> None:
+        ...
+
+    def send_chunk(self, target: ReplyTarget, token: str) -> None:
+        ...
+
+    def send_chunk_clear(self, target: ReplyTarget) -> None:
         ...
 
 
@@ -172,6 +184,8 @@ class PlannerPort(Protocol):
         ctx: ExecutionContext,
         event: RobotEvent,
         planning_context: PlanningContext,
+        *,
+        token_callback: Any | None = None,
     ) -> Plan:
         ...
 
@@ -182,6 +196,8 @@ class PlannerPort(Protocol):
         previous_plan: Plan,
         results: list[ToolResult],
         planning_context: PlanningContext,
+        *,
+        token_callback: Any | None = None,
     ) -> Plan:
         ...
 

@@ -74,14 +74,14 @@ class RuntimeTests(unittest.TestCase):
 
     def test_heartbeat_can_be_injected_without_external_events(self) -> None:
         class StubPlanner:
-            def create_initial_plan(self, ctx, event, planning_context) -> Plan:
+            def create_initial_plan(self, ctx, event, planning_context, **kwargs) -> Plan:
                 return Plan(
                     plan_id=new_id("plan"),
                     goal="Heartbeat check",
                     steps=[],
                 )
 
-            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context) -> Plan:
+            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context, **kwargs) -> Plan:
                 return previous_plan
 
         class StubHeartbeat:
@@ -211,10 +211,10 @@ class RuntimeTests(unittest.TestCase):
 
     def test_empty_plan_fails_with_explicit_runtime_error(self) -> None:
         class EmptyPlanner:
-            def create_initial_plan(self, ctx, event, planning_context) -> Plan:
+            def create_initial_plan(self, ctx, event, planning_context, **kwargs) -> Plan:
                 return Plan(plan_id=new_id("plan"), goal="broken plan", steps=[])
 
-            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context) -> Plan:
+            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context, **kwargs) -> Plan:
                 return previous_plan
 
         class StubFirmware:

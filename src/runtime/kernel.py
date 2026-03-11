@@ -160,6 +160,39 @@ class DigitalRobotKernel:
     # Phase: Plan – create the initial plan
     # ------------------------------------------------------------------
 
+    def _make_token_callback(self, event: RobotEvent) -> tuple[callable | None, ReplyTarget | None]:
+        """Create a callback that streams tokens to the client.
+
+        Returns ``(callback, target)`` — *target* is kept so the caller
+        can send a clear signal if the plan turns out to be tool calls
+        rather than a final response.
+        """
+        target = self._resolve_delivery_target(event, None)
+        if target is None:
+            return None, None
+        streamed = [False]
+        def _on_token(token: str) -> None:
+            streamed[0] = True
+            self.message_delivery.send_chunk(target, token)
+        _on_token.streamed = streamed  # type: ignore[attr-defined]
+        return _on_token, target
+
+    def _clear_streamed_if_not_finalize(
+        self,
+        plan: Plan,
+        token_callback: callable | None,
+        target: ReplyTarget | None,
+    ) -> None:
+        """If the plan starts with tool_call steps and tokens were already
+        streamed, tell the client to discard them."""
+        if token_callback is None or target is None:
+            return
+        streamed = getattr(token_callback, "streamed", [False])
+        if not streamed[0]:
+            return
+        if plan.steps and plan.steps[0].kind != "finalize":
+            self.message_delivery.send_chunk_clear(target)
+
     def _plan(
         self,
         ctx: ExecutionContext,
@@ -167,7 +200,11 @@ class DigitalRobotKernel:
         planning_context: PlanningContext,
     ) -> Plan:
         self._state = RobotState.PLANNING
-        current_plan = self.planner.create_initial_plan(ctx, event, planning_context)
+        # Only stream when no tools are available — otherwise the LLM might
+        # emit "thinking" text before tool calls that we can't un-print.
+        has_tools = bool(planning_context.tool_schemas)
+        token_callback, _ = self._make_token_callback(event) if not has_tools else (None, None)
+        current_plan = self.planner.create_initial_plan(ctx, event, planning_context, token_callback=token_callback)
 
         self.bus.publish("command", "plan.created", {"plan_id": current_plan.plan_id, "goal": current_plan.goal})
         self.telemetry.emit(
@@ -267,9 +304,12 @@ class DigitalRobotKernel:
                 },
             )
 
+        token_callback, target = self._make_token_callback(event)
         revised = self.planner.revise_plan_after_tool(
             ctx, event, current_plan, batch_results, planning_context,
+            token_callback=token_callback,
         )
+        self._clear_streamed_if_not_finalize(revised, token_callback, target)
         self.telemetry.emit(
             ctx=ctx,
             event_type="plan.revised",

@@ -37,11 +37,14 @@ class RobotService:
 
     async def run_forever(self) -> None:
         await self.start()
+        loop = asyncio.get_running_loop()
         try:
             while not self._stop_event.is_set():
                 did_control_work = self._dispatch_control_requests()
                 try:
-                    did_work = self.runtime.run_once() or did_control_work
+                    # Run in executor so LLM streaming tokens can flush
+                    # through the event loop while the kernel blocks.
+                    did_work = await loop.run_in_executor(None, self.runtime.run_once) or did_control_work
                 except Exception:
                     logger.exception("Error while processing event")
                     did_work = True

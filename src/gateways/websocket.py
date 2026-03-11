@@ -63,6 +63,7 @@ class WebSocketChannel:
         self._site: web.TCPSite | None = None
         self._clients: dict[str, _ClientSession] = {}
         self.bound_port = port
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def set_public_info(self, info: dict[str, Any]) -> None:
         self._public_info = dict(info)
@@ -79,6 +80,7 @@ class WebSocketChannel:
         self.auto_approve_loopback = auto_approve_loopback
 
     async def start(self) -> None:
+        self._loop = asyncio.get_running_loop()
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, host=self.bind, port=self.port)
@@ -110,6 +112,14 @@ class WebSocketChannel:
         payload = {"type": "response", "content": message.text, "metadata": {"channel": self.channel_id}}
         self._schedule_send(target.recipient_id, payload)
 
+    def send_chunk(self, target: ReplyTarget, token: str) -> None:
+        payload = {"type": "response_chunk", "content": token}
+        self._schedule_send(target.recipient_id, payload)
+
+    def send_chunk_clear(self, target: ReplyTarget) -> None:
+        payload = {"type": "response_chunk_clear"}
+        self._schedule_send(target.recipient_id, payload)
+
     def send_control_payload(self, recipient_id: str, payload: dict[str, Any]) -> None:
         self._schedule_send(recipient_id, payload)
 
@@ -123,11 +133,12 @@ class WebSocketChannel:
         session = self._clients.get(client_id)
         if session is None:
             return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
+        loop = self._loop
+        if loop is None:
             return
-        loop.create_task(self._send_json(session.ws, payload))
+        # Use call_soon_threadsafe so this works from both the event loop
+        # thread and executor threads (e.g. when the kernel streams tokens).
+        loop.call_soon_threadsafe(loop.create_task, self._send_json(session.ws, payload))
 
     @staticmethod
     async def _send_json(ws: web.WebSocketResponse, payload: dict[str, Any]) -> None:

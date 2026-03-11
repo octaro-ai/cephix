@@ -34,6 +34,12 @@ class _NullEgress:
     def send(self, target: ReplyTarget, message: Any) -> None:
         pass
 
+    def send_chunk(self, target: ReplyTarget, token: str) -> None:
+        pass
+
+    def send_chunk_clear(self, target: ReplyTarget) -> None:
+        pass
+
 
 class _InlineCatalog:
     """Minimal in-memory catalog for demo purposes."""

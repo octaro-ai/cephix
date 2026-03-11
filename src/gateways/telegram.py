@@ -20,3 +20,9 @@ class TelegramChannel:
         print(f"to={target.recipient_id}")
         print(message.text)
         print("--- /TELEGRAM OUT ---\n")
+
+    def send_chunk(self, target: ReplyTarget, token: str) -> None:
+        print(token, end="", flush=True)
+
+    def send_chunk_clear(self, target: ReplyTarget) -> None:
+        pass

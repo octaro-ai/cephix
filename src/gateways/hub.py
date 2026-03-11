@@ -31,3 +31,15 @@ class ChannelHub:
         if port is None:
             raise RuntimeError(f"No ChannelEgressPort registered for channel: {target.channel}")
         port.send(target, message)
+
+    def send_chunk(self, target: ReplyTarget, token: str) -> None:
+        port = self.egress_ports.get(target.channel)
+        if port is None:
+            raise RuntimeError(f"No ChannelEgressPort registered for channel: {target.channel}")
+        port.send_chunk(target, token)
+
+    def send_chunk_clear(self, target: ReplyTarget) -> None:
+        port = self.egress_ports.get(target.channel)
+        if port is None:
+            raise RuntimeError(f"No ChannelEgressPort registered for channel: {target.channel}")
+        port.send_chunk_clear(target)

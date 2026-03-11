@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from src.llm.models import LLMCompletion, LLMMessage, LLMToolCall
+from src.llm.models import LLMCompletion, LLMMessage, LLMToolCall, TokenCallback
 from src.utils import new_id
 
 
@@ -75,6 +75,24 @@ class StubLLMProvider:
             finish_reason="stop",
             usage={"prompt_tokens": 0, "completion_tokens": 0},
         )
+
+    def stream_complete(
+        self,
+        *,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        token_callback: TokenCallback | None = None,
+    ) -> LLMCompletion:
+        result = self.complete(
+            messages=messages, tools=tools, model=model,
+            temperature=temperature, max_tokens=max_tokens,
+        )
+        if token_callback and result.content:
+            token_callback(result.content)
+        return result
 
     @staticmethod
     def _should_call_tool(user_text: str, tool_name: str) -> bool:

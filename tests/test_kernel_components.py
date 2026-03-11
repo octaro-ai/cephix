@@ -19,6 +19,12 @@ class RecordingDelivery:
     def send(self, target, message) -> None:
         self.sent.append((target, message.text))
 
+    def send_chunk(self, target, token) -> None:
+        pass
+
+    def send_chunk_clear(self, target) -> None:
+        pass
+
 
 class RecordingContextAssembler:
     def __init__(self, context: PlanningContext | None = None) -> None:
@@ -68,7 +74,7 @@ class KernelComponentTests(unittest.TestCase):
 
     def test_finalize_plan_sends_reply_target_and_updates_memory(self) -> None:
         class FinalizePlanner:
-            def create_initial_plan(self, ctx, event, planning_context) -> Plan:
+            def create_initial_plan(self, ctx, event, planning_context, **kwargs) -> Plan:
                 return Plan(
                     plan_id=new_id("plan"),
                     goal="Respond immediately",
@@ -82,7 +88,7 @@ class KernelComponentTests(unittest.TestCase):
                     ],
                 )
 
-            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context) -> Plan:
+            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context, **kwargs) -> Plan:
                 return previous_plan
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -111,7 +117,7 @@ class KernelComponentTests(unittest.TestCase):
 
     def test_silent_delivery_skips_egress(self) -> None:
         class SilentPlanner:
-            def create_initial_plan(self, ctx, event, planning_context) -> Plan:
+            def create_initial_plan(self, ctx, event, planning_context, **kwargs) -> Plan:
                 return Plan(
                     plan_id=new_id("plan"),
                     goal="Silent finalize",
@@ -126,7 +132,7 @@ class KernelComponentTests(unittest.TestCase):
                     ],
                 )
 
-            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context) -> Plan:
+            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context, **kwargs) -> Plan:
                 return previous_plan
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -150,14 +156,14 @@ class KernelComponentTests(unittest.TestCase):
 
     def test_missing_default_and_reply_target_fails(self) -> None:
         class FinalizePlanner:
-            def create_initial_plan(self, ctx, event, planning_context) -> Plan:
+            def create_initial_plan(self, ctx, event, planning_context, **kwargs) -> Plan:
                 return Plan(
                     plan_id=new_id("plan"),
                     goal="Respond",
                     steps=[PlanStep(step_id=new_id("step"), kind="finalize", reason="Done", response_text="Done.")],
                 )
 
-            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context) -> Plan:
+            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context, **kwargs) -> Plan:
                 return previous_plan
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -174,7 +180,7 @@ class KernelComponentTests(unittest.TestCase):
 
     def test_unavailable_delivery_channel_fails(self) -> None:
         class DirectivePlanner:
-            def create_initial_plan(self, ctx, event, planning_context) -> Plan:
+            def create_initial_plan(self, ctx, event, planning_context, **kwargs) -> Plan:
                 return Plan(
                     plan_id=new_id("plan"),
                     goal="Respond",
@@ -189,7 +195,7 @@ class KernelComponentTests(unittest.TestCase):
                     ],
                 )
 
-            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context) -> Plan:
+            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context, **kwargs) -> Plan:
                 return previous_plan
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -207,14 +213,14 @@ class KernelComponentTests(unittest.TestCase):
 
     def test_context_counts_are_logged(self) -> None:
         class FinalizePlanner:
-            def create_initial_plan(self, ctx, event, planning_context) -> Plan:
+            def create_initial_plan(self, ctx, event, planning_context, **kwargs) -> Plan:
                 return Plan(
                     plan_id=new_id("plan"),
                     goal="Respond",
                     steps=[PlanStep(step_id=new_id("step"), kind="finalize", reason="Done", response_text="Done.")],
                 )
 
-            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context) -> Plan:
+            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context, **kwargs) -> Plan:
                 return previous_plan
 
         planning_context = PlanningContext(
@@ -249,7 +255,7 @@ class KernelComponentTests(unittest.TestCase):
         received_results: list[list[ToolResult]] = []
 
         class ParallelToolPlanner:
-            def create_initial_plan(self, ctx, event, planning_context) -> Plan:
+            def create_initial_plan(self, ctx, event, planning_context, **kwargs) -> Plan:
                 return Plan(
                     plan_id=new_id("plan"),
                     goal="Call two tools in parallel",
@@ -273,7 +279,7 @@ class KernelComponentTests(unittest.TestCase):
                     ],
                 )
 
-            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context) -> Plan:
+            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context, **kwargs) -> Plan:
                 received_results.append(list(results))
                 return Plan(
                     plan_id=new_id("plan"),
@@ -342,7 +348,7 @@ class KernelComponentTests(unittest.TestCase):
         received_results: list[list[ToolResult]] = []
 
         class DuplicateToolPlanner:
-            def create_initial_plan(self, ctx, event, planning_context) -> Plan:
+            def create_initial_plan(self, ctx, event, planning_context, **kwargs) -> Plan:
                 return Plan(
                     plan_id=new_id("plan"),
                     goal="Call same tool twice",
@@ -366,7 +372,7 @@ class KernelComponentTests(unittest.TestCase):
                     ],
                 )
 
-            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context) -> Plan:
+            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context, **kwargs) -> Plan:
                 received_results.append(list(results))
                 return Plan(
                     plan_id=new_id("plan"),

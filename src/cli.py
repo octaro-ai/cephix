@@ -33,6 +33,7 @@ class CliUI:
         self._pretty_cls = support.pretty_cls
         self._prompt_cls = support.prompt_cls
         self._confirm_cls = support.confirm_cls
+        self.robot_name: str = "Robot"
 
     def input(self, mode: str) -> str:
         label = "Admin" if mode == "admin" else "You"
@@ -52,7 +53,19 @@ class CliUI:
         self._stderr.print(f"[bold red]{text}[/]")
 
     def print_response(self, text: str) -> None:
-        self._console.print(self._panel_cls(text, title="Robot", border_style="green"))
+        self._console.print(self._panel_cls(text, title=self.robot_name, border_style="green"))
+
+    def print_stream_start(self) -> None:
+        """Print the opening frame for a streamed response."""
+        self._console.print(f"\n[green]── {self.robot_name} ──[/green]")
+
+    def print_token(self, token: str) -> None:
+        """Print a streaming token without newline."""
+        self._console.print(token, end="", highlight=False)
+
+    def print_stream_end(self) -> None:
+        """Print the closing frame after a streamed response."""
+        self._console.print("\n[green]──────────[/green]")
 
     def print_telemetry(self, event: dict[str, Any]) -> None:
         header = (
@@ -159,10 +172,10 @@ def main(argv: list[str] | None = None) -> None:
     admin_pairings.add_argument("--admin-token", default="")
     admin_pairings.add_argument("--device-id", default=_default_device_id("admin"))
 
-    admin_onboard = admin_subparsers.add_parser("onboard", help="Run onboarding for a robot.")
-    admin_onboard.add_argument("--url", default="ws://127.0.0.1:8765/ws")
-    admin_onboard.add_argument("--admin-token", default="")
-    admin_onboard.add_argument("--device-id", default=_default_device_id("admin"))
+    admin_config = admin_subparsers.add_parser("config", help="Reconfigure a running robot.")
+    admin_config.add_argument("--url", default="ws://127.0.0.1:8765/ws")
+    admin_config.add_argument("--admin-token", default="")
+    admin_config.add_argument("--device-id", default=_default_device_id("admin"))
 
     admin_approve = admin_subparsers.add_parser("approve", help="Approve a device pairing.")
     admin_approve.add_argument("target_device_id")
@@ -282,6 +295,8 @@ def _run_init(
     slug = slugify_robot_id(robot_id)
     name = robot_name or robot_id
 
+    ui.print_info(f"\nInitialising robot [bold]{name}[/bold] (id: {slug})\n")
+
     # Seed global .env from CWD .env before init (so API keys are available).
     seeded = seed_global_env(home_override=home_dir)
     for key in seeded:
@@ -299,46 +314,52 @@ def _run_init(
         ui.print_error(str(exc))
         sys.exit(1)
 
-    # Generate tokens if not provided.
+    ui.print_success("Workspace created.")
+
+    # -- Tokens ----------------------------------------------------------------
     effective_access = access_token or secrets.token_urlsafe(24)
     effective_admin = admin_token or secrets.token_urlsafe(24)
     save_secret(instance.access_token_env, effective_access, instance.paths.instance_env_path)
     save_secret(instance.admin_token_env, effective_admin, instance.paths.instance_env_path)
 
-    # Auto-detect LLM provider from available API keys.
-    _PROVIDER_FOR_KEY = {
-        "ANTHROPIC_API_KEY": ("anthropic", "claude-sonnet-4-20250514"),
-        "OPENAI_API_KEY": ("openai", "gpt-4o"),
-    }
-    llm_provider = None
-    llm_model = None
-    llm_api_key_env = None
+    # -- LLM provider (interactive) -------------------------------------------
+    # Show which API keys are already available.
+    llm_keys_available: dict[str, str] = {}
     for key_var in _KNOWN_API_KEY_VARS:
-        if read_secret(key_var, instance.paths.instance_env_path, global_fallback=instance.paths.global_env_path):
-            llm_provider, llm_model = _PROVIDER_FOR_KEY.get(key_var, (None, None))
-            llm_api_key_env = key_var
-            break
+        value = read_secret(key_var, instance.paths.instance_env_path, global_fallback=instance.paths.global_env_path)
+        if value:
+            masked = value[:4] + "..." + value[-4:] if len(value) > 12 else "****"
+            llm_keys_available[key_var] = masked
 
-    if llm_provider:
-        # Update robot.yaml with LLM section.
+    llm_config = _collect_llm_config(ui, llm_keys_available=llm_keys_available)
+
+    if llm_config:
         robot_cfg = _load_yaml(instance.paths.robot_config_path)
         robot_cfg["llm"] = {
-            "provider": llm_provider,
-            "model": llm_model,
-            "api_key_env": llm_api_key_env,
+            "provider": llm_config["provider"],
+            "model": llm_config["model"],
+            "api_key_env": llm_config.get("api_key_env", ""),
         }
         save_robot_config(robot_cfg, instance.paths.robot_config_path)
 
-    ui.print_success(f"Robot '{instance.robot_name}' initialised.")
+        # Persist API key if the user entered one directly.
+        api_key_value = llm_config.get("api_key_value", "").strip()
+        api_key_env = llm_config.get("api_key_env", "")
+        if api_key_value and api_key_env:
+            save_secret(api_key_env, api_key_value, instance.paths.instance_env_path)
+
+    # -- Summary ---------------------------------------------------------------
+    ui.print_info("")
+    ui.print_success(f"Robot '{instance.robot_name}' is ready.")
     ui.print_info(f"  ID:           {instance.robot_id}")
     ui.print_info(f"  Workspace:    {instance.paths.workspace_dir}")
     ui.print_info(f"  Access token: {effective_access}")
     ui.print_info(f"  Admin token:  {effective_admin}")
-    if llm_provider:
-        ui.print_info(f"  LLM:          {llm_provider} / {llm_model}")
+    if llm_config:
+        ui.print_info(f"  LLM:          {llm_config['provider']} / {llm_config['model']}")
     else:
-        ui.print_warning("  No LLM API key found — robot will use keyword fallback.")
-        ui.print_info("  Set ANTHROPIC_API_KEY or OPENAI_API_KEY in ~/.cephix/.env")
+        ui.print_warning("  No LLM configured — robot will use keyword fallback.")
+        ui.print_info("  Reconfigure later via: cephix chat {slug} --admin-token ... → /admin → onboard")
     ui.print_info(f"\nStart with:  cephix start {instance.robot_id}")
 
 
@@ -373,7 +394,7 @@ async def _run_robot(
 ) -> None:
     ui = _build_cli_ui()
 
-    # Verify robot has been initialised.
+    # Verify robot has been initialised and onboarded.
     from src.configuration import resolve_robot_instance, is_robot_workspace_initialized
     try:
         inst = resolve_robot_instance(robot_id=robot_id, home_override=home_dir)
@@ -382,6 +403,10 @@ async def _run_robot(
     if inst is None or not is_robot_workspace_initialized(inst.paths.workspace_dir):
         ui.print_error(f"Robot '{robot_id}' has not been initialised yet.")
         ui.print_info(f"Run first:  cephix init {robot_id}")
+        sys.exit(1)
+    if not inst.onboarded:
+        ui.print_error(f"Robot '{robot_id}' is not fully onboarded.")
+        ui.print_info(f"Run:  cephix init {robot_id}  (or reconfigure via /admin)")
         sys.exit(1)
 
     # Seed global .env from CWD .env (copies known API keys if not present).
@@ -488,11 +513,12 @@ async def _run_chat(
             debug_state = {"enabled": debug}
             mode_state = {"current": "chat"}
             server_info = dict(auth.get("server", {}))
-            ui.print_success(f"Connected to {server_info.get('robot_id', 'robot')} at {url}")
+            ui.robot_name = server_info.get("robot_name") or server_info.get("robot_id") or "Robot"
+            ui.print_success(f"Connected to {ui.robot_name} at {url}")
             if is_admin:
                 ui.print_info("Admin session active. Use /admin and /chat to switch modes.")
-            if server_info.get("onboarding_required") and not is_admin:
-                ui.print_error("Robot onboarding required. Reconnect with admin scope to initialize this machine.")
+            if server_info.get("onboarding_required"):
+                ui.print_error("Robot is not initialised. Run: cephix init <robot-id>")
                 return
 
             if debug_state["enabled"]:
@@ -513,19 +539,6 @@ async def _run_chat(
                     control_queue=control_queue,
                 )
             )
-            if server_info.get("onboarding_required") and is_admin:
-                mode_state["current"] = "admin"
-                ui.print_warning("Robot is not onboarded yet. Starting onboarding in ControlPlane mode.")
-                await _run_onboarding_wizard(
-                    ws,
-                    ui=ui,
-                    control_queue=control_queue,
-                    robot_id=str(server_info.get("robot_id") or "robot"),
-                    robot_name=str(server_info.get("robot_name") or server_info.get("robot_id") or "robot"),
-                    current_admin_token=admin_token,
-                )
-                mode_state["current"] = "chat"
-                ui.print_info("[mode] chat")
             loop = asyncio.get_running_loop()
             try:
                 while True:
@@ -616,7 +629,7 @@ async def _run_admin(
                 ui.print_json(response.get("pairings", []), title="Pairings")
                 return
 
-            if command == "onboard":
+            if command == "config":
                 control_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
                 receiver = asyncio.create_task(
                     _receive_chat(
@@ -628,7 +641,7 @@ async def _run_admin(
                     )
                 )
                 try:
-                    await _run_onboarding_wizard(ws, ui=ui, control_queue=control_queue, current_admin_token=admin_token)
+                    await _run_config_menu(ws, ui=ui, control_queue=control_queue)
                 finally:
                     receiver.cancel()
                     try:
@@ -666,7 +679,7 @@ async def _handle_chat_command(
     if lowered == "help":
         ui.print_info("Commands: /help, /debug on, /debug off, /admin, /chat")
         if is_admin:
-            ui.print_info("Admin mode commands: status, onboard, pairings, approve <device_id>")
+            ui.print_info("Admin: /status, /config, /pairings, /approve <device_id>")
         return True
 
     if lowered == "admin":
@@ -706,7 +719,7 @@ async def _handle_chat_command(
         ui.print_error("[error] admin scope required")
         return True
 
-    if lowered in {"status", "onboard", "pairings"} or lowered.startswith("approve "):
+    if lowered in {"status", "config", "pairings"} or lowered.startswith("approve "):
         await _handle_admin_mode_input(ws, command, ui=ui, control_queue=control_queue)
         return True
 
@@ -722,15 +735,17 @@ async def _handle_admin_mode_input(
     control_queue: asyncio.Queue[dict[str, Any]],
 ) -> None:
     ui = ui or _build_cli_ui()
-    lowered = command_text.lower()
+    # Accept commands with or without leading /.
+    cleaned = command_text.lstrip("/").strip()
+    lowered = cleaned.lower()
     if lowered == "status":
         await ws.send_json({"type": "admin.status"})
         response = await _wait_for_control_message(control_queue, accepted_types={"admin.status", "error"})
         ui.print_json(response.get("status", {}), title="Status")
         return
 
-    if lowered == "onboard":
-        await _run_onboarding_wizard(ws, ui=ui, control_queue=control_queue)
+    if lowered == "config":
+        await _run_config_menu(ws, ui=ui, control_queue=control_queue)
         return
 
     if lowered == "pairings":
@@ -749,7 +764,7 @@ async def _handle_admin_mode_input(
         ui.print_json(response, title="Approve")
         return
 
-    ui.print_error("[error] unknown admin command")
+    ui.print_error(f"[error] unknown command: {cleaned}. Try /help")
 
 
 def _pick_provider(ui: CliUI) -> ProviderInfo | None:
@@ -938,6 +953,58 @@ def _collect_llm_config(
     return config
 
 
+async def _run_config_menu(
+    ws: aiohttp.ClientWebSocketResponse,
+    *,
+    ui: CliUI,
+    control_queue: asyncio.Queue[dict[str, Any]],
+) -> None:
+    """Interactive config menu for a running robot."""
+    ui.print_info("\n  [bold]Configuration[/bold]\n")
+    ui.print_info("  [cyan bold]1[/]  LLM provider & model")
+    ui.print_info("  [cyan bold]q[/]  Cancel")
+    ui.print_info("")
+
+    choice = ui.prompt("  >", default="1").strip().lower()
+    if choice in {"q", ""}:
+        return
+
+    if choice == "1":
+        # Fetch current status to show available keys.
+        await ws.send_json({"type": "admin.onboarding.status"})
+        response = await _wait_for_control_message(
+            control_queue, accepted_types={"admin.onboarding.status", "error"},
+        )
+        if response.get("type") == "error":
+            ui.print_error(f"[error] {response.get('content', 'Unable to load status')}")
+            return
+
+        status = dict(response.get("status", {}))
+        llm_keys_available = dict(status.get("llm_keys_available") or {})
+        llm_config = _collect_llm_config(ui, llm_keys_available=llm_keys_available)
+
+        if not llm_config:
+            ui.print_info("  No changes.")
+            return
+
+        apply_payload: dict[str, Any] = {
+            "type": "admin.onboarding.apply",
+            "llm": llm_config,
+        }
+        await ws.send_json(apply_payload)
+        result = await _wait_for_control_message(
+            control_queue, accepted_types={"admin.onboarding.apply", "error"},
+        )
+        if result.get("type") == "error":
+            ui.print_error(f"[error] {result.get('content', 'Config update failed')}")
+            return
+
+        ui.print_success(f"  LLM updated: {llm_config['provider']} / {llm_config['model']}")
+        return
+
+    ui.print_warning("  Invalid choice.")
+
+
 async def _run_onboarding_wizard(
     ws: aiohttp.ClientWebSocketResponse,
     *,
@@ -1022,6 +1089,7 @@ async def _receive_chat(
     response_done: asyncio.Event,
     control_queue: asyncio.Queue[dict[str, Any]],
 ) -> None:
+    streaming = False  # True while we're receiving response_chunk messages.
     async for msg in ws:
         if msg.type != aiohttp.WSMsgType.TEXT:
             continue
@@ -1031,8 +1099,24 @@ async def _receive_chat(
             if data.get("content") != "message_queued":
                 await control_queue.put(data)
             continue
+        if msg_type == "response_chunk_clear":
+            if streaming:
+                if debug_state["enabled"]:
+                    ui.print_info("[dim](thinking...)[/dim]\n")
+                streaming = False
+            continue
+        if msg_type == "response_chunk":
+            if not streaming:
+                streaming = True
+                ui.print_stream_start()
+            ui.print_token(data.get("content", ""))
+            continue
         if msg_type == "response":
-            ui.print_response(data.get("content", ""))
+            if streaming:
+                ui.print_stream_end()
+                streaming = False
+            else:
+                ui.print_response(data.get("content", ""))
             if _is_chat_cycle_complete(msg_type, data, debug=debug_state["enabled"]):
                 response_done.set()
             continue

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from src.llm.models import LLMCompletion, LLMMessage
+from src.llm.models import LLMCompletion, LLMMessage, TokenCallback
 
 
 class LLMPort(Protocol):
@@ -23,5 +23,17 @@ class LLMPort(Protocol):
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+    ) -> LLMCompletion:
+        ...
+
+    def stream_complete(
+        self,
+        *,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        token_callback: TokenCallback | None = None,
     ) -> LLMCompletion:
         ...
