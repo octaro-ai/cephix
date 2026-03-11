@@ -3,14 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.bus import SemanticBus
-from src.configuration import copy_secret, global_env_path, has_secret, load_global_secret_candidates, onboard_robot_instance, resolve_robot_instance
+from src.configuration import load_global_secret_candidates, onboard_robot_instance, resolve_robot_instance
 from src.control import InMemoryPairingRegistry, RobotControlPlane
 from src.context import DefaultContextAssembler, FirmwareHeartbeat, MarkdownFirmwareStore, MarkdownMemoryDocumentStore
 from src.domain import ExecutionContext, MessageRecord, ReplyTarget, RobotEvent
 from src.gateways import ChannelHub, TelegramChannel, WebSocketChannel
 from src.governance.composite import CompositeToolExecutionGuard
 from src.memory import InMemoryMemoryStore, PersistentMemoryStore
-from src.llm import StubLLMProvider
+from src.llm import StubLLMProvider, create_llm_provider
 from src.llm.ports import LLMPort
 from src.planners import LLMPlanner
 from src.robot import DigitalRobot
@@ -23,6 +23,13 @@ from src.tools.registry import InMemoryToolRegistry
 from src.tools.system_tools import ALL_SYSTEM_TOOLS, SystemToolHandlers
 from src.utils import new_id
 from typing import Any
+
+
+class _NullEgress:
+    """No-op egress port that discards all messages. Used in headless kernels."""
+
+    def send(self, target: ReplyTarget, message: Any) -> None:
+        pass
 
 
 class _InlineCatalog:
@@ -86,14 +93,15 @@ def _build_demo_catalog() -> _InlineCatalog:
 
 def _build_demo_tool_executor(
     catalog: _InlineCatalog,
-    memory: InMemoryMemoryStore,
+    memory: InMemoryMemoryStore | PersistentMemoryStore,
+    memory_dir: str | Path | None = None,
 ) -> GovernedToolExecutor:
     registry = InMemoryToolRegistry(catalog)
     guard = CompositeToolExecutionGuard()
     executor = GovernedToolExecutor(registry=registry, guard=guard)
     executor.register_handler("mail.list_new_messages", _mail_list_handler)
 
-    system_handlers = SystemToolHandlers(memory=memory)
+    system_handlers = SystemToolHandlers(memory=memory, memory_dir=memory_dir)
     for tool_name, handler in system_handlers.get_handlers().items():
         executor.register_handler(tool_name, handler)
 
@@ -155,6 +163,83 @@ def build_demo_runtime(event_log_path: str | Path = "robot_events.jsonl") -> tup
     return robot.runtime, robot.bus
 
 
+def build_kernel_for_instance(
+    *,
+    home_dir: str | Path,
+    robot_id: str = "main",
+    robot_name: str | None = None,
+    event_log_path: str | Path | None = None,
+    llm: LLMPort | None = None,
+    default_output_target: ReplyTarget | None = None,
+) -> tuple["DigitalRobotKernel", SemanticBus, PersistentMemoryStore]:
+    """Build a fully wired kernel from an onboarded robot instance.
+
+    This uses the real firmware, memory documents, and tool wiring from
+    the instance workspace — no WebSocket or service layer overhead.
+    Ideal for integration tests that exercise the full context-assembly
+    and planning pipeline.
+    """
+    from src.runtime.kernel import DigitalRobotKernel
+
+    instance = resolve_robot_instance(
+        robot_id=robot_id,
+        robot_name=robot_name,
+        home_override=home_dir,
+    )
+
+    # Auto-resolve LLM from robot.yaml if not explicitly provided
+    if llm is None:
+        from src.configuration import _load_yaml, read_secret, robot_config_path
+        robot_cfg_path = robot_config_path(instance.paths.workspace_dir)
+        if robot_cfg_path.exists():
+            robot_cfg = _load_yaml(robot_cfg_path)
+            llm = create_llm_provider(
+                robot_cfg,
+                secret_resolver=lambda key: read_secret(
+                    key,
+                    instance.paths.instance_env_path,
+                    global_fallback=instance.paths.global_env_path,
+                ),
+            )
+
+    log_path = Path(event_log_path) if event_log_path else instance.paths.logs_dir / "events.jsonl"
+    event_log = EventLog(str(log_path))
+    bus = SemanticBus()
+    firmware = MarkdownFirmwareStore(instance.paths.firmware_dir)
+    memory_store = PersistentMemoryStore(instance.paths.workspace_dir / "memory_data")
+    memory_documents = MarkdownMemoryDocumentStore(instance.paths.memory_dir)
+    catalog = _build_demo_catalog()
+    tool_executor, registry, catalog = _build_demo_tool_executor(
+        catalog, memory_store, memory_dir=instance.paths.memory_dir,
+    )
+    context_assembler = DefaultContextAssembler(
+        firmware=firmware,
+        memory_documents=memory_documents,
+        memory_store=memory_store,
+        tool_registry=registry,
+        tool_catalog=catalog,
+        system_tool_definitions=ALL_SYSTEM_TOOLS,
+    )
+    # Register a sink for each channel referenced by the default output target.
+    egress: dict[str, Any] = {}
+    if default_output_target is not None:
+        egress[default_output_target.channel] = _NullEgress()
+    channel_hub = ChannelHub(ingress_ports=[], egress_ports=egress)
+
+    kernel = DigitalRobotKernel(
+        robot_id=instance.robot_id,
+        default_output_target=default_output_target,
+        message_delivery=channel_hub,
+        tool_executor=tool_executor,
+        context_assembler=context_assembler,
+        planner=LLMPlanner(llm=llm),
+        memory=memory_store,
+        telemetry=Telemetry(event_log),
+        bus=bus,
+    )
+    return kernel, bus, memory_store
+
+
 def build_websocket_service(
     *,
     robot_id: str = "main",
@@ -188,7 +273,24 @@ def build_websocket_service(
     memory_documents = MarkdownMemoryDocumentStore(instance.paths.memory_dir)
     default_output_target = None
     catalog = _build_demo_catalog()
-    tool_executor, registry, catalog = _build_demo_tool_executor(catalog, memory_store)
+    tool_executor, registry, catalog = _build_demo_tool_executor(
+        catalog, memory_store, memory_dir=instance.paths.memory_dir,
+    )
+
+    # Resolve LLM provider from robot.yaml if not explicitly provided
+    if llm is None:
+        from src.configuration import _load_yaml, read_secret, robot_config_path
+        robot_cfg_path = robot_config_path(instance.paths.workspace_dir)
+        if robot_cfg_path.exists():
+            robot_cfg = _load_yaml(robot_cfg_path)
+            llm = create_llm_provider(
+                robot_cfg,
+                secret_resolver=lambda key: read_secret(
+                    key,
+                    instance.paths.instance_env_path,
+                    global_fallback=instance.paths.global_env_path,
+                ),
+            )
     context_assembler = DefaultContextAssembler(
         firmware=firmware,
         memory_documents=memory_documents,
@@ -256,8 +358,6 @@ def build_websocket_service(
     )
 
     def _onboard(payload: dict[str, object]) -> dict[str, object]:
-        copy_global_access_token = bool(payload.get("copy_global_access_token"))
-        copy_global_admin_token = bool(payload.get("copy_global_admin_token"))
         requested_access_token = str(payload.get("access_token") or "")
         requested_admin_token = str(payload.get("admin_token") or "")
         applied = onboard_robot_instance(
@@ -272,38 +372,6 @@ def build_websocket_service(
             auto_approve_loopback=instance.auto_approve_loopback,
             poll_interval_seconds=instance.poll_interval_seconds,
         )
-        if copy_global_access_token and not requested_access_token:
-            copy_secret(
-                applied.access_token_env,
-                source=global_env_path(home_dir),
-                target=applied.paths.instance_env_path,
-            )
-            applied = resolve_robot_instance(
-                robot_id=applied.robot_id,
-                robot_name=applied.robot_name,
-                home_override=home_dir,
-                bind_override=instance.bind,
-                port_override=ws_channel.bound_port or instance.port,
-                admin_token_override=requested_admin_token if requested_admin_token else None,
-                auto_approve_loopback_override=instance.auto_approve_loopback,
-                poll_interval_override=instance.poll_interval_seconds,
-            )
-        if copy_global_admin_token and not requested_admin_token:
-            copy_secret(
-                applied.admin_token_env,
-                source=global_env_path(home_dir),
-                target=applied.paths.instance_env_path,
-            )
-            applied = resolve_robot_instance(
-                robot_id=applied.robot_id,
-                robot_name=applied.robot_name,
-                home_override=home_dir,
-                bind_override=instance.bind,
-                port_override=ws_channel.bound_port or instance.port,
-                access_token_override=applied.access_token if applied.access_token else None,
-                auto_approve_loopback_override=instance.auto_approve_loopback,
-                poll_interval_override=instance.poll_interval_seconds,
-            )
         ws_channel.update_auth_config(
             access_token=applied.access_token,
             admin_token=applied.admin_token,
@@ -323,10 +391,6 @@ def build_websocket_service(
             "workspace_path": str(applied.paths.workspace_dir),
             "access_token_env": applied.access_token_env,
             "admin_token_env": applied.admin_token_env,
-            "adopted_from_global": {
-                "access_token": copy_global_access_token and has_secret(applied.access_token_env, applied.paths.instance_env_path),
-                "admin_token": copy_global_admin_token and has_secret(applied.admin_token_env, applied.paths.instance_env_path),
-            },
         }
 
     robot.set_onboarding_handler(_onboard)

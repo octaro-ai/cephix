@@ -210,8 +210,9 @@ def resolve_robot_instance(
     port = preferred_port if respect_port_override and port_override is not None else find_free_port(bind=bind, preferred=preferred_port)
     access_token_env = str(robot_ws.get("access_token_env") or entry_ws.get("access_token_env") or websocket_defaults.get("access_token_env") or _robot_secret_env_var(robot_id, "WS_ACCESS_TOKEN"))
     admin_token_env = str(robot_ws.get("admin_token_env") or entry_ws.get("admin_token_env") or websocket_defaults.get("admin_token_env") or _robot_secret_env_var(robot_id, "WS_ADMIN_TOKEN"))
-    access_token = access_token_override if access_token_override is not None else read_secret(access_token_env, instance_env)
-    admin_token = admin_token_override if admin_token_override is not None else read_secret(admin_token_env, instance_env)
+    global_env = global_env_path(home_override)
+    access_token = access_token_override if access_token_override is not None else read_secret(access_token_env, instance_env, global_fallback=global_env)
+    admin_token = admin_token_override if admin_token_override is not None else read_secret(admin_token_env, instance_env, global_fallback=global_env)
     auto_approve_loopback = (
         auto_approve_loopback_override
         if auto_approve_loopback_override is not None
@@ -308,6 +309,11 @@ def onboard_robot_instance(
             "auto_approve_loopback": instance.auto_approve_loopback,
         },
         "runtime": {"poll_interval_seconds": instance.poll_interval_seconds},
+        "llm": {
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-20250514",
+            "api_key_env": "ANTHROPIC_API_KEY",
+        },
     }
     save_robot_config(robot_cfg, instance.paths.robot_config_path)
 
@@ -416,12 +422,25 @@ def _robot_secret_env_var(robot_id: str, suffix: str) -> str:
     return f"CEPHIX_{slug}_{suffix}"
 
 
-def read_secret(key: str, source: str | Path) -> str:
-    return _read_env_map(Path(source)).get(key, "")
+def read_secret(
+    key: str,
+    source: str | Path,
+    *,
+    global_fallback: str | Path | None = None,
+) -> str:
+    """Resolve a secret with layered fallback: instance .env → global .env → OS env."""
+    value = _read_env_map(Path(source)).get(key, "")
+    if value:
+        return value
+    if global_fallback is not None:
+        value = _read_env_map(Path(global_fallback)).get(key, "")
+        if value:
+            return value
+    return os.environ.get(key, "")
 
 
-def has_secret(key: str, source: str | Path) -> bool:
-    return bool(read_secret(key, source))
+def has_secret(key: str, source: str | Path, *, global_fallback: str | Path | None = None) -> bool:
+    return bool(read_secret(key, source, global_fallback=global_fallback))
 
 
 def copy_secret(key: str, *, source: str | Path, target: str | Path) -> bool:

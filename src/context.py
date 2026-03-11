@@ -42,7 +42,7 @@ class MarkdownMemoryDocumentStore:
         self.root = Path(root)
 
     def get_documents(self, event: RobotEvent, user_id: str) -> dict[str, str]:
-        names = ["IDENTITY.md", "TOOLS.md", "DIRECTORY.md", "CORE_MEMORIES.md", "MEMORY.md"]
+        names = ["BOOTSTRAP.md", "IDENTITY.md", "TOOLS.md", "DIRECTORY.md", "CORE_MEMORIES.md", "MEMORY.md"]
         if event.event_type != "heartbeat.tick" and user_id != "system":
             names.append("USER.md")
 

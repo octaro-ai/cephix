@@ -6,6 +6,7 @@ These are mounted automatically by the ContextAssembler.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from src.domain import ExecutionContext
@@ -118,12 +119,77 @@ CORE_MEMORY_UPDATE = ToolDefinition(
 
 CORE_MEMORY_BUDGET = 2000
 
+SELF_DOCUMENT_LIST = ToolDefinition(
+    name="document.list",
+    description=(
+        "List all editable memory documents (e.g. IDENTITY.md, USER.md, MEMORY.md). "
+        "Firmware documents (AGENTS.md, POLICY.md, CONSTITUTION.md) are read-only."
+    ),
+    parameters=[],
+    metadata={"system_tool": True},
+)
+
+SELF_DOCUMENT_READ = ToolDefinition(
+    name="document.read",
+    description="Read one of the robot's own memory documents by filename.",
+    parameters=[
+        ToolParameter(
+            name="filename",
+            type="string",
+            description="Document filename (e.g. 'IDENTITY.md', 'USER.md', 'MEMORY.md', 'BOOTSTRAP.md')",
+        ),
+    ],
+    metadata={"system_tool": True},
+)
+
+SELF_DOCUMENT_WRITE = ToolDefinition(
+    name="document.write",
+    description=(
+        "Overwrite one of the robot's own memory documents. "
+        "Only memory documents may be written (IDENTITY.md, USER.md, MEMORY.md, etc.). "
+        "Firmware documents are protected and cannot be modified."
+    ),
+    parameters=[
+        ToolParameter(
+            name="filename",
+            type="string",
+            description="Document filename (e.g. 'IDENTITY.md', 'USER.md', 'MEMORY.md')",
+        ),
+        ToolParameter(
+            name="content",
+            type="string",
+            description="New content for the document (replaces existing).",
+        ),
+    ],
+    metadata={"system_tool": True},
+)
+
+SELF_DOCUMENT_DELETE = ToolDefinition(
+    name="document.delete",
+    description=(
+        "Delete one of the robot's own memory documents. "
+        "Use this to remove one-time documents like BOOTSTRAP.md after they have been processed."
+    ),
+    parameters=[
+        ToolParameter(
+            name="filename",
+            type="string",
+            description="Document filename to delete (e.g. 'BOOTSTRAP.md')",
+        ),
+    ],
+    metadata={"system_tool": True},
+)
+
 ALL_SYSTEM_TOOLS: list[ToolDefinition] = [
     MEMORY_READ,
     MEMORY_WRITE,
     MEMORY_SEARCH,
     CORE_MEMORY_READ,
     CORE_MEMORY_UPDATE,
+    SELF_DOCUMENT_LIST,
+    SELF_DOCUMENT_READ,
+    SELF_DOCUMENT_WRITE,
+    SELF_DOCUMENT_DELETE,
     PROCEDURE_PROPOSE,
 ]
 
@@ -131,6 +197,9 @@ ALL_SYSTEM_TOOLS: list[ToolDefinition] = [
 # ---------------------------------------------------------------------------
 # Handler factory
 # ---------------------------------------------------------------------------
+
+
+_FIRMWARE_FILES = frozenset({"AGENTS.md", "POLICY.md", "CONSTITUTION.md", "HEARTBEAT.md"})
 
 
 class SystemToolHandlers:
@@ -145,9 +214,11 @@ class SystemToolHandlers:
         self,
         *,
         memory: MemoryPort,
+        memory_dir: str | Path | None = None,
         procedure_sink: _ProcedureSinkPort | None = None,
     ) -> None:
         self._memory = memory
+        self._memory_dir = Path(memory_dir) if memory_dir else None
         self._procedure_sink = procedure_sink
 
     def get_handlers(self) -> dict[str, Any]:
@@ -157,6 +228,10 @@ class SystemToolHandlers:
             "memory.search": self._handle_memory_search,
             "core_memory.read": self._handle_core_memory_read,
             "core_memory.update": self._handle_core_memory_update,
+            "document.list": self._handle_self_document_list,
+            "document.read": self._handle_self_document_read,
+            "document.write": self._handle_self_document_write,
+            "document.delete": self._handle_self_document_delete,
             "procedure.propose": self._handle_procedure_propose,
         }
 
@@ -223,6 +298,68 @@ class SystemToolHandlers:
 
         self._memory.set_core_memory(user_id, content)
         return {"stored": True, "user_id": user_id, "length": len(content), "budget": CORE_MEMORY_BUDGET}
+
+    # -- document.list --------------------------------------------------
+
+    def _handle_self_document_list(self, ctx: ExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        if self._memory_dir is None:
+            return {"error": "No memory directory configured."}
+        files = []
+        for path in sorted(self._memory_dir.glob("*.md")):
+            files.append({
+                "filename": path.name,
+                "size": path.stat().st_size,
+                "editable": path.name not in _FIRMWARE_FILES,
+            })
+        return {"documents": files}
+
+    # -- document.read --------------------------------------------------
+
+    def _handle_self_document_read(self, ctx: ExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        if self._memory_dir is None:
+            return {"error": "No memory directory configured."}
+        filename = str(arguments["filename"])
+        if "/" in filename or "\\" in filename or ".." in filename:
+            return {"error": "Invalid filename."}
+        path = self._memory_dir / filename
+        if not path.exists():
+            return {"filename": filename, "content": "", "exists": False}
+        return {
+            "filename": filename,
+            "content": path.read_text(encoding="utf-8"),
+            "exists": True,
+        }
+
+    # -- document.write -------------------------------------------------
+
+    def _handle_self_document_write(self, ctx: ExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        if self._memory_dir is None:
+            return {"error": "No memory directory configured."}
+        filename = str(arguments["filename"])
+        if "/" in filename or "\\" in filename or ".." in filename:
+            return {"error": "Invalid filename."}
+        if filename in _FIRMWARE_FILES:
+            return {"error": f"{filename} is firmware and read-only. Only memory documents can be written."}
+        content = str(arguments["content"])
+        path = self._memory_dir / filename
+        path.write_text(content, encoding="utf-8")
+        return {"written": True, "filename": filename, "length": len(content)}
+
+    # -- document.delete ------------------------------------------------
+
+    def _handle_self_document_delete(self, ctx: ExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        if self._memory_dir is None:
+            return {"error": "No memory directory configured."}
+        filename = str(arguments["filename"])
+        if "/" in filename or "\\" in filename or ".." in filename:
+            return {"error": "Invalid filename."}
+        if filename in _FIRMWARE_FILES:
+            return {"error": f"{filename} is firmware and cannot be deleted."}
+        path = self._memory_dir / filename
+        if not path.exists():
+            return {"deleted": False, "filename": filename, "reason": "File does not exist."}
+        path.unlink()
+        return {"deleted": True, "filename": filename}
 
     # -- procedure.propose ---------------------------------------------------
 

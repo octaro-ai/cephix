@@ -8,6 +8,14 @@ dependencies = ["aiohttp>=3.9", "PyYAML>=6.0"]
 [project.optional-dependencies]
 cli = ["rich>=13.7"]
 dev = ["pytest>=8.0"]
+anthropic = [
+    "anthropic>=0.40",
+]
+openai = [
+    "openai>=1.50",
+]
+litellm = ["litellm>=1.50"]
+all-llm = ["anthropic>=0.40", "openai>=1.50", "litellm>=1.50"]
 
 [build-system]
 requires = ["setuptools>=68"]

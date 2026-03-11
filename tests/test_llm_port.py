@@ -182,7 +182,7 @@ class MessageBuildingTests(unittest.TestCase):
         messages_captured: list[list[LLMMessage]] = []
 
         def capture_fn(messages: list[LLMMessage], tools: Any) -> LLMCompletion:
-            messages_captured.append(messages)
+            messages_captured.append(list(messages))
             return LLMCompletion(content="OK")
 
         provider = StubLLMProvider(response_fn=capture_fn)
@@ -203,7 +203,7 @@ class MessageBuildingTests(unittest.TestCase):
         messages_captured: list[list[LLMMessage]] = []
 
         def capture_fn(messages: list[LLMMessage], tools: Any) -> LLMCompletion:
-            messages_captured.append(messages)
+            messages_captured.append(list(messages))
             return LLMCompletion(content="OK")
 
         provider = StubLLMProvider(response_fn=capture_fn)
@@ -224,7 +224,7 @@ class MessageBuildingTests(unittest.TestCase):
         messages_captured: list[list[LLMMessage]] = []
 
         def capture_fn(messages: list[LLMMessage], tools: Any) -> LLMCompletion:
-            messages_captured.append(messages)
+            messages_captured.append(list(messages))
             return LLMCompletion(content="OK")
 
         provider = StubLLMProvider(response_fn=capture_fn)

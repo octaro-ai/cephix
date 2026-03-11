@@ -168,10 +168,9 @@ class KernelComponentTests(unittest.TestCase):
                 default_output_target=None,
             )
 
-            with self.assertRaisesRegex(RuntimeError, "No reply target available"):
-                kernel.handle_event(RobotEvent(event_id="evt-1", event_type="cron.fired", source_channel="cron"))
-
-            self.assertIn('"event_type": "run.failed"', log_path.read_text(encoding="utf-8"))
+            kernel.handle_event(RobotEvent(event_id="evt-1", event_type="cron.fired", source_channel="cron"))
+            # Response is silently dropped — no crash, no run.failed
+            self.assertNotIn('"event_type": "run.failed"', log_path.read_text(encoding="utf-8"))
 
     def test_unavailable_delivery_channel_fails(self) -> None:
         class DirectivePlanner:

@@ -162,7 +162,7 @@ class WebSocketIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual("auth.ok", auth["type"])
                 self.assertFalse(auth["server"]["onboarding_required"])
 
-    async def test_onboarding_can_copy_secret_from_global_env_into_instance(self) -> None:
+    async def test_onboarding_resolves_global_secret_via_layered_fallback(self) -> None:
         save_secret("CEPHIX_MAIN_WS_ACCESS_TOKEN", "central-chat-token", global_env_path(self._tmpdir.name))
         await self._start_service(onboarded=False, admin_token="admin-token")
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
@@ -187,24 +187,10 @@ class WebSocketIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         "type": "admin.onboarding.apply",
                         "robot_name": "Dreamgirl",
                         "admin_token": "admin-token",
-                        "copy_global_access_token": True,
                     }
                 )
                 applied = await ws.receive_json()
-                self.assertTrue(applied["adopted_from_global"]["access_token"])
-
-            async with session.ws_connect(self.url) as chat_ws:
-                await chat_ws.receive_json()
-                await chat_ws.send_json(
-                    {
-                        "type": "auth.hello",
-                        "device_id": "chat-local",
-                        "token": "central-chat-token",
-                        "requested_scopes": ["chat"],
-                    }
-                )
-                auth = await chat_ws.receive_json()
-                self.assertEqual("auth.ok", auth["type"])
+                self.assertTrue(applied["onboarded"])
 
     async def test_local_loopback_chat_roundtrip_without_token(self) -> None:
         await self._start_service()

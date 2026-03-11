@@ -384,4 +384,5 @@ class DigitalRobotKernel:
             return target
         if self.default_output_target is not None:
             return self.default_output_target
-        raise RuntimeError("No reply target available for finalized response")
+        # No target available — caller will treat None as "drop the response".
+        return None

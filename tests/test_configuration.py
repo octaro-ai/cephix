@@ -71,7 +71,7 @@ class ConfigurationTests(unittest.TestCase):
                 self.assertNotEqual(occupied_port, instance.port)
                 self.assertGreater(instance.port, 0)
 
-    def test_global_env_is_not_used_as_runtime_secret_source(self) -> None:
+    def test_global_env_is_used_as_fallback_for_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             global_secret_file = global_env_path(tmpdir)
             save_secret("CEPHIX_DREAMGIRL_WS_ACCESS_TOKEN", "central-secret", global_secret_file)
@@ -88,7 +88,49 @@ class ConfigurationTests(unittest.TestCase):
                 home_override=tmpdir,
             )
 
-            self.assertEqual("", instance.access_token)
+            self.assertEqual("central-secret", instance.access_token)
+
+    def test_instance_env_overrides_global_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            global_secret_file = global_env_path(tmpdir)
+            save_secret("CEPHIX_DREAMGIRL_WS_ACCESS_TOKEN", "central-secret", global_secret_file)
+
+            instance = onboard_robot_instance(
+                robot_id="dreamgirl",
+                robot_name="Dreamgirl",
+                home_override=tmpdir,
+                access_token="instance-secret",
+            )
+
+            resolved = resolve_robot_instance(
+                robot_id="dreamgirl",
+                robot_name="Dreamgirl",
+                home_override=tmpdir,
+            )
+
+            self.assertEqual("instance-secret", resolved.access_token)
+
+    def test_os_env_is_used_as_last_fallback(self) -> None:
+        import os
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_key = "CEPHIX_ENVTEST_WS_ACCESS_TOKEN"
+            os.environ[env_key] = "from-os-env"
+            try:
+                onboard_robot_instance(
+                    robot_id="envtest",
+                    robot_name="EnvTest",
+                    home_override=tmpdir,
+                )
+
+                instance = resolve_robot_instance(
+                    robot_id="envtest",
+                    robot_name="EnvTest",
+                    home_override=tmpdir,
+                )
+
+                self.assertEqual("from-os-env", instance.access_token)
+            finally:
+                del os.environ[env_key]
 
 
 if __name__ == "__main__":

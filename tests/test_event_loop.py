@@ -44,7 +44,8 @@ class EventLoopTests(unittest.TestCase):
 
         did_run = loop.run_once()
 
-        self.assertTrue(did_run)
+        # Heartbeats return False (idle) so the service loop sleeps.
+        self.assertFalse(did_run)
         self.assertEqual("evt-heartbeat", kernel.handled_events[0].event_id)
 
     def test_heartbeat_is_not_called_when_external_event_exists(self) -> None:

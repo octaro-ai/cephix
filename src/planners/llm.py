@@ -51,6 +51,7 @@ class LLMPlanner:
             messages=self._conversation_history,
             tools=planning_context.tool_schemas or None,
         )
+        self._append_assistant_message(completion)
         return self._completion_to_plan(completion)
 
     def revise_plan_after_tool(
@@ -79,6 +80,7 @@ class LLMPlanner:
             messages=self._conversation_history,
             tools=planning_context.tool_schemas or None,
         )
+        self._append_assistant_message(completion)
         return self._completion_to_plan(completion)
 
     # -- Message building ----------------------------------------------------
@@ -155,6 +157,19 @@ class LLMPlanner:
             goal="LLM-generated plan",
             steps=steps,
         )
+
+    def _append_assistant_message(self, completion: LLMCompletion) -> None:
+        """Record the assistant's response in conversation history.
+
+        This is critical for multi-turn tool flows: Anthropic (and others)
+        require the assistant's tool_use message to appear before
+        any tool_result messages.
+        """
+        self._conversation_history.append(LLMMessage(
+            role="assistant",
+            content=completion.content,
+            tool_calls=completion.tool_calls if completion.tool_calls else None,
+        ))
 
     def _find_tool_call_id(self, tool_name: str) -> str:
         """Find the call ID from the last assistant message's tool_calls."""
