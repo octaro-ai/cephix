@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.bus import SemanticBus
-from src.configuration import load_global_secret_candidates, onboard_robot_instance, resolve_robot_instance
+from src.configuration import load_global_secret_candidates, onboard_robot_instance, resolve_robot_instance, slugify_robot_id
 from src.control import InMemoryPairingRegistry, RobotControlPlane
 from src.context import DefaultContextAssembler, FirmwareHeartbeat, MarkdownFirmwareStore, MarkdownMemoryDocumentStore
 from src.domain import ExecutionContext, MessageRecord, ReplyTarget, RobotEvent
@@ -361,9 +361,11 @@ def build_websocket_service(
         requested_access_token = str(payload.get("access_token") or "")
         requested_admin_token = str(payload.get("admin_token") or "")
         llm_payload = dict(payload.get("llm") or {}) if isinstance(payload.get("llm"), dict) else {}
+        chosen_name = str(payload.get("robot_name") or robot.robot_name)
+        chosen_id = slugify_robot_id(chosen_name)
         applied = onboard_robot_instance(
-            robot_id=robot.robot_id,
-            robot_name=str(payload.get("robot_name") or robot.robot_name),
+            robot_id=chosen_id,
+            robot_name=chosen_name,
             home_override=home_dir,
             bind_override=instance.bind,
             port_override=ws_channel.bound_port or instance.port,
@@ -379,7 +381,9 @@ def build_websocket_service(
             admin_token=applied.admin_token,
             auto_approve_loopback=applied.auto_approve_loopback,
         )
+        robot.robot_id = applied.robot_id
         robot.robot_name = applied.robot_name
+        robot.control_plane.robot_id = applied.robot_id
         robot.control_plane.robot_name = applied.robot_name
         robot.set_onboarded(applied.onboarded)
 
