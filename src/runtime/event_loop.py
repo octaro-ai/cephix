@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable
+
 from src.domain import RobotEvent
 from src.ports import EventSourcePort, HeartbeatPort
 from src.runtime.kernel import DigitalRobotKernel
@@ -19,10 +21,12 @@ class RuntimeEventLoop:
         kernel: DigitalRobotKernel,
         event_source: EventSourcePort | None = None,
         heartbeat: HeartbeatPort | None = None,
+        heartbeat_enabled: Callable[[], bool] | None = None,
     ) -> None:
         self.kernel = kernel
         self.event_source = event_source
         self.heartbeat = heartbeat
+        self._heartbeat_enabled = heartbeat_enabled or (lambda: True)
         self.queue: list[RobotEvent] = []
 
     def push_event(self, event: RobotEvent) -> None:
@@ -34,7 +38,7 @@ class RuntimeEventLoop:
 
         # Heartbeats fire only when idle and are treated as background work
         # — they do NOT count as "did work" so the service loop sleeps.
-        if not self.queue and self.heartbeat is not None:
+        if not self.queue and self.heartbeat is not None and self._heartbeat_enabled():
             heartbeat_event = self.heartbeat.build_idle_event()
             if heartbeat_event is not None:
                 self.kernel.handle_event(heartbeat_event)

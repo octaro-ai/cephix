@@ -103,6 +103,11 @@ def _build_cli_ui(
 
 
 def main(argv: list[str] | None = None) -> None:
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    )
     parser = argparse.ArgumentParser(prog="cephix")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -159,11 +164,12 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.command == "serve":
+        from src.configuration import slugify_robot_id
         asyncio.run(
             _run_server(
                 host=args.host,
                 port=args.port,
-                robot_id=args.robot,
+                robot_id=slugify_robot_id(args.robot),
                 robot_name=args.name or None,
                 home_dir=args.home or None,
                 event_log=args.event_log,

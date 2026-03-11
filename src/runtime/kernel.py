@@ -101,6 +101,11 @@ class DigitalRobotKernel:
                 actor="executive.kernel",
                 payload={"final_state": self._state.value, "error": str(exc)},
             )
+            # Deliver an error message back to the user so the chat doesn't hang.
+            target = self._resolve_delivery_target(event, None)
+            if target is not None:
+                error_text = f"[Fehler] {exc.__class__.__name__}: {exc}"
+                self.message_delivery.send(target, OutboundMessage(text=error_text))
             raise
 
     # ------------------------------------------------------------------
@@ -193,8 +198,12 @@ class DigitalRobotKernel:
             first_step = self._require_next_step(current_plan)
 
             if first_step.kind == "tool_call":
-                current_plan = self._act_on_tool_call(
-                    ctx, event, current_plan, first_step, tool_results, planning_context,
+                # Execute ALL consecutive tool_call steps before revising.
+                # LLM APIs (e.g. Anthropic) require every tool_use in an
+                # assistant message to have a matching tool_result in the
+                # immediately following user turn.
+                current_plan = self._act_on_tool_calls(
+                    ctx, event, current_plan, tool_results, planning_context,
                 )
                 continue
 
@@ -203,52 +212,58 @@ class DigitalRobotKernel:
 
             raise RuntimeError(f"Unknown step type: {first_step.kind}")
 
-    def _act_on_tool_call(
+    def _act_on_tool_calls(
         self,
         ctx: ExecutionContext,
         event: RobotEvent,
         current_plan: Plan,
-        step: PlanStep,
         tool_results: dict[str, Any],
         planning_context: PlanningContext,
     ) -> Plan:
+        """Execute all consecutive tool_call steps, then revise once."""
         self._state = RobotState.ACTING
-        tool_name = step.tool_name
-        tool_arguments = step.tool_arguments or {}
-        assert tool_name is not None
+        batch_results: dict[str, Any] = {}
 
-        self.bus.publish(
-            "command",
-            "tool.requested",
-            {"tool": tool_name, "arguments": tool_arguments},
-        )
-        self.telemetry.emit(
-            ctx=ctx,
-            event_type="tool.requested",
-            actor="executive.kernel",
-            payload={
-                "tool": tool_name,
-                "arguments": tool_arguments,
-                "reason": step.reason,
-            },
-        )
+        for step in current_plan.steps:
+            if step.kind != "tool_call":
+                break
+            tool_name = step.tool_name
+            tool_arguments = step.tool_arguments or {}
+            assert tool_name is not None
 
-        result = self.tool_executor.execute(ctx, tool_name, tool_arguments)
-        tool_results[tool_name] = result
+            self.bus.publish(
+                "command",
+                "tool.requested",
+                {"tool": tool_name, "arguments": tool_arguments},
+            )
+            self.telemetry.emit(
+                ctx=ctx,
+                event_type="tool.requested",
+                actor="executive.kernel",
+                payload={
+                    "tool": tool_name,
+                    "arguments": tool_arguments,
+                    "reason": step.reason,
+                },
+            )
 
-        self.telemetry.emit(
-            ctx=ctx,
-            event_type="tool.completed",
-            actor="tool.layer",
-            payload={
-                "tool": tool_name,
-                "success": True,
-                "result_count": len(result) if isinstance(result, list) else None,
-            },
-        )
+            result = self.tool_executor.execute(ctx, tool_name, tool_arguments)
+            tool_results[tool_name] = result
+            batch_results[tool_name] = result
+
+            self.telemetry.emit(
+                ctx=ctx,
+                event_type="tool.completed",
+                actor="tool.layer",
+                payload={
+                    "tool": tool_name,
+                    "success": True,
+                    "result_count": len(result) if isinstance(result, list) else None,
+                },
+            )
 
         revised = self.planner.revise_plan_after_tool(
-            ctx, event, current_plan, tool_results, planning_context,
+            ctx, event, current_plan, batch_results, planning_context,
         )
         self.telemetry.emit(
             ctx=ctx,

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
 from src.llm.models import LLMCompletion, LLMMessage
 from src.llm.ports import LLMPort
+
+logger = logging.getLogger(__name__)
 
 
 def create_llm_provider(
@@ -44,6 +47,7 @@ def create_llm_provider(
     # Cloud providers need an API key — fall back to keyword mode without one.
     _REQUIRES_API_KEY = {"anthropic", "openai"}
     if provider_name in _REQUIRES_API_KEY and not api_key:
+        logger.warning("No API key found for %s (env var: %s) — falling back to keyword mode", provider_name, api_key_env)
         return None
 
     if provider_name == "anthropic":

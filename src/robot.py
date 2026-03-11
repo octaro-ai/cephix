@@ -78,7 +78,12 @@ class DigitalRobot:
             memory_backend_name=memory_backend_name,
             tool_execution_backend_name=tool_execution_backend_name,
         )
-        self.runtime = RuntimeEventLoop(self.kernel, event_source, heartbeat)
+        self.runtime = RuntimeEventLoop(
+            self.kernel,
+            event_source,
+            heartbeat,
+            heartbeat_enabled=lambda: self._onboarded,
+        )
 
     @property
     def onboarded(self) -> bool:

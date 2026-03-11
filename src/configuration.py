@@ -202,6 +202,7 @@ def resolve_robot_instance(
     admin_token_override: str | None = None,
     auto_approve_loopback_override: bool | None = None,
     poll_interval_override: float | None = None,
+    workspace_override: str | Path | None = None,
 ) -> RobotInstanceConfig:
     cfg = load_home_config(home_override)
     home = home_dir(home_override)
@@ -212,7 +213,12 @@ def resolve_robot_instance(
     runtime_defaults = defaults.get("runtime", {})
 
     entry = next((item for item in robots if item.get("id") == robot_id), None)
-    workspace_dir = Path(str(entry.get("workspace"))) if entry and entry.get("workspace") else home / "robots" / robot_id
+    if workspace_override is not None:
+        workspace_dir = Path(workspace_override)
+    elif entry and entry.get("workspace"):
+        workspace_dir = Path(str(entry.get("workspace")))
+    else:
+        workspace_dir = home / "robots" / robot_id
     robot_cfg_path = (
         Path(str(entry.get("config_path")))
         if entry and entry.get("config_path")
@@ -301,6 +307,7 @@ def onboard_robot_instance(
     auto_approve_loopback: bool | None = None,
     poll_interval_seconds: float | None = None,
     llm_config: dict[str, str] | None = None,
+    workspace_override: str | Path | None = None,
 ) -> RobotInstanceConfig:
     instance = resolve_robot_instance(
         robot_id=robot_id,
@@ -311,6 +318,7 @@ def onboard_robot_instance(
         respect_port_override=respect_port_override,
         auto_approve_loopback_override=auto_approve_loopback,
         poll_interval_override=poll_interval_seconds,
+        workspace_override=workspace_override,
     )
     cfg = load_home_config(home_override)
     robots = [item for item in list(cfg.get("robots", [])) if item.get("id") != robot_id]

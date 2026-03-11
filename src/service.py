@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from src.domain import ControlRequest
 from src.ports import ChannelControlPort, ChannelInfoPort, ChannelLifecyclePort
 from src.robot import DigitalRobot
+
+logger = logging.getLogger(__name__)
 
 
 class RobotService:
@@ -37,7 +40,11 @@ class RobotService:
         try:
             while not self._stop_event.is_set():
                 did_control_work = self._dispatch_control_requests()
-                did_work = self.runtime.run_once() or did_control_work
+                try:
+                    did_work = self.runtime.run_once() or did_control_work
+                except Exception:
+                    logger.exception("Error while processing event")
+                    did_work = True
                 # Always yield to the event loop so async WS sends can progress.
                 await asyncio.sleep(0 if did_work else self.poll_interval_seconds)
         finally:

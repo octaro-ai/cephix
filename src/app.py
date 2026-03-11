@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from src.bus import SemanticBus
 from src.configuration import load_global_secret_candidates, onboard_robot_instance, resolve_robot_instance, slugify_robot_id
@@ -389,6 +392,7 @@ def build_websocket_service(
             auto_approve_loopback=instance.auto_approve_loopback,
             poll_interval_seconds=instance.poll_interval_seconds,
             llm_config=llm_payload or None,
+            workspace_override=instance.paths.workspace_dir,
         )
         ws_channel.update_auth_config(
             access_token=applied.access_token,
@@ -397,7 +401,6 @@ def build_websocket_service(
         )
         robot.robot_id = applied.robot_id
         robot.robot_name = applied.robot_name
-        robot.control_plane.robot_id = applied.robot_id
         robot.control_plane.robot_name = applied.robot_name
         robot.set_onboarded(applied.onboarded)
 
@@ -415,6 +418,10 @@ def build_websocket_service(
                 ),
             )
             robot.kernel.planner._llm = new_llm
+            if new_llm is None:
+                logger.warning("LLM provider is None after onboarding — keyword fallback active")
+            else:
+                logger.info("LLM provider hot-reloaded: %s", type(new_llm).__name__)
 
         return {
             "onboarded": applied.onboarded,
