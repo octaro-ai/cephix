@@ -360,6 +360,7 @@ def build_websocket_service(
     def _onboard(payload: dict[str, object]) -> dict[str, object]:
         requested_access_token = str(payload.get("access_token") or "")
         requested_admin_token = str(payload.get("admin_token") or "")
+        llm_payload = dict(payload.get("llm") or {}) if isinstance(payload.get("llm"), dict) else {}
         applied = onboard_robot_instance(
             robot_id=robot.robot_id,
             robot_name=str(payload.get("robot_name") or robot.robot_name),
@@ -371,6 +372,7 @@ def build_websocket_service(
             admin_token=requested_admin_token,
             auto_approve_loopback=instance.auto_approve_loopback,
             poll_interval_seconds=instance.poll_interval_seconds,
+            llm_config=llm_payload or None,
         )
         ws_channel.update_auth_config(
             access_token=applied.access_token,
@@ -380,6 +382,22 @@ def build_websocket_service(
         robot.robot_name = applied.robot_name
         robot.control_plane.robot_name = applied.robot_name
         robot.set_onboarded(applied.onboarded)
+
+        # Hot-reload LLM provider from the freshly written robot.yaml.
+        from src.configuration import _load_yaml, read_secret, robot_config_path
+        fresh_cfg_path = robot_config_path(applied.paths.workspace_dir)
+        if fresh_cfg_path.exists():
+            fresh_cfg = _load_yaml(fresh_cfg_path)
+            new_llm = create_llm_provider(
+                fresh_cfg,
+                secret_resolver=lambda key: read_secret(
+                    key,
+                    applied.paths.instance_env_path,
+                    global_fallback=applied.paths.global_env_path,
+                ),
+            )
+            robot.kernel.planner._llm = new_llm
+
         return {
             "onboarded": applied.onboarded,
             "robot_id": applied.robot_id,

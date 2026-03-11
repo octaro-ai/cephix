@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import platform
 import secrets
 import signal
@@ -27,6 +28,7 @@ class _RichSupport:
 class CliUI:
     def __init__(self, support: _RichSupport) -> None:
         self._console = support.console_cls()
+        self._stderr = support.console_cls(stderr=True)
         self._panel_cls = support.panel_cls
         self._pretty_cls = support.pretty_cls
         self._prompt_cls = support.prompt_cls
@@ -44,10 +46,10 @@ class CliUI:
         self._console.print(f"[bold green]{text}[/]")
 
     def print_warning(self, text: str) -> None:
-        self._console.print(f"[bold yellow]{text}[/]", stderr=True)
+        self._stderr.print(f"[bold yellow]{text}[/]")
 
     def print_error(self, text: str) -> None:
-        self._console.print(f"[bold red]{text}[/]", stderr=True)
+        self._stderr.print(f"[bold red]{text}[/]")
 
     def print_response(self, text: str) -> None:
         self._console.print(self._panel_cls(text, title="Robot", border_style="green"))
@@ -570,6 +572,46 @@ async def _handle_admin_mode_input(
     ui.print_error("[error] unknown admin command")
 
 
+_LLM_PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
+    "anthropic": {"model": "claude-sonnet-4-20250514", "api_key_env": "ANTHROPIC_API_KEY"},
+    "openai": {"model": "gpt-4o", "api_key_env": "OPENAI_API_KEY"},
+    "litellm": {"model": "anthropic/claude-sonnet-4-20250514", "api_key_env": ""},
+}
+
+
+def _collect_llm_config(ui: CliUI) -> dict[str, str]:
+    """Interactively collect LLM provider settings during onboarding."""
+    if not ui.confirm("Configure an LLM provider?", default=True):
+        return {}
+
+    providers = list(_LLM_PROVIDER_DEFAULTS.keys())
+    ui.print_info(f"Available providers: {', '.join(providers)}")
+    provider = ui.prompt("LLM provider", default="anthropic").strip().lower()
+
+    if provider not in _LLM_PROVIDER_DEFAULTS:
+        ui.print_warning(f"Unknown provider '{provider}'. Skipping LLM configuration.")
+        return {}
+
+    defaults = _LLM_PROVIDER_DEFAULTS[provider]
+    model = ui.prompt("Model", default=defaults["model"]).strip()
+    api_key_env = ui.prompt("API key env var", default=defaults["api_key_env"]).strip()
+
+    api_key_value = ""
+    if api_key_env:
+        if api_key_env not in os.environ:
+            if ui.confirm(f"'{api_key_env}' not found in environment. Enter the key now?", default=True):
+                api_key_value = ui.prompt("API key", password=True).strip()
+        else:
+            ui.print_success(f"'{api_key_env}' found in environment.")
+
+    config: dict[str, str] = {"provider": provider, "model": model}
+    if api_key_env:
+        config["api_key_env"] = api_key_env
+    if api_key_value:
+        config["api_key_value"] = api_key_value
+    return config
+
+
 async def _run_onboarding_wizard(
     ws: aiohttp.ClientWebSocketResponse,
     *,
@@ -589,6 +631,10 @@ async def _run_onboarding_wizard(
     ui.print_json(status, title="Onboarding")
     default_name = str(status.get("robot_name") or robot_name or robot_id)
     chosen_name = ui.prompt("Robot name", default=default_name).strip() or default_name
+
+    # -- LLM provider selection ------------------------------------------------
+    llm_config = _collect_llm_config(ui)
+
     global_candidates = dict(status.get("global_secret_candidates") or {})
     access_token_env = str(status.get("access_token_env") or "")
     admin_token_env = str(status.get("admin_token_env") or "")
@@ -621,16 +667,17 @@ async def _run_onboarding_wizard(
             password=True,
         ).strip()
 
-    await ws.send_json(
-        {
-            "type": "admin.onboarding.apply",
-            "robot_name": chosen_name,
-            "admin_token": chosen_admin_token,
-            "access_token": chosen_access_token,
-            "copy_global_access_token": copy_global_access_token and not chosen_access_token,
-            "copy_global_admin_token": copy_global_admin_token and not chosen_admin_token,
-        }
-    )
+    apply_payload: dict[str, Any] = {
+        "type": "admin.onboarding.apply",
+        "robot_name": chosen_name,
+        "admin_token": chosen_admin_token,
+        "access_token": chosen_access_token,
+        "copy_global_access_token": copy_global_access_token and not chosen_access_token,
+        "copy_global_admin_token": copy_global_admin_token and not chosen_admin_token,
+    }
+    if llm_config:
+        apply_payload["llm"] = llm_config
+    await ws.send_json(apply_payload)
     result = await _wait_for_control_message(control_queue, accepted_types={"admin.onboarding.apply", "error"})
     if result.get("type") == "error":
         ui.print_error(f"[error] {result.get('content', 'Onboarding failed')}")

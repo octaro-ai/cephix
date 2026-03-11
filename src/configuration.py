@@ -270,6 +270,7 @@ def onboard_robot_instance(
     admin_token: str | None = None,
     auto_approve_loopback: bool | None = None,
     poll_interval_seconds: float | None = None,
+    llm_config: dict[str, str] | None = None,
 ) -> RobotInstanceConfig:
     instance = resolve_robot_instance(
         robot_id=robot_id,
@@ -309,11 +310,13 @@ def onboard_robot_instance(
             "auto_approve_loopback": instance.auto_approve_loopback,
         },
         "runtime": {"poll_interval_seconds": instance.poll_interval_seconds},
-        "llm": {
-            "provider": "anthropic",
-            "model": "claude-sonnet-4-20250514",
-            "api_key_env": "ANTHROPIC_API_KEY",
-        },
+    }
+    # LLM section: use caller-provided config, fall back to Anthropic defaults.
+    effective_llm = llm_config or {}
+    robot_cfg["llm"] = {
+        "provider": effective_llm.get("provider", "anthropic"),
+        "model": effective_llm.get("model", "claude-sonnet-4-20250514"),
+        "api_key_env": effective_llm.get("api_key_env", "ANTHROPIC_API_KEY"),
     }
     save_robot_config(robot_cfg, instance.paths.robot_config_path)
 
@@ -321,6 +324,12 @@ def onboard_robot_instance(
         save_secret(instance.access_token_env, access_token, instance.paths.instance_env_path)
     if admin_token is not None and admin_token != "":
         save_secret(instance.admin_token_env, admin_token, instance.paths.instance_env_path)
+
+    # Persist LLM API key to instance .env if provided directly.
+    llm_api_key_value = (effective_llm.get("api_key_value") or "").strip()
+    llm_api_key_env = robot_cfg["llm"].get("api_key_env", "")
+    if llm_api_key_value and llm_api_key_env:
+        save_secret(llm_api_key_env, llm_api_key_value, instance.paths.instance_env_path)
 
     ensure_robot_workspace(workspace_dir=instance.paths.workspace_dir, robot_name=robot_name or instance.robot_name)
 
