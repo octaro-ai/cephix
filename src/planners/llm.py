@@ -18,6 +18,7 @@ from src.domain import (
     PlanStep,
     PlanningContext,
     RobotEvent,
+    ToolResult,
 )
 from src.llm.models import LLMCompletion, LLMMessage
 from src.llm.ports import LLMPort
@@ -59,21 +60,23 @@ class LLMPlanner:
         ctx: ExecutionContext,
         event: RobotEvent,
         previous_plan: Plan,
-        results: dict[str, object],
+        results: list[ToolResult],
         planning_context: PlanningContext,
     ) -> Plan:
         if self._llm is None:
-            return self._keyword_revise_plan(planning_context, results)
+            # Keyword fallback expects a dict keyed by tool_name.
+            results_dict = {r.tool_name: r.result for r in results}
+            return self._keyword_revise_plan(planning_context, results_dict)
 
-        # Append tool results to conversation history.
-        for tool_name, result in results.items():
-            # Find the matching tool_call id from the last assistant message.
-            call_id = self._find_tool_call_id(tool_name)
+        # Append tool results to conversation history using the exact call_id
+        # from the LLM's tool_use blocks — this correctly handles duplicate
+        # tool names and preserves ordering.
+        for tr in results:
             self._conversation_history.append(LLMMessage(
                 role="tool",
-                content=json.dumps(result, default=str, ensure_ascii=False),
-                tool_call_id=call_id,
-                name=tool_name,
+                content=json.dumps(tr.result, default=str, ensure_ascii=False),
+                tool_call_id=tr.call_id,
+                name=tr.tool_name,
             ))
 
         completion = self._llm.complete(
@@ -143,6 +146,7 @@ class LLMPlanner:
                     reason=f"LLM requested tool call: {tc.name}",
                     tool_name=tc.name,
                     tool_arguments=tc.arguments,
+                    tool_call_id=tc.id,
                 ))
         else:
             steps.append(PlanStep(
@@ -170,15 +174,6 @@ class LLMPlanner:
             content=completion.content,
             tool_calls=completion.tool_calls if completion.tool_calls else None,
         ))
-
-    def _find_tool_call_id(self, tool_name: str) -> str:
-        """Find the call ID from the last assistant message's tool_calls."""
-        for msg in reversed(self._conversation_history):
-            if msg.role == "assistant" and msg.tool_calls:
-                for tc in msg.tool_calls:
-                    if tc.name == tool_name:
-                        return tc.id
-        return new_id("call")
 
     # -- Keyword fallback (no LLM) ------------------------------------------
 

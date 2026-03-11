@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Protocol, runtime_checkable
 
 
-from src.domain import ControlRequest, ExecutionContext, OutboundMessage, Plan, PlanningContext, ReplyTarget, RobotEvent
+from src.domain import ControlRequest, ExecutionContext, OutboundMessage, Plan, PlanningContext, ReplyTarget, RobotEvent, ToolResult
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +180,7 @@ class PlannerPort(Protocol):
         ctx: ExecutionContext,
         event: RobotEvent,
         previous_plan: Plan,
-        results: dict[str, Any],
+        results: list[ToolResult],
         planning_context: PlanningContext,
     ) -> Plan:
         ...

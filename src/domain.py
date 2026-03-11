@@ -71,12 +71,21 @@ class MessageRecord:
 
 
 @dataclass
+class ToolResult:
+    """Result of a single tool execution, keyed by LLM tool_call_id."""
+    call_id: str
+    tool_name: str
+    result: Any
+
+
+@dataclass
 class PlanStep:
     step_id: str
     kind: str
     reason: str
     tool_name: str | None = None
     tool_arguments: dict[str, Any] | None = None
+    tool_call_id: str | None = None
     response_text: str | None = None
     delivery_directive: DeliveryDirective | None = None
 

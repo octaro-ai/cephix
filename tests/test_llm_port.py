@@ -148,7 +148,12 @@ class LLMPlannerWithProviderTests(unittest.TestCase):
         self.assertEqual("tool_call", plan1.steps[0].kind)
 
         # Revise after tool execution
-        results = {"mail.list_new_messages": [{"id": 1}, {"id": 2}, {"id": 3}]}
+        from src.domain import ToolResult
+        results = [ToolResult(
+            call_id=plan1.steps[0].tool_call_id or "call-1",
+            tool_name="mail.list_new_messages",
+            result=[{"id": 1}, {"id": 2}, {"id": 3}],
+        )]
         plan2 = planner.revise_plan_after_tool(ctx, event, plan1, results, planning_context)
         self.assertEqual("finalize", plan2.steps[0].kind)
         self.assertEqual("Du hast 3 neue Nachrichten.", plan2.steps[0].response_text)

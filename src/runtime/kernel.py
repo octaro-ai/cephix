@@ -13,6 +13,7 @@ from src.domain import (
     ReplyTarget,
     RobotEvent,
     RobotState,
+    ToolResult,
 )
 from src.ports import (
     BusPort,
@@ -222,7 +223,7 @@ class DigitalRobotKernel:
     ) -> Plan:
         """Execute all consecutive tool_call steps, then revise once."""
         self._state = RobotState.ACTING
-        batch_results: dict[str, Any] = {}
+        batch_results: list[ToolResult] = []
 
         for step in current_plan.steps:
             if step.kind != "tool_call":
@@ -249,7 +250,11 @@ class DigitalRobotKernel:
 
             result = self.tool_executor.execute(ctx, tool_name, tool_arguments)
             tool_results[tool_name] = result
-            batch_results[tool_name] = result
+            batch_results.append(ToolResult(
+                call_id=step.tool_call_id or step.step_id,
+                tool_name=tool_name,
+                result=result,
+            ))
 
             self.telemetry.emit(
                 ctx=ctx,

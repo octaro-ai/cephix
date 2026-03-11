@@ -165,15 +165,24 @@ class FirmwareHeartbeat:
         *,
         firmware: FirmwarePort,
         default_output_target: ReplyTarget | None = None,
+        interval_seconds: float = 300.0,
     ) -> None:
         self.firmware = firmware
         self.default_output_target = default_output_target
+        self._interval = interval_seconds
+        self._last_tick: float = 0.0
 
     def build_idle_event(self) -> RobotEvent | None:
+        import time
+        now = time.monotonic()
+        if now - self._last_tick < self._interval:
+            return None
+
         instruction = self.firmware.get_event_instruction("heartbeat.tick")
         if not instruction.strip():
             return None
 
+        self._last_tick = now
         return RobotEvent(
             event_id=new_id("evt"),
             event_type="heartbeat.tick",

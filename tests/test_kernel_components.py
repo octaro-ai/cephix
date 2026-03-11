@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 from src.bus import SemanticBus
-from src.domain import DeliveryDirective, Plan, PlanStep, PlanningContext, ReplyTarget, RobotEvent
+from src.domain import DeliveryDirective, Plan, PlanStep, PlanningContext, ReplyTarget, RobotEvent, ToolResult
 from src.memory import InMemoryMemoryStore
 from src.runtime.kernel import DigitalRobotKernel
 from src.telemetry import EventLog, Telemetry
@@ -238,6 +238,178 @@ class KernelComponentTests(unittest.TestCase):
             self.assertIn('"firmware_documents_count": 2', log_text)
             self.assertIn('"memory_documents_count": 1', log_text)
             self.assertIn('"facts_count": 1', log_text)
+
+
+    def test_parallel_tool_calls_all_results_passed_to_revise(self) -> None:
+        """When the planner returns multiple tool_call steps, the kernel
+        executes all of them and passes all results to revise_plan_after_tool.
+        This is critical because LLM APIs require every tool_use to have a
+        matching tool_result in the following message."""
+
+        received_results: list[list[ToolResult]] = []
+
+        class ParallelToolPlanner:
+            def create_initial_plan(self, ctx, event, planning_context) -> Plan:
+                return Plan(
+                    plan_id=new_id("plan"),
+                    goal="Call two tools in parallel",
+                    steps=[
+                        PlanStep(
+                            step_id=new_id("step"),
+                            kind="tool_call",
+                            reason="Check memory",
+                            tool_name="memory.recall",
+                            tool_arguments={"query": "pending"},
+                            tool_call_id="call-aaa",
+                        ),
+                        PlanStep(
+                            step_id=new_id("step"),
+                            kind="tool_call",
+                            reason="Check inbox",
+                            tool_name="mail.list_new_messages",
+                            tool_arguments={"limit": 5},
+                            tool_call_id="call-bbb",
+                        ),
+                    ],
+                )
+
+            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context) -> Plan:
+                received_results.append(list(results))
+                return Plan(
+                    plan_id=new_id("plan"),
+                    goal="Finalize",
+                    steps=[
+                        PlanStep(
+                            step_id=new_id("step"),
+                            kind="finalize",
+                            reason="Done",
+                            response_text="All tools executed.",
+                        )
+                    ],
+                )
+
+        class RecordingToolExecutor:
+            def __init__(self):
+                self.calls: list[tuple[str, dict]] = []
+
+            def execute(self, ctx, tool_name, arguments):
+                self.calls.append((tool_name, arguments))
+                return {"tool": tool_name, "ok": True}
+
+        tool_executor = RecordingToolExecutor()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "events.jsonl"
+            kernel, delivery, _ = self._build_kernel(
+                planner=ParallelToolPlanner(),
+                tool_executor=tool_executor,
+                log_path=log_path,
+                default_output_target=ReplyTarget(channel="ws", recipient_id="user-1"),
+            )
+
+            kernel.handle_event(RobotEvent(
+                event_id="evt-1",
+                event_type="message.received",
+                source_channel="ws",
+                sender_id="user-1",
+                text="Do both things",
+                reply_target=ReplyTarget(channel="ws", recipient_id="user-1"),
+            ))
+
+            # Both tools were executed.
+            self.assertEqual(2, len(tool_executor.calls))
+            self.assertEqual("memory.recall", tool_executor.calls[0][0])
+            self.assertEqual("mail.list_new_messages", tool_executor.calls[1][0])
+
+            # Revise was called exactly once with both results.
+            self.assertEqual(1, len(received_results))
+            batch = received_results[0]
+            self.assertEqual(2, len(batch))
+
+            # Results carry the correct call_ids from the plan steps.
+            self.assertEqual("call-aaa", batch[0].call_id)
+            self.assertEqual("memory.recall", batch[0].tool_name)
+            self.assertEqual("call-bbb", batch[1].call_id)
+            self.assertEqual("mail.list_new_messages", batch[1].tool_name)
+
+            # Final response was delivered.
+            self.assertEqual("All tools executed.", delivery.sent[0][1])
+
+    def test_duplicate_tool_names_preserve_distinct_call_ids(self) -> None:
+        """When the LLM calls the same tool twice with different arguments,
+        both results must carry distinct call_ids."""
+
+        received_results: list[list[ToolResult]] = []
+
+        class DuplicateToolPlanner:
+            def create_initial_plan(self, ctx, event, planning_context) -> Plan:
+                return Plan(
+                    plan_id=new_id("plan"),
+                    goal="Call same tool twice",
+                    steps=[
+                        PlanStep(
+                            step_id=new_id("step"),
+                            kind="tool_call",
+                            reason="First recall",
+                            tool_name="memory.recall",
+                            tool_arguments={"query": "alpha"},
+                            tool_call_id="call-111",
+                        ),
+                        PlanStep(
+                            step_id=new_id("step"),
+                            kind="tool_call",
+                            reason="Second recall",
+                            tool_name="memory.recall",
+                            tool_arguments={"query": "beta"},
+                            tool_call_id="call-222",
+                        ),
+                    ],
+                )
+
+            def revise_plan_after_tool(self, ctx, event, previous_plan, results, planning_context) -> Plan:
+                received_results.append(list(results))
+                return Plan(
+                    plan_id=new_id("plan"),
+                    goal="Finalize",
+                    steps=[PlanStep(step_id=new_id("step"), kind="finalize", reason="Done", response_text="OK")],
+                )
+
+        call_count = [0]
+
+        class CountingToolExecutor:
+            def execute(self, ctx, tool_name, arguments):
+                call_count[0] += 1
+                return {"call_number": call_count[0], "query": arguments.get("query")}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir) / "events.jsonl"
+            kernel, delivery, _ = self._build_kernel(
+                planner=DuplicateToolPlanner(),
+                tool_executor=CountingToolExecutor(),
+                log_path=log_path,
+                default_output_target=ReplyTarget(channel="ws", recipient_id="u1"),
+            )
+
+            kernel.handle_event(RobotEvent(
+                event_id="evt-1",
+                event_type="message.received",
+                source_channel="ws",
+                sender_id="u1",
+                text="Recall twice",
+                reply_target=ReplyTarget(channel="ws", recipient_id="u1"),
+            ))
+
+            # Both calls executed.
+            self.assertEqual(2, call_count[0])
+
+            # Results have distinct call_ids even though tool_name is the same.
+            batch = received_results[0]
+            self.assertEqual(2, len(batch))
+            self.assertEqual("call-111", batch[0].call_id)
+            self.assertEqual("call-222", batch[1].call_id)
+            # Each got its own result.
+            self.assertEqual(1, batch[0].result["call_number"])
+            self.assertEqual(2, batch[1].result["call_number"])
 
 
 if __name__ == "__main__":
