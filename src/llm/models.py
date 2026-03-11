@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+# Callback type for streaming: called with each text token as it arrives.
+TokenCallback = Callable[[str], None]
 
 
 @dataclass

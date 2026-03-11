@@ -113,24 +113,37 @@ def main(argv: list[str] | None = None) -> None:
 
     subparsers.add_parser("demo", help="Run the local demo flow.")
 
-    serve_parser = subparsers.add_parser("serve", help="Start the robot runtime and channels.")
-    serve_parser.add_argument("--robot", default="main")
-    serve_parser.add_argument("--name", default="")
-    serve_parser.add_argument("--home", default="")
-    serve_parser.add_argument("--host", default="")
-    serve_parser.add_argument("--port", type=int, default=None)
-    serve_parser.add_argument("--event-log", default="robot_events.jsonl")
-    serve_parser.add_argument("--token", default="")
-    serve_parser.add_argument("--admin-token", default="")
-    serve_parser.add_argument("--no-loopback-auto-approve", action="store_true")
+    init_parser = subparsers.add_parser("init", help="Initialise a new robot instance.")
+    init_parser.add_argument("robot_id", help="Unique robot identifier (will be slugified).")
+    init_parser.add_argument("--name", default="", help="Human-readable display name (defaults to robot_id).")
+    init_parser.add_argument("--home", default="")
+    init_parser.add_argument("--host", default="")
+    init_parser.add_argument("--port", type=int, default=None)
+    init_parser.add_argument("--token", default="", help="Access token for chat connections.")
+    init_parser.add_argument("--admin-token", default="", help="Admin token for management.")
+
+    list_parser = subparsers.add_parser("list", help="List all initialised robots.")
+    list_parser.add_argument("--home", default="")
+
+    start_parser = subparsers.add_parser("start", help="Start (power on) a robot.")
+    start_parser.add_argument("robot_id", nargs="?", default="main", help="Robot to start (default: main).")
+    start_parser.add_argument("--home", default="")
+    start_parser.add_argument("--host", default="")
+    start_parser.add_argument("--port", type=int, default=None)
+    start_parser.add_argument("--event-log", default="robot_events.jsonl")
+    start_parser.add_argument("--token", default="")
+    start_parser.add_argument("--admin-token", default="")
+    start_parser.add_argument("--no-loopback-auto-approve", action="store_true")
 
     chat_parser = subparsers.add_parser("chat", help="Connect to a running robot over WebSocket.")
-    chat_parser.add_argument("--url", default="ws://127.0.0.1:8765/ws")
+    chat_parser.add_argument("robot_id", nargs="?", default="", help="Robot to connect to (resolves URL from config).")
+    chat_parser.add_argument("--url", default="")
+    chat_parser.add_argument("--home", default="")
     chat_parser.add_argument("--sender", default="owner")
     chat_parser.add_argument("--conversation", default="")
     chat_parser.add_argument("--debug", action="store_true")
-    chat_parser.add_argument("--token", default="")
-    chat_parser.add_argument("--admin-token", default="")
+    chat_parser.add_argument("--token", default="", help="Access token (required).")
+    chat_parser.add_argument("--admin-token", default="", help="Admin token (grants admin scope).")
     chat_parser.add_argument("--device-id", default=_default_device_id("chat"))
 
     admin_parser = subparsers.add_parser("admin", help="Administrative commands for a running robot.")
@@ -163,14 +176,30 @@ def main(argv: list[str] | None = None) -> None:
         run_demo()
         return
 
-    if args.command == "serve":
+    if args.command == "init":
+        _run_init(
+            robot_id=args.robot_id,
+            robot_name=args.name or None,
+            home_dir=args.home or None,
+            bind=args.host or None,
+            port=args.port,
+            access_token=args.token,
+            admin_token=args.admin_token,
+        )
+        return
+
+    if args.command == "list":
+        _run_list(home_dir=args.home or None)
+        return
+
+    if args.command == "start":
         from src.configuration import slugify_robot_id
         asyncio.run(
-            _run_server(
+            _run_robot(
                 host=args.host,
                 port=args.port,
-                robot_id=slugify_robot_id(args.robot),
-                robot_name=args.name or None,
+                robot_id=slugify_robot_id(args.robot_id),
+                robot_name=None,
                 home_dir=args.home or None,
                 event_log=args.event_log,
                 access_token=args.token,
@@ -181,9 +210,23 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.command == "chat":
+        chat_url = args.url
+        if args.robot_id and not chat_url:
+            from src.configuration import resolve_robot_instance, slugify_robot_id
+            slug = slugify_robot_id(args.robot_id)
+            inst = resolve_robot_instance(robot_id=slug, home_override=args.home or None)
+            # Prefer runtime.json (actual bound port) over config (preferred port).
+            runtime_file = inst.paths.workspace_dir / "runtime.json"
+            if runtime_file.exists():
+                from pathlib import Path
+                rt = json.loads(runtime_file.read_text(encoding="utf-8"))
+                chat_url = f"ws://{rt['bind']}:{rt['port']}/ws"
+            else:
+                chat_url = f"ws://{inst.bind}:{inst.port}/ws"
+        chat_url = chat_url or "ws://127.0.0.1:8765/ws"
         asyncio.run(
             _run_chat(
-                url=args.url,
+                url=chat_url,
                 sender_id=args.sender,
                 conversation_id=args.conversation,
                 debug=args.debug,
@@ -214,7 +257,109 @@ def _default_device_id(kind: str) -> str:
     return f"cephix-{kind}-{hostname}"
 
 
-async def _run_server(
+def _run_init(
+    *,
+    robot_id: str,
+    robot_name: str | None,
+    home_dir: str | None,
+    bind: str | None,
+    port: int | None,
+    access_token: str,
+    admin_token: str,
+) -> None:
+    from src.configuration import (
+        _KNOWN_API_KEY_VARS,
+        init_robot_instance,
+        read_secret,
+        save_robot_config,
+        save_secret,
+        seed_global_env,
+        slugify_robot_id,
+        _load_yaml,
+    )
+
+    ui = _build_cli_ui()
+    slug = slugify_robot_id(robot_id)
+    name = robot_name or robot_id
+
+    # Seed global .env from CWD .env before init (so API keys are available).
+    seeded = seed_global_env(home_override=home_dir)
+    for key in seeded:
+        ui.print_info(f"Seeded {key} into global .env")
+
+    try:
+        instance = init_robot_instance(
+            robot_id=slug,
+            robot_name=name,
+            home_override=home_dir,
+            bind=bind,
+            port=port,
+        )
+    except RuntimeError as exc:
+        ui.print_error(str(exc))
+        sys.exit(1)
+
+    # Generate tokens if not provided.
+    effective_access = access_token or secrets.token_urlsafe(24)
+    effective_admin = admin_token or secrets.token_urlsafe(24)
+    save_secret(instance.access_token_env, effective_access, instance.paths.instance_env_path)
+    save_secret(instance.admin_token_env, effective_admin, instance.paths.instance_env_path)
+
+    # Auto-detect LLM provider from available API keys.
+    _PROVIDER_FOR_KEY = {
+        "ANTHROPIC_API_KEY": ("anthropic", "claude-sonnet-4-20250514"),
+        "OPENAI_API_KEY": ("openai", "gpt-4o"),
+    }
+    llm_provider = None
+    llm_model = None
+    llm_api_key_env = None
+    for key_var in _KNOWN_API_KEY_VARS:
+        if read_secret(key_var, instance.paths.instance_env_path, global_fallback=instance.paths.global_env_path):
+            llm_provider, llm_model = _PROVIDER_FOR_KEY.get(key_var, (None, None))
+            llm_api_key_env = key_var
+            break
+
+    if llm_provider:
+        # Update robot.yaml with LLM section.
+        robot_cfg = _load_yaml(instance.paths.robot_config_path)
+        robot_cfg["llm"] = {
+            "provider": llm_provider,
+            "model": llm_model,
+            "api_key_env": llm_api_key_env,
+        }
+        save_robot_config(robot_cfg, instance.paths.robot_config_path)
+
+    ui.print_success(f"Robot '{instance.robot_name}' initialised.")
+    ui.print_info(f"  ID:           {instance.robot_id}")
+    ui.print_info(f"  Workspace:    {instance.paths.workspace_dir}")
+    ui.print_info(f"  Access token: {effective_access}")
+    ui.print_info(f"  Admin token:  {effective_admin}")
+    if llm_provider:
+        ui.print_info(f"  LLM:          {llm_provider} / {llm_model}")
+    else:
+        ui.print_warning("  No LLM API key found — robot will use keyword fallback.")
+        ui.print_info("  Set ANTHROPIC_API_KEY or OPENAI_API_KEY in ~/.cephix/.env")
+    ui.print_info(f"\nStart with:  cephix start {instance.robot_id}")
+
+
+def _run_list(*, home_dir: str | None) -> None:
+    from src.configuration import list_robot_instances
+
+    ui = _build_cli_ui()
+    instances = list_robot_instances(home_override=home_dir)
+
+    if not instances:
+        ui.print_warning("No robots initialised yet. Run: cephix init <name>")
+        return
+
+    ui.print_info(f"{'ID':<20} {'Name':<25} {'Onboarded':<12} {'Workspace'}")
+    ui.print_info("-" * 80)
+    for inst in instances:
+        onboarded = "yes" if inst.onboarded else "no"
+        ui.print_info(f"{inst.robot_id:<20} {inst.robot_name:<25} {onboarded:<12} {inst.paths.workspace_dir}")
+
+
+async def _run_robot(
     *,
     host: str,
     port: int | None,
@@ -227,6 +372,17 @@ async def _run_server(
     auto_approve_loopback: bool,
 ) -> None:
     ui = _build_cli_ui()
+
+    # Verify robot has been initialised.
+    from src.configuration import resolve_robot_instance, is_robot_workspace_initialized
+    try:
+        inst = resolve_robot_instance(robot_id=robot_id, home_override=home_dir)
+    except Exception:
+        inst = None
+    if inst is None or not is_robot_workspace_initialized(inst.paths.workspace_dir):
+        ui.print_error(f"Robot '{robot_id}' has not been initialised yet.")
+        ui.print_info(f"Run first:  cephix init {robot_id}")
+        sys.exit(1)
 
     # Seed global .env from CWD .env (copies known API keys if not present).
     from src.configuration import seed_global_env
@@ -266,10 +422,21 @@ async def _run_server(
         await asyncio.sleep(0.01)
     actual_host = getattr(channel, "bind", host or "127.0.0.1")
     actual_port = getattr(channel, "bound_port", port or 0)
+
+    # Write runtime info so `cephix chat <robot>` can find the actual port.
+    runtime_file = inst.paths.workspace_dir / "runtime.json" if inst else None
+    if runtime_file:
+        runtime_file.write_text(
+            json.dumps({"bind": actual_host, "port": actual_port, "pid": os.getpid()}),
+            encoding="utf-8",
+        )
+
     ui.print_success(f"Cephix robot '{service.robot.robot_id}' listening on ws://{actual_host}:{actual_port}/ws")
     try:
         await stop_event.wait()
     finally:
+        if runtime_file and runtime_file.exists():
+            runtime_file.unlink(missing_ok=True)
         await service.stop()
         try:
             await task

@@ -294,6 +294,93 @@ def resolve_robot_instance(
     )
 
 
+def init_robot_instance(
+    *,
+    robot_id: str,
+    robot_name: str | None = None,
+    home_override: str | Path | None = None,
+    bind: str | None = None,
+    port: int | None = None,
+) -> RobotInstanceConfig:
+    """Initialise a new robot: create workspace, register in cephix.yaml.
+
+    This sets up the robot's *identity* (ID, name, workspace, firmware
+    templates).  Runtime configuration (LLM provider, API keys, tokens)
+    is handled later via the ``/admin`` onboarding flow.
+    """
+    resolved_name = robot_name or robot_id
+    home = home_dir(home_override)
+    workspace_dir = home / "robots" / robot_id
+
+    if is_robot_workspace_initialized(workspace_dir):
+        raise RuntimeError(
+            f"Robot '{robot_id}' is already initialised at {workspace_dir}"
+        )
+
+    ensure_robot_workspace(workspace_dir=workspace_dir, robot_name=resolved_name)
+
+    # Register in cephix.yaml.
+    cfg = load_home_config(home_override)
+    robots = [item for item in list(cfg.get("robots", [])) if item.get("id") != robot_id]
+    robots.append({
+        "id": robot_id,
+        "name": resolved_name,
+        "workspace": str(workspace_dir),
+        "config_path": str(robot_config_path(workspace_dir)),
+        "enabled": True,
+        "autostart": False,
+    })
+    cfg["robots"] = sorted(robots, key=lambda item: str(item.get("id", "")))
+    save_home_config(cfg, home_override)
+
+    # Write a minimal robot.yaml — store the *preferred* port, not a
+    # probed free port.  The runtime picks the actual port at start time.
+    resolved_bind = bind or "127.0.0.1"
+    resolved_port = port or 8765
+    robot_cfg: dict[str, Any] = {
+        "id": robot_id,
+        "name": resolved_name,
+        "enabled": True,
+        "autostart": False,
+        "websocket": {
+            "bind": resolved_bind,
+            "port": resolved_port,
+            "access_token_env": _robot_secret_env_var(robot_id, "WS_ACCESS_TOKEN"),
+            "admin_token_env": _robot_secret_env_var(robot_id, "WS_ADMIN_TOKEN"),
+            "auto_approve_loopback": True,
+        },
+        "runtime": {"poll_interval_seconds": 0.05},
+    }
+    save_robot_config(robot_cfg, robot_config_path(workspace_dir))
+
+    return resolve_robot_instance(
+        robot_id=robot_id,
+        robot_name=resolved_name,
+        home_override=home_override,
+    )
+
+
+def list_robot_instances(
+    home_override: str | Path | None = None,
+) -> list[RobotInstanceConfig]:
+    """Return all registered robot instances from cephix.yaml."""
+    cfg = load_home_config(home_override)
+    robots = list(cfg.get("robots", []))
+    result: list[RobotInstanceConfig] = []
+    for entry in robots:
+        robot_id = entry.get("id", "")
+        if not robot_id:
+            continue
+        try:
+            result.append(resolve_robot_instance(
+                robot_id=robot_id,
+                home_override=home_override,
+            ))
+        except Exception:
+            pass
+    return result
+
+
 def onboard_robot_instance(
     *,
     robot_id: str,

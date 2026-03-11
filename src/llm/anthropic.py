@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from src.llm.models import LLMCompletion, LLMMessage, LLMToolCall
+from src.llm.models import LLMCompletion, LLMMessage, LLMToolCall, TokenCallback
 
 try:
     import anthropic
@@ -60,6 +60,54 @@ class AnthropicProvider:
             kwargs["tools"], name_map = _convert_tools_to_anthropic(tools)
 
         response = self._client.messages.create(**kwargs)
+        return _parse_response(response, name_map)
+
+    def stream_complete(
+        self,
+        *,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        token_callback: TokenCallback | None = None,
+    ) -> LLMCompletion:
+        """Streaming variant of complete().
+
+        Calls *token_callback* with each text token as it arrives, then
+        returns the full LLMCompletion (identical to ``complete()``).
+        Falls back to non-streaming when *token_callback* is None.
+        """
+        if token_callback is None:
+            return self.complete(
+                messages=messages, tools=tools, model=model,
+                temperature=temperature, max_tokens=max_tokens,
+            )
+
+        system_text, api_messages = _split_system_and_messages(messages)
+        kwargs: dict[str, Any] = {
+            "model": model or self._default_model,
+            "max_tokens": max_tokens or self._default_max_tokens,
+            "messages": api_messages,
+        }
+        if system_text:
+            kwargs["system"] = system_text
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+
+        name_map: dict[str, str] = {}
+        if tools:
+            kwargs["tools"], name_map = _convert_tools_to_anthropic(tools)
+
+        with self._client.messages.stream(**kwargs) as stream:
+            for event in stream:
+                if event.type == "content_block_delta":
+                    delta = event.delta
+                    if getattr(delta, "type", "") == "text_delta":
+                        token_callback(delta.text)
+
+            response = stream.get_final_message()
+
         return _parse_response(response, name_map)
 
 
