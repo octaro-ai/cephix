@@ -221,6 +221,13 @@ async def _run_server(
     auto_approve_loopback: bool,
 ) -> None:
     ui = _build_cli_ui()
+
+    # Seed global .env from CWD .env (copies known API keys if not present).
+    from src.configuration import seed_global_env
+    seeded = seed_global_env(home_override=home_dir)
+    for key in seeded:
+        ui.print_info(f"Seeded {key} into global .env")
+
     service = build_websocket_service(
         robot_id=robot_id,
         robot_name=robot_name,
@@ -579,10 +586,20 @@ _LLM_PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
 }
 
 
-def _collect_llm_config(ui: CliUI) -> dict[str, str]:
-    """Interactively collect LLM provider settings during onboarding."""
+def _collect_llm_config(
+    ui: CliUI,
+    llm_keys_available: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Interactively collect LLM provider settings during onboarding.
+
+    *llm_keys_available* maps env-var names to masked values (e.g.
+    ``{"ANTHROPIC_API_KEY": "sk-a...xyz3"}``).  Keys that are already
+    resolved are shown for confirmation so the user can press Enter.
+    """
     if not ui.confirm("Configure an LLM provider?", default=True):
         return {}
+
+    available = llm_keys_available or {}
 
     providers = list(_LLM_PROVIDER_DEFAULTS.keys())
     ui.print_info(f"Available providers: {', '.join(providers)}")
@@ -598,11 +615,20 @@ def _collect_llm_config(ui: CliUI) -> dict[str, str]:
 
     api_key_value = ""
     if api_key_env:
-        if api_key_env not in os.environ:
-            if ui.confirm(f"'{api_key_env}' not found in environment. Enter the key now?", default=True):
-                api_key_value = ui.prompt("API key", password=True).strip()
+        masked = available.get(api_key_env, "")
+        if masked:
+            # Key already found — show masked value, Enter = keep.
+            ui.print_success(f"  ${api_key_env} ({masked})")
+            override = ui.prompt("Enter = keep, or paste a new key", default="").strip()
+            if override:
+                api_key_value = override
         else:
-            ui.print_success(f"'{api_key_env}' found in environment.")
+            ui.print_warning(f"  ${api_key_env} not found")
+            api_key_value = ui.prompt(
+                "API key (Enter = configure later in ~/.cephix/.env)",
+                default="",
+                password=True,
+            ).strip()
 
     config: dict[str, str] = {"provider": provider, "model": model}
     if api_key_env:
@@ -633,7 +659,8 @@ async def _run_onboarding_wizard(
     chosen_name = ui.prompt("Robot name", default=default_name).strip() or default_name
 
     # -- LLM provider selection ------------------------------------------------
-    llm_config = _collect_llm_config(ui)
+    llm_keys_available = dict(status.get("llm_keys_available") or {})
+    llm_config = _collect_llm_config(ui, llm_keys_available=llm_keys_available)
 
     global_candidates = dict(status.get("global_secret_candidates") or {})
     access_token_env = str(status.get("access_token_env") or "")

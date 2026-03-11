@@ -345,8 +345,20 @@ def build_websocket_service(
         ),
     )
     robot.set_onboarded(instance.onboarded)
-    robot.set_onboarding_status_provider(
-        lambda: {
+    def _onboarding_status() -> dict[str, object]:
+        from src.configuration import read_secret, _KNOWN_API_KEY_VARS
+        global_path = instance.paths.global_env_path
+        instance_path = instance.paths.instance_env_path
+
+        # Report which LLM API keys are already available (masked).
+        llm_keys: dict[str, str] = {}
+        for key_var in _KNOWN_API_KEY_VARS:
+            value = read_secret(key_var, instance_path, global_fallback=global_path)
+            if value:
+                masked = value[:4] + "..." + value[-4:] if len(value) > 12 else "****"
+                llm_keys[key_var] = masked
+
+        return {
             "access_token_env": instance.access_token_env,
             "admin_token_env": instance.admin_token_env,
             "global_secret_candidates": load_global_secret_candidates(
@@ -354,8 +366,10 @@ def build_websocket_service(
                 instance.access_token_env,
                 instance.admin_token_env,
             ),
+            "llm_keys_available": llm_keys,
         }
-    )
+
+    robot.set_onboarding_status_provider(_onboarding_status)
 
     def _onboard(payload: dict[str, object]) -> dict[str, object]:
         requested_access_token = str(payload.get("access_token") or "")

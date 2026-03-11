@@ -160,6 +160,36 @@ def save_secret(key: str, value: str, target: str | Path) -> Path:
     return target
 
 
+_KNOWN_API_KEY_VARS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+
+
+def seed_global_env(
+    *,
+    cwd: str | Path | None = None,
+    home_override: str | Path | None = None,
+) -> list[str]:
+    """Copy known API keys from CWD ``.env`` into ``~/.cephix/.env``.
+
+    Only keys that are **not already present** in the global file are copied.
+    Returns the list of keys that were seeded.
+    """
+    cwd_env = Path(cwd or Path.cwd()) / ".env"
+    if not cwd_env.exists():
+        return []
+
+    source_map = _read_env_map(cwd_env)
+    global_path = global_env_path(home_override)
+    existing = _read_env_map(global_path) if global_path.exists() else {}
+
+    seeded: list[str] = []
+    for key in _KNOWN_API_KEY_VARS:
+        value = source_map.get(key, "")
+        if value and not existing.get(key):
+            save_secret(key, value, global_path)
+            seeded.append(key)
+    return seeded
+
+
 def resolve_robot_instance(
     *,
     robot_id: str,
