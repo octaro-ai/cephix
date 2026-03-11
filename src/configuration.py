@@ -429,11 +429,16 @@ def save_robot_config(config: dict[str, Any], path: str | Path) -> Path:
 def slugify_robot_id(name: str) -> str:
     """Derive a filesystem/URL-safe robot ID from a human-readable name.
 
-    Example: ``"Dreamgirl"`` → ``"dreamgirl"``,
-             ``"My Cool Bot 3"`` → ``"my-cool-bot-3"``
+    Uses ``python-slugify`` (with ``text-unidecode``) so that unicode
+    characters are transliterated rather than dropped:
+
+        ``"Über-Bot"`` → ``"uber-bot"``
+        ``"Dreamgirl"`` → ``"dreamgirl"``
+        ``"My Cool Bot 3"`` → ``"my-cool-bot-3"``
     """
-    slug = re.sub(r"[^A-Za-z0-9]+", "-", name.strip()).strip("-").lower()
-    return slug or "robot"
+    from slugify import slugify
+    result = slugify(name, lowercase=True)
+    return result or "robot"
 
 
 def _robot_secret_env_var(robot_id: str, suffix: str) -> str:
