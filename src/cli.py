@@ -579,11 +579,141 @@ async def _handle_admin_mode_input(
     ui.print_error("[error] unknown admin command")
 
 
-_LLM_PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
-    "anthropic": {"model": "claude-sonnet-4-20250514", "api_key_env": "ANTHROPIC_API_KEY"},
-    "openai": {"model": "gpt-4o", "api_key_env": "OPENAI_API_KEY"},
-    "litellm": {"model": "anthropic/claude-sonnet-4-20250514", "api_key_env": ""},
-}
+def _pick_provider(ui: CliUI) -> ProviderInfo | None:
+    """Numbered provider picker backed by the model catalog."""
+    from src.llm.catalog import ModelCatalog, ProviderInfo
+
+    ui.print_info("  Loading model catalog...")
+    catalog = ModelCatalog()
+    providers = catalog.list_providers(preferred_only=True)
+
+    if not providers:
+        ui.print_warning("  Could not load model catalog.")
+        pid = ui.prompt("  Provider name").strip().lower()
+        key_env = ui.prompt("  API key env var", default="").strip()
+        return ProviderInfo(id=pid, label=pid, api_key_env=key_env)
+
+    ui.print_info("")
+    for i, p in enumerate(providers, 1):
+        model_count = f"[dim]({len(p.models)} models)[/dim]" if p.models else ""
+        ui.print_info(f"  [cyan bold]{i}[/]  {p.label}  {model_count}")
+    more_idx = len(providers) + 1
+    custom_idx = len(providers) + 2
+    ui.print_info(f"  [cyan bold]{more_idx}[/]  [italic]More providers...[/italic]")
+    ui.print_info(f"  [cyan bold]{custom_idx}[/]  [italic]Custom...[/italic]")
+    ui.print_info("")
+
+    raw = ui.prompt("Provider", default="1").strip()
+
+    try:
+        idx = int(raw)
+    except ValueError:
+        for p in providers:
+            if raw.lower() == p.id:
+                ui.print_success(f"  > {p.label}")
+                return p
+        ui.print_warning(f"Unknown provider '{raw}'.")
+        return None
+
+    if 1 <= idx <= len(providers):
+        chosen = providers[idx - 1]
+        ui.print_success(f"  > {chosen.label}")
+        return chosen
+
+    if idx == more_idx:
+        all_providers = catalog.list_providers(preferred_only=False)
+        ui.print_info("")
+        for i, p in enumerate(all_providers, 1):
+            ui.print_info(f"  [cyan bold]{i}[/]  {p.label}")
+        ui.print_info("")
+        raw2 = ui.prompt("Provider", default="1").strip()
+        try:
+            idx2 = int(raw2)
+            if 1 <= idx2 <= len(all_providers):
+                chosen = all_providers[idx2 - 1]
+                ui.print_success(f"  > {chosen.label}")
+                return chosen
+        except ValueError:
+            for p in all_providers:
+                if raw2.lower() == p.id:
+                    ui.print_success(f"  > {p.label}")
+                    return p
+        ui.print_warning("Invalid choice.")
+        return None
+
+    if idx == custom_idx:
+        pid = ui.prompt("  Provider name").strip().lower()
+        key_env = ui.prompt("  API key env var", default="").strip()
+        return ProviderInfo(id=pid, label=pid, api_key_env=key_env)
+
+    ui.print_warning("Invalid choice.")
+    return None
+
+
+def _pick_model(ui: CliUI, provider: ProviderInfo, *, page_size: int = 15) -> str:
+    """Paginated model picker with navigation."""
+    from src.llm.catalog import ProviderInfo
+
+    models = provider.models
+    if not models:
+        return ui.prompt("  Model ID").strip()
+
+    total = len(models)
+    offset = 0
+
+    while True:
+        page = models[offset:offset + page_size]
+        page_num = offset // page_size + 1
+        total_pages = (total + page_size - 1) // page_size
+
+        ui.print_info("")
+        for i, m in enumerate(page, 1):
+            ctx = m.context_label
+            cost = m.cost_label
+            tools = "[green]tools[/green]" if m.supports_tools else ""
+            ui.print_info(
+                f"  [cyan bold]{i:>2}[/]  {m.id:<40} "
+                f"[dim]{ctx:>6}  {cost:>12}[/dim]  {tools}"
+            )
+
+        has_prev = offset > 0
+        has_next = offset + page_size < total
+
+        nav = [f"[cyan bold]1-{len(page)}[/] select"]
+        if has_next:
+            nav.append("[cyan bold]n[/] next")
+        if has_prev:
+            nav.append("[cyan bold]p[/] prev")
+        nav.append("[cyan bold]c[/] custom")
+
+        ui.print_info(
+            f"\n  Page {page_num}/{total_pages} ({total} models)  "
+            + "  ".join(nav)
+        )
+
+        raw = ui.prompt("  >", default="1").strip()
+        cmd = raw.lower()
+
+        if cmd == "n" and has_next:
+            offset += page_size
+            continue
+        if cmd == "p" and has_prev:
+            offset -= page_size
+            continue
+        if cmd == "c":
+            return ui.prompt("  Model ID").strip()
+
+        try:
+            idx = int(cmd)
+            if 1 <= idx <= len(page):
+                chosen = page[idx - 1]
+                ui.print_success(f"  > {chosen.id}")
+                return chosen.id
+        except ValueError:
+            # User typed a model ID directly.
+            return raw
+
+        ui.print_warning("  Invalid choice.")
 
 
 def _collect_llm_config(
@@ -601,23 +731,20 @@ def _collect_llm_config(
 
     available = llm_keys_available or {}
 
-    providers = list(_LLM_PROVIDER_DEFAULTS.keys())
-    ui.print_info(f"Available providers: {', '.join(providers)}")
-    provider = ui.prompt("LLM provider", default="anthropic").strip().lower()
-
-    if provider not in _LLM_PROVIDER_DEFAULTS:
-        ui.print_warning(f"Unknown provider '{provider}'. Skipping LLM configuration.")
+    provider = _pick_provider(ui)
+    if provider is None:
         return {}
 
-    defaults = _LLM_PROVIDER_DEFAULTS[provider]
-    model = ui.prompt("Model", default=defaults["model"]).strip()
-    api_key_env = ui.prompt("API key env var", default=defaults["api_key_env"]).strip()
+    model = _pick_model(ui, provider)
+    if not model:
+        return {}
+
+    api_key_env = provider.api_key_env
 
     api_key_value = ""
     if api_key_env:
         masked = available.get(api_key_env, "")
         if masked:
-            # Key already found — show masked value, Enter = keep.
             ui.print_success(f"  ${api_key_env} ({masked})")
             override = ui.prompt("Enter = keep, or paste a new key", default="").strip()
             if override:
@@ -630,7 +757,7 @@ def _collect_llm_config(
                 password=True,
             ).strip()
 
-    config: dict[str, str] = {"provider": provider, "model": model}
+    config: dict[str, str] = {"provider": provider.id, "model": model}
     if api_key_env:
         config["api_key_env"] = api_key_env
     if api_key_value:
