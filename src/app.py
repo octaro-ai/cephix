@@ -135,6 +135,24 @@ def _build_tool_stack(
     return executor, registry, collector
 
 
+def _build_workstation_driver(ws_cfg: dict[str, Any]) -> Any | None:
+    """Create a WorkstationToolDriver from the 'workstation' section of robot.yaml."""
+    backend_type = ws_cfg.get("backend", "docker")
+    if backend_type == "docker":
+        from src.workstation.docker_backend import DockerWorkstationBackend
+        from src.workstation.driver import WorkstationToolDriver
+        backend = DockerWorkstationBackend(
+            image=ws_cfg.get("image", "ubuntu:24.04"),
+            volume=ws_cfg.get("volume", "cephix-workspace"),
+            container_name=ws_cfg.get("container_name"),
+            memory_limit=ws_cfg.get("resources", {}).get("memory", "2g"),
+            cpu_count=int(ws_cfg.get("resources", {}).get("cpus", 2)),
+        )
+        return WorkstationToolDriver(backend)
+    logger.warning("Unknown workstation backend: %s", backend_type)
+    return None
+
+
 def build_demo_robot(event_log_path: str | Path = "robot_events.jsonl") -> DigitalRobot:
     event_log = EventLog(str(event_log_path))
     telemetry = Telemetry(event_log)
@@ -214,20 +232,22 @@ def build_kernel_for_instance(
         home_override=home_dir,
     )
 
-    # Auto-resolve LLM from robot.yaml if not explicitly provided
-    if llm is None:
-        from src.configuration import _load_yaml, read_secret, robot_config_path
-        robot_cfg_path = robot_config_path(instance.paths.workspace_dir)
-        if robot_cfg_path.exists():
-            robot_cfg = _load_yaml(robot_cfg_path)
-            llm = create_llm_provider(
-                robot_cfg,
-                secret_resolver=lambda key: read_secret(
-                    key,
-                    instance.paths.instance_env_path,
-                    global_fallback=instance.paths.global_env_path,
-                ),
-            )
+    # Load robot.yaml once.
+    from src.configuration import _load_yaml, read_secret, robot_config_path
+    robot_cfg: dict[str, Any] = {}
+    robot_cfg_path = robot_config_path(instance.paths.workspace_dir)
+    if robot_cfg_path.exists():
+        robot_cfg = _load_yaml(robot_cfg_path)
+
+    if llm is None and robot_cfg:
+        llm = create_llm_provider(
+            robot_cfg,
+            secret_resolver=lambda key: read_secret(
+                key,
+                instance.paths.instance_env_path,
+                global_fallback=instance.paths.global_env_path,
+            ),
+        )
 
     log_path = Path(event_log_path) if event_log_path else instance.paths.logs_dir / "events.jsonl"
     event_log = EventLog(str(log_path))
@@ -236,6 +256,13 @@ def build_kernel_for_instance(
     memory_store = PersistentMemoryStore(instance.paths.workspace_dir / "memory_data")
     memory_documents = MarkdownMemoryDocumentStore(instance.paths.memory_dir)
     drivers = _build_demo_drivers(memory_store, memory_dir=instance.paths.memory_dir)
+
+    ws_cfg = robot_cfg.get("workstation")
+    if ws_cfg:
+        ws_driver = _build_workstation_driver(ws_cfg)
+        if ws_driver is not None:
+            drivers.append(ws_driver)
+
     tool_executor, registry, collector = _build_tool_stack(drivers)
     context_assembler = DefaultContextAssembler(
         firmware=firmware,
@@ -297,23 +324,35 @@ def build_websocket_service(
     memory_store = PersistentMemoryStore(instance.paths.workspace_dir / "memory_data")
     memory_documents = MarkdownMemoryDocumentStore(instance.paths.memory_dir)
     default_output_target = None
+
+    # Load robot.yaml once — used for LLM and workstation config.
+    from src.configuration import _load_yaml, read_secret, robot_config_path
+    robot_cfg: dict[str, Any] = {}
+    robot_cfg_path = robot_config_path(instance.paths.workspace_dir)
+    if robot_cfg_path.exists():
+        robot_cfg = _load_yaml(robot_cfg_path)
+
     drivers = _build_demo_drivers(memory_store, memory_dir=instance.paths.memory_dir)
+
+    # Workstation driver (if configured in robot.yaml).
+    ws_cfg = robot_cfg.get("workstation")
+    if ws_cfg:
+        ws_driver = _build_workstation_driver(ws_cfg)
+        if ws_driver is not None:
+            drivers.append(ws_driver)
+
     tool_executor, registry, collector = _build_tool_stack(drivers)
 
-    # Resolve LLM provider from robot.yaml if not explicitly provided
-    if llm is None:
-        from src.configuration import _load_yaml, read_secret, robot_config_path
-        robot_cfg_path = robot_config_path(instance.paths.workspace_dir)
-        if robot_cfg_path.exists():
-            robot_cfg = _load_yaml(robot_cfg_path)
-            llm = create_llm_provider(
-                robot_cfg,
-                secret_resolver=lambda key: read_secret(
-                    key,
-                    instance.paths.instance_env_path,
-                    global_fallback=instance.paths.global_env_path,
-                ),
-            )
+    # Resolve LLM provider from robot.yaml if not explicitly provided.
+    if llm is None and robot_cfg:
+        llm = create_llm_provider(
+            robot_cfg,
+            secret_resolver=lambda key: read_secret(
+                key,
+                instance.paths.instance_env_path,
+                global_fallback=instance.paths.global_env_path,
+            ),
+        )
     context_assembler = DefaultContextAssembler(
         firmware=firmware,
         memory_documents=memory_documents,
