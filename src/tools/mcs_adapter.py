@@ -1,8 +1,9 @@
 """Adapter that bridges MCS (Model Context Standard) ToolDrivers into Cephix.
 
 The MCS SDK is an external dependency.  This adapter wraps an MCS ToolDriver
-(defined here as a Protocol for decoupling) so that its tools appear in the
-Cephix ``ToolCatalogPort`` and are executable through ``ToolExecutionPort``.
+(defined here as a Protocol for decoupling) so that its tools appear as a
+standard ``ToolDriverPort`` — same interface as SystemToolDriver, domain
+drivers, etc.
 
 Usage::
 
@@ -11,18 +12,18 @@ Usage::
     mcs_driver = SomeMCSToolDriver(config=...)
     adapter = MCSToolDriverAdapter(driver=mcs_driver, namespace="mcs.crm")
 
-    # Register in the catalog
+    # Use as any ToolDriverPort
     for tool_def in adapter.list_tools():
-        catalog.register(tool_def)
+        print(tool_def.name)
 
-    # Execute through the adapter
-    result = adapter.execute("mcs.crm.search_contacts", {"query": "Doe"})
+    result = adapter.execute(ctx, "mcs.crm.search_contacts", {"query": "Doe"})
 """
 
 from __future__ import annotations
 
 from typing import Any, Protocol
 
+from src.domain import ExecutionContext
 from src.tools.models import ToolDefinition, ToolParameter
 
 
@@ -37,7 +38,7 @@ class MCSToolDriverPort(Protocol):
 
 
 class MCSToolDriverAdapter:
-    """Wraps an MCS ToolDriver into Cephix tool ports."""
+    """Wraps an MCS ToolDriver into the Cephix ToolDriverPort interface."""
 
     def __init__(self, driver: MCSToolDriverPort, namespace: str) -> None:
         self._driver = driver
@@ -52,6 +53,8 @@ class MCSToolDriverAdapter:
             return namespaced_name[len(prefix):]
         return namespaced_name
 
+    # -- ToolDriverPort interface -------------------------------------------
+
     def list_tools(self) -> list[ToolDefinition]:
         raw_tools = self._driver.list_tools()
         definitions: list[ToolDefinition] = []
@@ -59,15 +62,17 @@ class MCSToolDriverAdapter:
             definitions.append(self._convert(raw))
         return definitions
 
+    def execute(self, ctx: ExecutionContext, tool_name: str, arguments: dict[str, Any]) -> Any:
+        original_name = self._strip_namespace(tool_name)
+        return self._driver.execute_tool(original_name, arguments)
+
+    # -- Convenience --------------------------------------------------------
+
     def get_definition(self, tool_name: str) -> ToolDefinition | None:
         for defn in self.list_tools():
             if defn.name == tool_name:
                 return defn
         return None
-
-    def execute(self, tool_name: str, arguments: dict[str, Any]) -> Any:
-        original_name = self._strip_namespace(tool_name)
-        return self._driver.execute_tool(original_name, arguments)
 
     def _convert(self, raw: dict[str, Any]) -> ToolDefinition:
         raw_params = raw.get("parameters", [])

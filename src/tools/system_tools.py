@@ -1,11 +1,12 @@
 """System tools that are always available to the LLM, regardless of SOP/Skill.
 
-Three memory tools (read, write, search) and one procedure proposal tool.
-These are mounted automatically by the ContextAssembler.
+Memory, core-memory, document, and procedure tools.
+Implements ``ToolDriverPort`` so it plugs into the standard tool pipeline.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -195,19 +196,21 @@ ALL_SYSTEM_TOOLS: list[ToolDefinition] = [
 
 
 # ---------------------------------------------------------------------------
-# Handler factory
+# SystemToolDriver — implements ToolDriverPort
 # ---------------------------------------------------------------------------
 
 
 _FIRMWARE_FILES = frozenset({"AGENTS.md", "POLICY.md", "CONSTITUTION.md", "HEARTBEAT.md"})
 
+# Handler type alias (matches ToolHandler in executor.py)
+_Handler = Callable[[ExecutionContext, dict[str, Any]], Any]
 
-class SystemToolHandlers:
-    """Produces handler callables for system tools.
 
-    Each handler receives ``(ExecutionContext, dict[str, Any])`` and returns
-    a result, matching the ``ToolHandler`` signature used by
-    ``GovernedToolExecutor``.
+class SystemToolDriver:
+    """System tool driver — provides definitions AND execution.
+
+    Implements the ``ToolDriverPort`` protocol so it can be plugged into
+    a ``ToolCollector`` alongside MCS adapters, domain drivers, etc.
     """
 
     def __init__(
@@ -220,9 +223,7 @@ class SystemToolHandlers:
         self._memory = memory
         self._memory_dir = Path(memory_dir) if memory_dir else None
         self._procedure_sink = procedure_sink
-
-    def get_handlers(self) -> dict[str, Any]:
-        return {
+        self._handlers: dict[str, _Handler] = {
             "memory.read": self._handle_memory_read,
             "memory.write": self._handle_memory_write,
             "memory.search": self._handle_memory_search,
@@ -234,6 +235,18 @@ class SystemToolHandlers:
             "document.delete": self._handle_self_document_delete,
             "procedure.propose": self._handle_procedure_propose,
         }
+
+    # -- ToolDriverPort interface -------------------------------------------
+
+    def list_tools(self) -> list[ToolDefinition]:
+        return list(ALL_SYSTEM_TOOLS)
+
+    def execute(self, ctx: ExecutionContext, tool_name: str, arguments: dict[str, Any]) -> Any:
+        handler = self._handlers.get(tool_name)
+        if handler is None:
+            raise RuntimeError(f"SystemToolDriver has no handler for: {tool_name!r}")
+        return handler(ctx, arguments)
+
 
     # -- memory.read ---------------------------------------------------------
 

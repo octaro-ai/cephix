@@ -30,11 +30,13 @@ from src.memory import InMemoryMemoryStore, TruncatingCompactor
 from src.planners import LLMPlanner
 from src.runtime import DigitalRobotKernel, RuntimeEventLoop
 from src.telemetry import EventLog, Telemetry
+from src.tools.collector import ToolCollector
 from src.tools.executor import GovernedToolExecutor
 from src.tools.models import ToolDefinition, ToolParameter
 from src.tools.registry import InMemoryToolRegistry
-from src.tools.system_tools import ALL_SYSTEM_TOOLS, SystemToolHandlers
+from src.tools.system_tools import ALL_SYSTEM_TOOLS, SystemToolDriver
 from src.governance.composite import CompositeToolExecutionGuard
+from src.app import InlineToolDriver
 from src.utils import new_id
 
 
@@ -52,17 +54,6 @@ _DEMO_MESSAGES = [
         unread=True,
     ),
 ]
-
-
-class _InlineCatalog:
-    def __init__(self, definitions: list[ToolDefinition]) -> None:
-        self._defs = {d.name: d for d in definitions}
-
-    def list_available(self, *, tags: list[str] | None = None) -> list[ToolDefinition]:
-        return list(self._defs.values())
-
-    def get_definition(self, tool_name: str) -> ToolDefinition | None:
-        return self._defs.get(tool_name)
 
 
 class _StubFirmware:
@@ -102,22 +93,20 @@ def _build_kernel(
             ToolParameter(name="limit", type="integer", description="Max messages", required=False),
         ],
     )
-    catalog = _InlineCatalog([mail_tool, *ALL_SYSTEM_TOOLS])
-    registry = InMemoryToolRegistry(catalog)
+    domain_driver = InlineToolDriver()
+    domain_driver.register(mail_tool, _mail_list_handler)
+    system_driver = SystemToolDriver(memory=memory)
+    collector = ToolCollector([system_driver, domain_driver])
+    registry = InMemoryToolRegistry(collector)
     guard = CompositeToolExecutionGuard()
-    executor = GovernedToolExecutor(registry=registry, guard=guard)
-    executor.register_handler("mail.list_new_messages", _mail_list_handler)
-
-    system_handlers = SystemToolHandlers(memory=memory)
-    for tool_name, handler in system_handlers.get_handlers().items():
-        executor.register_handler(tool_name, handler)
+    executor = GovernedToolExecutor(registry=registry, guard=guard, collector=collector)
 
     context_assembler = DefaultContextAssembler(
         firmware=_StubFirmware(),
         memory_documents=_StubMemoryDocuments(),
         memory_store=memory,
         tool_registry=registry,
-        tool_catalog=catalog,
+        tool_catalog=collector,
         system_tool_definitions=ALL_SYSTEM_TOOLS,
     )
 

@@ -8,9 +8,10 @@ from typing import Any
 from src.context import DefaultContextAssembler
 from src.domain import AutonomyLevel, ExecutionContext, RobotEvent
 from src.memory import InMemoryMemoryStore
+from src.tools.collector import ToolCollector
 from src.tools.models import ToolDefinition, ToolParameter
 from src.tools.registry import InMemoryToolRegistry
-from src.tools.system_tools import ALL_SYSTEM_TOOLS, SystemToolHandlers
+from src.tools.system_tools import ALL_SYSTEM_TOOLS, SystemToolDriver
 
 
 class _StubFirmware:
@@ -26,15 +27,17 @@ class _StubMemoryDocuments:
         return {}
 
 
-class _InlineCatalog:
-    def __init__(self, definitions: list[ToolDefinition]) -> None:
-        self._defs = {d.name: d for d in definitions}
+class _StubDomainDriver:
+    """Minimal ToolDriverPort for test domain tools."""
 
-    def list_available(self, *, tags: list[str] | None = None) -> list[ToolDefinition]:
-        return list(self._defs.values())
+    def __init__(self, tools: list[ToolDefinition]) -> None:
+        self._tools = tools
 
-    def get_definition(self, tool_name: str) -> ToolDefinition | None:
-        return self._defs.get(tool_name)
+    def list_tools(self) -> list[ToolDefinition]:
+        return list(self._tools)
+
+    def execute(self, ctx: object, tool_name: str, arguments: dict) -> Any:
+        return {"stub": True, "tool": tool_name}
 
 
 _DOMAIN_TOOLS = [
@@ -47,7 +50,7 @@ class GeneralModeTests(unittest.TestCase):
     """When no SOP/Skill matches, all catalog tools are mounted (General Mode)."""
 
     def test_general_mode_mounts_all_catalog_tools(self) -> None:
-        catalog = _InlineCatalog([*_DOMAIN_TOOLS, *ALL_SYSTEM_TOOLS])
+        catalog = ToolCollector([SystemToolDriver(memory=InMemoryMemoryStore()), _StubDomainDriver(_DOMAIN_TOOLS)])
         registry = InMemoryToolRegistry(catalog)
         assembler = DefaultContextAssembler(
             firmware=_StubFirmware(),
@@ -86,7 +89,7 @@ class GeneralModeTests(unittest.TestCase):
 
     def test_sop_mode_mounts_only_required_tools_plus_system(self) -> None:
         """When an SOP matches, only SOP-required tools + system tools are mounted."""
-        catalog = _InlineCatalog([*_DOMAIN_TOOLS, *ALL_SYSTEM_TOOLS])
+        catalog = ToolCollector([SystemToolDriver(memory=InMemoryMemoryStore()), _StubDomainDriver(_DOMAIN_TOOLS)])
         registry = InMemoryToolRegistry(catalog)
 
         class StubSOPResolver:
@@ -131,7 +134,7 @@ class GeneralModeTests(unittest.TestCase):
 
     def test_registry_is_clean_per_run(self) -> None:
         """Each assemble() call starts with a clean registry."""
-        catalog = _InlineCatalog([*_DOMAIN_TOOLS, *ALL_SYSTEM_TOOLS])
+        catalog = ToolCollector([SystemToolDriver(memory=InMemoryMemoryStore()), _StubDomainDriver(_DOMAIN_TOOLS)])
         registry = InMemoryToolRegistry(catalog)
         assembler = DefaultContextAssembler(
             firmware=_StubFirmware(),
@@ -164,7 +167,7 @@ class AutonomyLevelTests(unittest.TestCase):
     """Test that autonomy levels control what gets mounted."""
 
     def _make_assembler(self, level: AutonomyLevel) -> tuple[DefaultContextAssembler, InMemoryToolRegistry]:
-        catalog = _InlineCatalog([*_DOMAIN_TOOLS, *ALL_SYSTEM_TOOLS])
+        catalog = ToolCollector([SystemToolDriver(memory=InMemoryMemoryStore()), _StubDomainDriver(_DOMAIN_TOOLS)])
         registry = InMemoryToolRegistry(catalog)
         assembler = DefaultContextAssembler(
             firmware=_StubFirmware(),
@@ -224,7 +227,7 @@ class AutonomyLevelTests(unittest.TestCase):
 
     def test_scripted_with_sop_mounts_only_required(self) -> None:
         """Even SCRIPTED mounts SOP tools when an SOP matches."""
-        catalog = _InlineCatalog([*_DOMAIN_TOOLS, *ALL_SYSTEM_TOOLS])
+        catalog = ToolCollector([SystemToolDriver(memory=InMemoryMemoryStore()), _StubDomainDriver(_DOMAIN_TOOLS)])
         registry = InMemoryToolRegistry(catalog)
 
         class StubSOPResolver:
@@ -276,12 +279,11 @@ class SystemToolHandlerTests(unittest.TestCase):
 
     def test_memory_write_and_read(self) -> None:
         memory = InMemoryMemoryStore()
-        handlers = SystemToolHandlers(memory=memory)
-        h = handlers.get_handlers()
+        driver = SystemToolDriver(memory=memory)
         ctx = self._make_ctx()
 
         # Write
-        result = h["memory.write"](ctx, {
+        result = driver.execute(ctx, "memory.write", {
             "user_id": "user-1",
             "kind": "preference",
             "content": "prefers dark mode",
@@ -290,7 +292,7 @@ class SystemToolHandlerTests(unittest.TestCase):
         self.assertTrue(result["stored"])
 
         # Read back
-        result = h["memory.read"](ctx, {"user_id": "user-1"})
+        result = driver.execute(ctx, "memory.read", {"user_id": "user-1"})
         self.assertEqual(1, len(result["facts"]))
         self.assertEqual("prefers dark mode", result["facts"][0]["content"])
 
@@ -298,11 +300,10 @@ class SystemToolHandlerTests(unittest.TestCase):
         memory = InMemoryMemoryStore()
         memory.remember_fact("user-1", "preference", "likes dark mode")
         memory.remember_fact("user-1", "task_preference", "likes summaries")
-        handlers = SystemToolHandlers(memory=memory)
-        h = handlers.get_handlers()
+        driver = SystemToolDriver(memory=memory)
         ctx = self._make_ctx()
 
-        result = h["memory.read"](ctx, {"user_id": "user-1", "kind": "preference"})
+        result = driver.execute(ctx, "memory.read", {"user_id": "user-1", "kind": "preference"})
         self.assertEqual(1, len(result["facts"]))
         self.assertEqual("likes dark mode", result["facts"][0]["content"])
 
@@ -310,11 +311,10 @@ class SystemToolHandlerTests(unittest.TestCase):
         memory = InMemoryMemoryStore()
         memory.remember_fact("user-1", "preference", "prefers concise answers")
         memory.remember_fact("user-1", "preference", "likes dark mode")
-        handlers = SystemToolHandlers(memory=memory)
-        h = handlers.get_handlers()
+        driver = SystemToolDriver(memory=memory)
         ctx = self._make_ctx()
 
-        result = h["memory.search"](ctx, {"query": "concise"})
+        result = driver.execute(ctx, "memory.search", {"query": "concise"})
         self.assertEqual(1, len(result["matches"]))
         self.assertEqual(2, result["total_searched"])
 
@@ -326,11 +326,10 @@ class SystemToolHandlerTests(unittest.TestCase):
             def upsert(self, procedure):
                 stored.append(procedure)
 
-        handlers = SystemToolHandlers(memory=memory, procedure_sink=FakeProcedureSink())
-        h = handlers.get_handlers()
+        driver = SystemToolDriver(memory=memory, procedure_sink=FakeProcedureSink())
         ctx = self._make_ctx()
 
-        result = h["procedure.propose"](ctx, {
+        result = driver.execute(ctx, "procedure.propose", {
             "name": "weekly-report.v1",
             "description": "Generate weekly status report",
             "steps": "gather data, summarize, send report",
@@ -344,11 +343,10 @@ class SystemToolHandlerTests(unittest.TestCase):
 
     def test_procedure_propose_works_without_sink(self) -> None:
         """Proposal works even without a procedure store (returns result, doesn't persist)."""
-        handlers = SystemToolHandlers(memory=InMemoryMemoryStore())
-        h = handlers.get_handlers()
+        driver = SystemToolDriver(memory=InMemoryMemoryStore())
         ctx = self._make_ctx()
 
-        result = h["procedure.propose"](ctx, {
+        result = driver.execute(ctx, "procedure.propose", {
             "name": "test.v1",
             "description": "Test procedure",
             "steps": "step one, step two",

@@ -20,10 +20,11 @@ from src.robot import DigitalRobot
 from src.runtime import RuntimeEventLoop
 from src.service import RobotService
 from src.telemetry import EventLog, FanoutEventSink, Telemetry
+from src.tools.collector import ToolCollector
 from src.tools.executor import GovernedToolExecutor
 from src.tools.models import ToolDefinition, ToolParameter
 from src.tools.registry import InMemoryToolRegistry
-from src.tools.system_tools import ALL_SYSTEM_TOOLS, SystemToolHandlers
+from src.tools.system_tools import ALL_SYSTEM_TOOLS, SystemToolDriver
 from src.utils import new_id
 from typing import Any
 
@@ -41,17 +42,29 @@ class _NullEgress:
         pass
 
 
-class _InlineCatalog:
-    """Minimal in-memory catalog for demo purposes."""
+class InlineToolDriver:
+    """Minimal tool driver for inline/demo tools."""
 
-    def __init__(self, definitions: list[ToolDefinition]) -> None:
-        self._defs = {d.name: d for d in definitions}
+    def __init__(self) -> None:
+        self._tools: dict[str, ToolDefinition] = {}
+        self._handlers: dict[str, Any] = {}
 
-    def list_available(self, *, tags: list[str] | None = None) -> list[ToolDefinition]:
-        return list(self._defs.values())
+    def register(
+        self,
+        definition: ToolDefinition,
+        handler: Any,
+    ) -> None:
+        self._tools[definition.name] = definition
+        self._handlers[definition.name] = handler
 
-    def get_definition(self, tool_name: str) -> ToolDefinition | None:
-        return self._defs.get(tool_name)
+    def list_tools(self) -> list[ToolDefinition]:
+        return list(self._tools.values())
+
+    def execute(self, ctx: ExecutionContext, tool_name: str, arguments: dict[str, Any]) -> Any:
+        handler = self._handlers.get(tool_name)
+        if handler is None:
+            raise RuntimeError(f"InlineToolDriver has no handler for: {tool_name!r}")
+        return handler(ctx, arguments)
 
 
 _DEMO_MESSAGES = [
@@ -87,8 +100,17 @@ def _mail_list_handler(ctx: ExecutionContext, arguments: dict[str, Any]) -> list
     return [m for m in _DEMO_MESSAGES if m.unread][:limit]
 
 
-def _build_demo_catalog() -> _InlineCatalog:
-    return _InlineCatalog([
+def _build_demo_drivers(
+    memory: InMemoryMemoryStore | PersistentMemoryStore,
+    memory_dir: str | Path | None = None,
+) -> list[Any]:
+    """Build the list of ToolDriverPort implementations for the demo robot."""
+    # System tools (memory, documents, procedures)
+    system_driver = SystemToolDriver(memory=memory, memory_dir=memory_dir)
+
+    # Domain tools (demo mail)
+    domain_driver = InlineToolDriver()
+    domain_driver.register(
         ToolDefinition(
             name="mail.list_new_messages",
             description="List new/unread messages from the inbox",
@@ -96,25 +118,21 @@ def _build_demo_catalog() -> _InlineCatalog:
                 ToolParameter(name="limit", type="integer", description="Max messages to return", required=False),
             ],
         ),
-        *ALL_SYSTEM_TOOLS,
-    ])
+        _mail_list_handler,
+    )
+
+    return [system_driver, domain_driver]
 
 
-def _build_demo_tool_executor(
-    catalog: _InlineCatalog,
-    memory: InMemoryMemoryStore | PersistentMemoryStore,
-    memory_dir: str | Path | None = None,
-) -> GovernedToolExecutor:
-    registry = InMemoryToolRegistry(catalog)
+def _build_tool_stack(
+    drivers: list[Any],
+) -> tuple[GovernedToolExecutor, InMemoryToolRegistry, ToolCollector]:
+    """Wire up Collector → Registry → GovernedToolExecutor from drivers."""
+    collector = ToolCollector(drivers)
+    registry = InMemoryToolRegistry(collector)
     guard = CompositeToolExecutionGuard()
-    executor = GovernedToolExecutor(registry=registry, guard=guard)
-    executor.register_handler("mail.list_new_messages", _mail_list_handler)
-
-    system_handlers = SystemToolHandlers(memory=memory, memory_dir=memory_dir)
-    for tool_name, handler in system_handlers.get_handlers().items():
-        executor.register_handler(tool_name, handler)
-
-    return executor, registry, catalog
+    executor = GovernedToolExecutor(registry=registry, guard=guard, collector=collector)
+    return executor, registry, collector
 
 
 def build_demo_robot(event_log_path: str | Path = "robot_events.jsonl") -> DigitalRobot:
@@ -132,14 +150,14 @@ def build_demo_robot(event_log_path: str | Path = "robot_events.jsonl") -> Digit
         conversation_id="tg-conv-001",
         mode="notify",
     )
-    catalog = _build_demo_catalog()
-    tool_executor, registry, catalog = _build_demo_tool_executor(catalog, memory_store)
+    drivers = _build_demo_drivers(memory_store)
+    tool_executor, registry, collector = _build_tool_stack(drivers)
     context_assembler = DefaultContextAssembler(
         firmware=firmware,
         memory_documents=memory_documents,
         memory_store=memory_store,
         tool_registry=registry,
-        tool_catalog=catalog,
+        tool_catalog=collector,
         system_tool_definitions=ALL_SYSTEM_TOOLS,
     )
     heartbeat = FirmwareHeartbeat(firmware=firmware, default_output_target=default_output_target)
@@ -217,16 +235,14 @@ def build_kernel_for_instance(
     firmware = MarkdownFirmwareStore(instance.paths.firmware_dir)
     memory_store = PersistentMemoryStore(instance.paths.workspace_dir / "memory_data")
     memory_documents = MarkdownMemoryDocumentStore(instance.paths.memory_dir)
-    catalog = _build_demo_catalog()
-    tool_executor, registry, catalog = _build_demo_tool_executor(
-        catalog, memory_store, memory_dir=instance.paths.memory_dir,
-    )
+    drivers = _build_demo_drivers(memory_store, memory_dir=instance.paths.memory_dir)
+    tool_executor, registry, collector = _build_tool_stack(drivers)
     context_assembler = DefaultContextAssembler(
         firmware=firmware,
         memory_documents=memory_documents,
         memory_store=memory_store,
         tool_registry=registry,
-        tool_catalog=catalog,
+        tool_catalog=collector,
         system_tool_definitions=ALL_SYSTEM_TOOLS,
     )
     # Register a sink for each channel referenced by the default output target.
@@ -281,10 +297,8 @@ def build_websocket_service(
     memory_store = PersistentMemoryStore(instance.paths.workspace_dir / "memory_data")
     memory_documents = MarkdownMemoryDocumentStore(instance.paths.memory_dir)
     default_output_target = None
-    catalog = _build_demo_catalog()
-    tool_executor, registry, catalog = _build_demo_tool_executor(
-        catalog, memory_store, memory_dir=instance.paths.memory_dir,
-    )
+    drivers = _build_demo_drivers(memory_store, memory_dir=instance.paths.memory_dir)
+    tool_executor, registry, collector = _build_tool_stack(drivers)
 
     # Resolve LLM provider from robot.yaml if not explicitly provided
     if llm is None:
@@ -305,7 +319,7 @@ def build_websocket_service(
         memory_documents=memory_documents,
         memory_store=memory_store,
         tool_registry=registry,
-        tool_catalog=catalog,
+        tool_catalog=collector,
         system_tool_definitions=ALL_SYSTEM_TOOLS,
     )
     heartbeat = FirmwareHeartbeat(firmware=firmware, default_output_target=default_output_target)

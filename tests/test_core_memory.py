@@ -9,7 +9,7 @@ from typing import Any
 from src.domain import ExecutionContext
 from src.memory.persistent import PersistentMemoryStore
 from src.memory.store import InMemoryMemoryStore
-from src.tools.system_tools import CORE_MEMORY_BUDGET, SystemToolHandlers
+from src.tools.system_tools import CORE_MEMORY_BUDGET, SystemToolDriver
 
 
 class InMemoryCoreMemoryTests(unittest.TestCase):
@@ -88,38 +88,35 @@ class CoreMemoryToolHandlerTests(unittest.TestCase):
 
     def test_read_empty(self) -> None:
         memory = InMemoryMemoryStore()
-        handlers = SystemToolHandlers(memory=memory)
-        h = handlers.get_handlers()
-        result = h["core_memory.read"](self._make_ctx(), {"user_id": "user-1"})
+        driver = SystemToolDriver(memory=memory)
+        result = driver.execute(self._make_ctx(), "core_memory.read", {"user_id": "user-1"})
         self.assertEqual("", result["content"])
         self.assertEqual(0, result["length"])
         self.assertEqual(CORE_MEMORY_BUDGET, result["budget"])
 
     def test_write_and_read(self) -> None:
         memory = InMemoryMemoryStore()
-        handlers = SystemToolHandlers(memory=memory)
-        h = handlers.get_handlers()
+        driver = SystemToolDriver(memory=memory)
         ctx = self._make_ctx()
 
         # Write
-        result = h["core_memory.update"](ctx, {
+        result = driver.execute(ctx, "core_memory.update", {
             "user_id": "user-1",
             "content": "- Prefers dark mode\n- Works on Cephix\n- Speaks German",
         })
         self.assertTrue(result["stored"])
 
         # Read back
-        result = h["core_memory.read"](ctx, {"user_id": "user-1"})
+        result = driver.execute(ctx, "core_memory.read", {"user_id": "user-1"})
         self.assertIn("Prefers dark mode", result["content"])
         self.assertIn("Speaks German", result["content"])
 
     def test_budget_enforced(self) -> None:
         memory = InMemoryMemoryStore()
-        handlers = SystemToolHandlers(memory=memory)
-        h = handlers.get_handlers()
+        driver = SystemToolDriver(memory=memory)
         ctx = self._make_ctx()
 
-        result = h["core_memory.update"](ctx, {
+        result = driver.execute(ctx, "core_memory.update", {
             "user_id": "user-1",
             "content": "X" * (CORE_MEMORY_BUDGET + 1),
         })
@@ -128,11 +125,10 @@ class CoreMemoryToolHandlerTests(unittest.TestCase):
 
     def test_exactly_at_budget_is_ok(self) -> None:
         memory = InMemoryMemoryStore()
-        handlers = SystemToolHandlers(memory=memory)
-        h = handlers.get_handlers()
+        driver = SystemToolDriver(memory=memory)
         ctx = self._make_ctx()
 
-        result = h["core_memory.update"](ctx, {
+        result = driver.execute(ctx, "core_memory.update", {
             "user_id": "user-1",
             "content": "X" * CORE_MEMORY_BUDGET,
         })
@@ -141,24 +137,22 @@ class CoreMemoryToolHandlerTests(unittest.TestCase):
 
     def test_update_replaces_previous(self) -> None:
         memory = InMemoryMemoryStore()
-        handlers = SystemToolHandlers(memory=memory)
-        h = handlers.get_handlers()
+        driver = SystemToolDriver(memory=memory)
         ctx = self._make_ctx()
 
-        h["core_memory.update"](ctx, {"user_id": "user-1", "content": "Version 1"})
-        h["core_memory.update"](ctx, {"user_id": "user-1", "content": "Version 2"})
+        driver.execute(ctx, "core_memory.update", {"user_id": "user-1", "content": "Version 1"})
+        driver.execute(ctx, "core_memory.update", {"user_id": "user-1", "content": "Version 2"})
 
-        result = h["core_memory.read"](ctx, {"user_id": "user-1"})
+        result = driver.execute(ctx, "core_memory.read", {"user_id": "user-1"})
         self.assertEqual("Version 2", result["content"])
 
     def test_defaults_to_ctx_user_id(self) -> None:
         memory = InMemoryMemoryStore()
-        handlers = SystemToolHandlers(memory=memory)
-        h = handlers.get_handlers()
+        driver = SystemToolDriver(memory=memory)
         ctx = self._make_ctx()
 
-        h["core_memory.update"](ctx, {"content": "Auto user"})
-        result = h["core_memory.read"](ctx, {})
+        driver.execute(ctx, "core_memory.update", {"content": "Auto user"})
+        result = driver.execute(ctx, "core_memory.read", {})
         self.assertEqual("Auto user", result["content"])
         self.assertEqual("user-1", result["user_id"])
 
