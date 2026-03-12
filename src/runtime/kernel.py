@@ -210,6 +210,7 @@ class DigitalRobotKernel:
             if target is not None:
                 self.message_delivery.send_chunk_clear(target)
 
+        self._emit_thinking_telemetry(ctx)
         self.bus.publish("command", "plan.created", {"plan_id": current_plan.plan_id, "goal": current_plan.goal})
         self.telemetry.emit(
             ctx=ctx,
@@ -314,6 +315,7 @@ class DigitalRobotKernel:
             token_callback=stream_cb,
             thinking_callback=self._thinking_callback,
         )
+        self._emit_thinking_telemetry(ctx)
         self.telemetry.emit(
             ctx=ctx,
             event_type="plan.revised",
@@ -405,6 +407,17 @@ class DigitalRobotKernel:
         if plan is None or not plan.steps:
             raise RuntimeError("Planner returned a plan without steps")
         return plan.steps[0]
+
+    def _emit_thinking_telemetry(self, ctx: ExecutionContext) -> None:
+        thinking = getattr(self.planner, "last_thinking", None)
+        if not thinking:
+            return
+        self.telemetry.emit(
+            ctx=ctx,
+            event_type="thinking.completed",
+            actor="planner.llm",
+            payload={"length": len(thinking), "text": thinking},
+        )
 
     @staticmethod
     def _step_summary(step: PlanStep) -> dict[str, Any]:

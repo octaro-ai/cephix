@@ -35,6 +35,7 @@ class LLMPlanner:
     def __init__(self, llm: LLMPort | None = None) -> None:
         self._llm = llm
         self._conversation_history: list[LLMMessage] = []
+        self.last_thinking: str | None = None
 
     # -- PlannerPort ---------------------------------------------------------
 
@@ -47,6 +48,7 @@ class LLMPlanner:
         token_callback: TokenCallback | None = None,
         thinking_callback: ThinkingCallback | None = None,
     ) -> Plan:
+        self.last_thinking = None
         if self._llm is None:
             return self._keyword_initial_plan(event)
 
@@ -57,6 +59,7 @@ class LLMPlanner:
             token_callback=token_callback,
             thinking_callback=thinking_callback,
         )
+        self.last_thinking = completion.thinking
         self._append_assistant_message(completion)
         return self._completion_to_plan(completion)
 
@@ -71,6 +74,7 @@ class LLMPlanner:
         token_callback: TokenCallback | None = None,
         thinking_callback: ThinkingCallback | None = None,
     ) -> Plan:
+        self.last_thinking = None
         if self._llm is None:
             # Keyword fallback expects a dict keyed by tool_name.
             results_dict = {r.tool_name: r.result for r in results}
@@ -93,6 +97,7 @@ class LLMPlanner:
             token_callback=token_callback,
             thinking_callback=thinking_callback,
         )
+        self.last_thinking = completion.thinking
         self._append_assistant_message(completion)
         return self._completion_to_plan(completion)
 

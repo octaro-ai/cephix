@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass
 import json
 from typing import Any, Protocol
 
 from src.domain import ExecutionContext
 from src.utils import new_id, utc_now_iso
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -35,6 +38,21 @@ class EventLog:
     def append(self, event: WideEvent) -> None:
         with open(self.path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(asdict(event), ensure_ascii=False) + "\n")
+
+
+class LoggingEventSink:
+    """Writes telemetry events to Python's logging system."""
+
+    def __init__(self, log: logging.Logger | None = None) -> None:
+        self._log = log or logger
+
+    def append(self, event: WideEvent) -> None:
+        self._log.info(
+            "[%s] %s  %s",
+            event.event_type,
+            event.actor,
+            json.dumps(event.payload, ensure_ascii=False, default=str),
+        )
 
 
 class FanoutEventSink:

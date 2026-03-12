@@ -19,7 +19,7 @@ from src.planners import LLMPlanner
 from src.robot import DigitalRobot
 from src.runtime import RuntimeEventLoop
 from src.service import RobotService
-from src.telemetry import EventLog, FanoutEventSink, Telemetry
+from src.telemetry import EventLog, FanoutEventSink, LoggingEventSink, Telemetry
 from src.tools.collector import ToolCollector
 from src.tools.executor import GovernedToolExecutor
 from src.tools.models import ToolDefinition, ToolParameter
@@ -332,7 +332,7 @@ def build_websocket_service(
         auto_approve_loopback=instance.auto_approve_loopback,
         pairings=pairing_registry,
     )
-    telemetry = Telemetry(FanoutEventSink([event_log, ws_channel]))
+    telemetry = Telemetry(FanoutEventSink([event_log, ws_channel, LoggingEventSink()]))
     channel_hub = ChannelHub(ingress_ports=[ws_channel], egress_ports={"ws": ws_channel})
     robot = DigitalRobot(
         robot_id=instance.robot_id,
