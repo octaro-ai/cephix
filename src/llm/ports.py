@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from src.llm.models import LLMCompletion, LLMMessage, TokenCallback
+from src.llm.models import LLMCompletion, LLMMessage, ThinkingCallback, TokenCallback
 
 
 class LLMPort(Protocol):
@@ -35,5 +35,6 @@ class LLMPort(Protocol):
         temperature: float | None = None,
         max_tokens: int | None = None,
         token_callback: TokenCallback | None = None,
+        thinking_callback: ThinkingCallback | None = None,
     ) -> LLMCompletion:
         ...

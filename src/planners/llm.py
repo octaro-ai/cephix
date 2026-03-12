@@ -20,7 +20,7 @@ from src.domain import (
     RobotEvent,
     ToolResult,
 )
-from src.llm.models import LLMCompletion, LLMMessage, TokenCallback
+from src.llm.models import LLMCompletion, LLMMessage, ThinkingCallback, TokenCallback
 from src.llm.ports import LLMPort
 from src.utils import new_id
 
@@ -45,6 +45,7 @@ class LLMPlanner:
         planning_context: PlanningContext,
         *,
         token_callback: TokenCallback | None = None,
+        thinking_callback: ThinkingCallback | None = None,
     ) -> Plan:
         if self._llm is None:
             return self._keyword_initial_plan(event)
@@ -54,6 +55,7 @@ class LLMPlanner:
             messages=self._conversation_history,
             tools=planning_context.tool_schemas or None,
             token_callback=token_callback,
+            thinking_callback=thinking_callback,
         )
         self._append_assistant_message(completion)
         return self._completion_to_plan(completion)
@@ -67,6 +69,7 @@ class LLMPlanner:
         planning_context: PlanningContext,
         *,
         token_callback: TokenCallback | None = None,
+        thinking_callback: ThinkingCallback | None = None,
     ) -> Plan:
         if self._llm is None:
             # Keyword fallback expects a dict keyed by tool_name.
@@ -88,6 +91,7 @@ class LLMPlanner:
             messages=self._conversation_history,
             tools=planning_context.tool_schemas or None,
             token_callback=token_callback,
+            thinking_callback=thinking_callback,
         )
         self._append_assistant_message(completion)
         return self._completion_to_plan(completion)

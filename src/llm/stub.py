@@ -85,6 +85,7 @@ class StubLLMProvider:
         temperature: float | None = None,
         max_tokens: int | None = None,
         token_callback: TokenCallback | None = None,
+        thinking_callback: TokenCallback | None = None,
     ) -> LLMCompletion:
         result = self.complete(
             messages=messages, tools=tools, model=model,

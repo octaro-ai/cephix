@@ -9,6 +9,11 @@ from typing import Any
 # Callback type for streaming: called with each text token as it arrives.
 TokenCallback = Callable[[str], None]
 
+# Callback for reasoning/thinking tokens (extended thinking, chain-of-thought).
+# Same signature as TokenCallback but semantically separate so callers can
+# decide independently what to do with thinking output (e.g. debug display).
+ThinkingCallback = Callable[[str], None]
+
 
 @dataclass
 class LLMMessage:

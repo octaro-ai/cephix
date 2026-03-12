@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from src.llm.models import LLMCompletion, LLMMessage, LLMToolCall, TokenCallback
+from src.llm.models import LLMCompletion, LLMMessage, LLMToolCall, ThinkingCallback, TokenCallback
 
 try:
     import anthropic
@@ -22,16 +22,37 @@ _DEFAULT_MAX_TOKENS = 4096
 class AnthropicProvider:
     """LLMPort implementation backed by the Anthropic Messages API."""
 
+    # Models that support extended thinking (Anthropic's chain-of-thought).
+    _THINKING_MODELS = {"claude-sonnet-4-20250514", "claude-opus-4-20250514"}
+
     def __init__(
         self,
         *,
         api_key: str | None = None,
         default_model: str = _DEFAULT_MODEL,
         default_max_tokens: int = _DEFAULT_MAX_TOKENS,
+        thinking_budget_tokens: int = 1024,
     ) -> None:
         self._client = anthropic.Anthropic(api_key=api_key)
         self._default_model = default_model
         self._default_max_tokens = default_max_tokens
+        self._thinking_budget_tokens = thinking_budget_tokens
+
+    def _supports_thinking(self, model: str) -> bool:
+        return model in self._THINKING_MODELS
+
+    def _apply_thinking(self, kwargs: dict[str, Any]) -> None:
+        """Enable extended thinking on the request if the model supports it."""
+        model = kwargs.get("model", "")
+        if not self._supports_thinking(model):
+            return
+        kwargs["thinking"] = {
+            "type": "enabled",
+            "budget_tokens": self._thinking_budget_tokens,
+        }
+        # Extended thinking requires temperature=1 and doesn't allow
+        # explicit temperature settings.
+        kwargs.pop("temperature", None)
 
     def complete(
         self,
@@ -59,6 +80,7 @@ class AnthropicProvider:
         if tools:
             kwargs["tools"], name_map = _convert_tools_to_anthropic(tools)
 
+        self._apply_thinking(kwargs)
         response = self._client.messages.create(**kwargs)
         return _parse_response(response, name_map)
 
@@ -71,11 +93,13 @@ class AnthropicProvider:
         temperature: float | None = None,
         max_tokens: int | None = None,
         token_callback: TokenCallback | None = None,
+        thinking_callback: ThinkingCallback | None = None,
     ) -> LLMCompletion:
         """Streaming variant of complete().
 
-        Calls *token_callback* with each text token as it arrives, then
-        returns the full LLMCompletion (identical to ``complete()``).
+        Calls *token_callback* with each response text token as it arrives.
+        Calls *thinking_callback* with each thinking/reasoning token (if the
+        model supports extended thinking).
         Falls back to non-streaming when *token_callback* is None.
         """
         if token_callback is None:
@@ -99,12 +123,17 @@ class AnthropicProvider:
         if tools:
             kwargs["tools"], name_map = _convert_tools_to_anthropic(tools)
 
+        self._apply_thinking(kwargs)
+
         with self._client.messages.stream(**kwargs) as stream:
             for event in stream:
                 if event.type == "content_block_delta":
                     delta = event.delta
-                    if getattr(delta, "type", "") == "text_delta":
+                    delta_type = getattr(delta, "type", "")
+                    if delta_type == "text_delta":
                         token_callback(delta.text)
+                    elif delta_type == "thinking_delta" and thinking_callback is not None:
+                        thinking_callback(delta.thinking)
 
             response = stream.get_final_message()
 

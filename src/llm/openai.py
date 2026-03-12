@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from src.llm.models import LLMCompletion, LLMMessage, LLMToolCall, TokenCallback
+from src.llm.models import LLMCompletion, LLMMessage, LLMToolCall, ThinkingCallback, TokenCallback
 
 try:
     import openai
@@ -69,6 +69,7 @@ class OpenAIProvider:
         temperature: float | None = None,
         max_tokens: int | None = None,
         token_callback: TokenCallback | None = None,
+        thinking_callback: ThinkingCallback | None = None,
     ) -> LLMCompletion:
         if token_callback is None:
             return self.complete(
@@ -103,6 +104,11 @@ class OpenAIProvider:
             delta = chunk.choices[0].delta
             if chunk.model:
                 resp_model = chunk.model
+
+            # Reasoning tokens (o1, o3, etc.) are delivered separately.
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning and thinking_callback is not None:
+                thinking_callback(reasoning)
 
             if delta.content:
                 token_callback(delta.content)

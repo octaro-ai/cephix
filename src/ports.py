@@ -186,6 +186,7 @@ class PlannerPort(Protocol):
         planning_context: PlanningContext,
         *,
         token_callback: Any | None = None,
+        thinking_callback: Any | None = None,
     ) -> Plan:
         ...
 
@@ -198,6 +199,7 @@ class PlannerPort(Protocol):
         planning_context: PlanningContext,
         *,
         token_callback: Any | None = None,
+        thinking_callback: Any | None = None,
     ) -> Plan:
         ...
 
