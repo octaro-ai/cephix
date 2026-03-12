@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from src.llm.models import LLMCompletion, LLMMessage, LLMToolCall
+from src.llm.models import LLMCompletion, LLMMessage, LLMToolCall, ThinkingCallback, TokenCallback
 
 try:
     import litellm
@@ -69,6 +69,103 @@ class LiteLLMProvider:
 
         response = litellm.completion(**kwargs)
         return _parse_response(response)
+
+    def stream_complete(
+        self,
+        *,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        token_callback: TokenCallback | None = None,
+        thinking_callback: ThinkingCallback | None = None,
+    ) -> LLMCompletion:
+        if token_callback is None:
+            return self.complete(
+                messages=messages, tools=tools, model=model,
+                temperature=temperature, max_tokens=max_tokens,
+            )
+
+        api_messages = _convert_messages(messages)
+        kwargs: dict[str, Any] = {
+            "model": model or self._default_model,
+            "messages": api_messages,
+            "stream": True,
+        }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        if tools:
+            kwargs["tools"] = tools
+        if self._api_key:
+            kwargs["api_key"] = self._api_key
+        if self._api_base:
+            kwargs["api_base"] = self._api_base
+
+        collected_content = ""
+        collected_tool_calls: list[LLMToolCall] = []
+        _partial_tcs: dict[int, dict[str, Any]] = {}
+        finish_reason = "stop"
+        resp_model = model or self._default_model
+
+        stream = litellm.completion(**kwargs)
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if getattr(chunk, "model", None):
+                resp_model = chunk.model
+
+            # Reasoning / thinking tokens (provider-dependent).
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning and thinking_callback is not None:
+                thinking_callback(reasoning)
+
+            content = getattr(delta, "content", None)
+            if content:
+                token_callback(content)
+                collected_content += content
+
+            tc_deltas = getattr(delta, "tool_calls", None)
+            if tc_deltas:
+                for tc_delta in tc_deltas:
+                    idx = tc_delta.index
+                    if idx not in _partial_tcs:
+                        _partial_tcs[idx] = {"id": "", "name": "", "arguments": ""}
+                    if tc_delta.id:
+                        _partial_tcs[idx]["id"] = tc_delta.id
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            _partial_tcs[idx]["name"] = tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            _partial_tcs[idx]["arguments"] += tc_delta.function.arguments
+
+            if chunk.choices[0].finish_reason:
+                fr = chunk.choices[0].finish_reason
+                if fr == "tool_calls":
+                    finish_reason = "tool_calls"
+                elif fr == "length":
+                    finish_reason = "length"
+
+        for _idx in sorted(_partial_tcs):
+            ptc = _partial_tcs[_idx]
+            try:
+                arguments = json.loads(ptc["arguments"])
+            except (json.JSONDecodeError, TypeError):
+                arguments = {}
+            collected_tool_calls.append(LLMToolCall(
+                id=ptc["id"], name=ptc["name"], arguments=arguments,
+            ))
+
+        return LLMCompletion(
+            content=collected_content or None,
+            tool_calls=collected_tool_calls,
+            model=resp_model,
+            finish_reason=finish_reason,
+            usage={},
+        )
 
 
 # ---------------------------------------------------------------------------

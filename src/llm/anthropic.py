@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from src.llm.catalog import ModelCatalog
 from src.llm.models import LLMCompletion, LLMMessage, LLMToolCall, ThinkingCallback, TokenCallback
 
 try:
@@ -22,9 +23,6 @@ _DEFAULT_MAX_TOKENS = 4096
 class AnthropicProvider:
     """LLMPort implementation backed by the Anthropic Messages API."""
 
-    # Models that support extended thinking (Anthropic's chain-of-thought).
-    _THINKING_MODELS = {"claude-sonnet-4-20250514", "claude-opus-4-20250514"}
-
     def __init__(
         self,
         *,
@@ -32,24 +30,45 @@ class AnthropicProvider:
         default_model: str = _DEFAULT_MODEL,
         default_max_tokens: int = _DEFAULT_MAX_TOKENS,
         thinking_budget_tokens: int = 1024,
+        catalog: ModelCatalog | None = None,
     ) -> None:
         self._client = anthropic.Anthropic(api_key=api_key)
         self._default_model = default_model
         self._default_max_tokens = default_max_tokens
         self._thinking_budget_tokens = thinking_budget_tokens
+        self._catalog = catalog or ModelCatalog()
+
+    # The original Claude 4 models (4.5 era, date-suffixed like
+    # claude-sonnet-4-20250514) still require type=enabled + budget_tokens.
+    # Everything newer (4.6+, 5.x, ...) uses type=adaptive.
+    _LEGACY_THINKING_PREFIXES = ("claude-sonnet-4-2", "claude-opus-4-2")
 
     def _supports_thinking(self, model: str) -> bool:
-        return model in self._THINKING_MODELS
+        return self._catalog.supports_reasoning(model)
+
+    def _needs_legacy_thinking(self, model: str) -> bool:
+        return any(model.startswith(p) for p in self._LEGACY_THINKING_PREFIXES)
 
     def _apply_thinking(self, kwargs: dict[str, Any]) -> None:
         """Enable extended thinking on the request if the model supports it."""
         model = kwargs.get("model", "")
         if not self._supports_thinking(model):
             return
-        kwargs["thinking"] = {
-            "type": "enabled",
-            "budget_tokens": self._thinking_budget_tokens,
-        }
+
+        if self._needs_legacy_thinking(model):
+            # Claude 4.5 era models use enabled + explicit budget.
+            max_tokens = kwargs.get("max_tokens", self._default_max_tokens)
+            budget = min(self._thinking_budget_tokens, max_tokens - 1)
+            if budget < 1024:
+                return
+            kwargs["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": budget,
+            }
+        else:
+            # Claude 4.6+ uses adaptive thinking — no budget_tokens.
+            kwargs["thinking"] = {"type": "adaptive"}
+
         # Extended thinking requires temperature=1 and doesn't allow
         # explicit temperature settings.
         kwargs.pop("temperature", None)
@@ -174,12 +193,19 @@ def _split_system_and_messages(
             raw.append({"role": "user", "content": [block]})
             continue
 
-        if msg.role == "assistant" and msg.tool_calls:
-            # Assistant message with tool_use blocks.
+        if msg.role == "assistant" and (msg.tool_calls or msg.thinking):
+            # Assistant message with thinking / tool_use blocks.
             content_blocks: list[dict[str, Any]] = []
+            # Thinking blocks must come first (Anthropic requirement).
+            if msg.thinking:
+                content_blocks.append({
+                    "type": "thinking",
+                    "thinking": msg.thinking,
+                    "signature": msg.thinking_signature or "",
+                })
             if msg.content:
                 content_blocks.append({"type": "text", "text": msg.content})
-            for tc in msg.tool_calls:
+            for tc in (msg.tool_calls or []):
                 content_blocks.append({
                     "type": "tool_use",
                     "id": tc.id,
@@ -252,10 +278,18 @@ def _parse_response(response: Any, name_map: dict[str, str] | None = None) -> LL
     """Convert an Anthropic API response to our LLMCompletion model."""
     name_map = name_map or {}
     content_text: str | None = None
+    thinking_text: str | None = None
+    thinking_signature: str | None = None
     tool_calls: list[LLMToolCall] = []
 
     for block in response.content:
-        if block.type == "text":
+        if block.type == "thinking":
+            thinking_text = (thinking_text or "") + block.thinking
+            # Preserve the signature for multi-turn roundtrip.
+            sig = getattr(block, "signature", None)
+            if sig:
+                thinking_signature = sig
+        elif block.type == "text":
             content_text = (content_text or "") + block.text
         elif block.type == "tool_use":
             # Restore original dotted name from the sanitized version.
@@ -287,4 +321,6 @@ def _parse_response(response: Any, name_map: dict[str, str] | None = None) -> LL
         model=response.model,
         finish_reason=finish_reason,
         usage=usage,
+        thinking=thinking_text,
+        thinking_signature=thinking_signature,
     )

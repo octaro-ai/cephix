@@ -69,6 +69,7 @@ class ModelInfo:
     input_cost_per_mtok: float = 0.0
     output_cost_per_mtok: float = 0.0
     supports_tools: bool = False
+    supports_reasoning: bool = False
 
     @property
     def cost_label(self) -> str:
@@ -147,6 +148,14 @@ class ModelCatalog:
                 models.append(self._parse_model(model_id, entry))
         return self._sort_models(models)
 
+    def supports_reasoning(self, model_id: str) -> bool:
+        """Check whether a model supports extended thinking / reasoning."""
+        raw = self._load()
+        entry = raw.get(model_id)
+        if entry is None:
+            return False
+        return bool(entry.get("supports_reasoning", False))
+
     # -- Loading / Caching ----------------------------------------------------
 
     def _load(self) -> dict[str, Any]:
@@ -199,6 +208,7 @@ class ModelCatalog:
             input_cost_per_mtok=input_cost * 1_000_000,
             output_cost_per_mtok=output_cost * 1_000_000,
             supports_tools=bool(entry.get("supports_function_calling", False)),
+            supports_reasoning=bool(entry.get("supports_reasoning", False)),
         )
 
     @staticmethod

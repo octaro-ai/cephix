@@ -177,12 +177,15 @@ class LLMPlanner:
 
         This is critical for multi-turn tool flows: Anthropic (and others)
         require the assistant's tool_use message to appear before
-        any tool_result messages.
+        any tool_result messages.  Thinking blocks must also be preserved
+        for extended-thinking models.
         """
         self._conversation_history.append(LLMMessage(
             role="assistant",
             content=completion.content,
             tool_calls=completion.tool_calls if completion.tool_calls else None,
+            thinking=completion.thinking,
+            thinking_signature=completion.thinking_signature,
         ))
 
     # -- Keyword fallback (no LLM) ------------------------------------------

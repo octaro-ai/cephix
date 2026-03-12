@@ -178,10 +178,9 @@ class DigitalRobotKernel:
     ) -> Plan:
         self._state = RobotState.PLANNING
 
-        # Stream response tokens directly to the client.  With extended
-        # thinking / reasoning enabled, the provider separates thinking
-        # from response tokens — so token_callback only receives actual
-        # response text and can be streamed immediately.
+        # Stream text tokens directly to the client as they arrive.
+        # If the plan turns out to include tool calls, we send a
+        # chunk_clear signal so the client discards any preamble text.
         stream_cb = self._make_stream_callback(event)
 
         current_plan = self.planner.create_initial_plan(
@@ -189,6 +188,13 @@ class DigitalRobotKernel:
             token_callback=stream_cb,
             thinking_callback=self._thinking_callback,
         )
+
+        # If the LLM called tools, discard any text that was streamed
+        # before the tool calls (e.g. "Let me check that for you...").
+        if current_plan.steps and current_plan.steps[0].kind != "finalize":
+            target = self._resolve_delivery_target(event, None)
+            if target is not None:
+                self.message_delivery.send_chunk_clear(target)
 
         self.bus.publish("command", "plan.created", {"plan_id": current_plan.plan_id, "goal": current_plan.goal})
         self.telemetry.emit(

@@ -27,6 +27,7 @@ def create_llm_provider(
           api_key_env: ANTHROPIC_API_KEY  # env var name
           temperature: 0.7
           max_tokens: 4096
+          thinking_budget_tokens: 1024  # optional, for extended thinking
           base_url: https://...  # optional, for OpenAI-compatible endpoints
 
     If provider is missing or empty, returns None (keyword fallback).
@@ -58,6 +59,8 @@ def create_llm_provider(
             kwargs["default_model"] = model
         if llm_config.get("max_tokens"):
             kwargs["default_max_tokens"] = int(llm_config["max_tokens"])
+        if llm_config.get("thinking_budget_tokens"):
+            kwargs["thinking_budget_tokens"] = int(llm_config["thinking_budget_tokens"])
         return AnthropicProvider(**kwargs)
 
     if provider_name == "openai":

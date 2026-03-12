@@ -24,6 +24,10 @@ class LLMMessage:
     tool_calls: list[LLMToolCall] | None = None
     tool_call_id: str | None = None  # For role="tool" responses
     name: str | None = None  # Tool name for role="tool"
+    # Thinking/reasoning text from the assistant (must be preserved in
+    # multi-turn tool flows for Anthropic extended thinking).
+    thinking: str | None = None
+    thinking_signature: str | None = None  # Anthropic signing token
 
 
 @dataclass
@@ -44,3 +48,8 @@ class LLMCompletion:
     model: str = ""
     finish_reason: str = "stop"  # "stop", "tool_calls", "length"
     usage: dict[str, int] = field(default_factory=dict)
+    # Thinking/reasoning text produced by the model (extended thinking,
+    # chain-of-thought).  Preserved so callers can include it in the
+    # conversation history for multi-turn tool flows.
+    thinking: str | None = None
+    thinking_signature: str | None = None  # Anthropic signing token
