@@ -78,6 +78,23 @@ class CliUI:
     def print_mounted_tools(self, tools: list[str]) -> None:
         self._console.print(f"[dim]Mounted tools ({len(tools)}): {tools}[/dim]")
 
+    def print_startup_context(self, context: dict[str, Any]) -> None:
+        """Display what has been loaded into the robot's context at startup."""
+        self._console.print("\n[bold]Loaded context:[/bold]")
+        if firmware := context.get("firmware"):
+            self._console.print(f"  Firmware:  {', '.join(firmware)}")
+        if memory_docs := context.get("memory_docs"):
+            self._console.print(f"  Memory:    {', '.join(memory_docs)}")
+        if facts_count := context.get("facts_count"):
+            self._console.print(f"  Facts:     {facts_count} stored")
+        if llm_name := context.get("llm"):
+            self._console.print(f"  LLM:       {llm_name}")
+        if tools := context.get("tools"):
+            self._console.print(f"  Tools:     {len(tools)} discovered — {tools}")
+        if channels := context.get("channels"):
+            self._console.print(f"  Channels:  {', '.join(channels)}")
+        self._console.print()
+
     def print_json(self, payload: Any, *, title: str) -> None:
         self._console.print(self._panel_cls(self._pretty_cls(payload), title=title, border_style="blue"))
 
@@ -464,11 +481,39 @@ async def _run_robot(
             encoding="utf-8",
         )
 
-    # Show available tools at startup (like MCS discovery output).
-    catalog = service.robot.kernel.context_assembler.tool_catalog
+    # Show loaded context at startup.
+    startup_ctx: dict[str, Any] = {}
+    assembler = service.robot.kernel.context_assembler
+    firmware = getattr(assembler, "firmware", None)
+    if firmware is not None:
+        startup_ctx["firmware"] = sorted(firmware.get_base_guidance().keys())
+    mem_docs = getattr(assembler, "memory_documents", None)
+    if mem_docs is not None:
+        # Probe which documents exist on disk (without a real event).
+        doc_root = getattr(mem_docs, "root", None)
+        if doc_root is not None:
+            from pathlib import Path
+            doc_names = [p.name for p in sorted(Path(doc_root).glob("*.md")) if p.stat().st_size > 0]
+            if doc_names:
+                startup_ctx["memory_docs"] = doc_names
+    mem_store = getattr(assembler, "memory_store", None)
+    if mem_store is not None:
+        try:
+            facts = mem_store._profile_store.list_facts()
+            startup_ctx["facts_count"] = len(facts)
+        except Exception:
+            pass
+    planner = service.robot.kernel.planner
+    llm = getattr(planner, "_llm", None)
+    if llm is not None:
+        model = getattr(llm, "_default_model", None) or getattr(llm, "_model_name", None)
+        startup_ctx["llm"] = model or type(llm).__name__
+    catalog = getattr(assembler, "tool_catalog", None)
     if catalog is not None:
         tools = catalog.list_available()
-        ui.print_info(f"Tools discovered ({len(tools)}): {[t.name for t in tools]}")
+        startup_ctx["tools"] = [t.name for t in tools]
+    startup_ctx["channels"] = sorted(service.robot.kernel.message_delivery.egress_ports.keys())
+    ui.print_startup_context(startup_ctx)
 
     ui.print_success(f"Cephix robot '{service.robot.robot_id}' listening on ws://{actual_host}:{actual_port}/ws")
     try:
