@@ -376,6 +376,7 @@ class WebSocketChannel:
         msg_type = str(data.get("type") or "")
         allowed_types = {
             "admin.status",
+            "admin.tools.list",
             "admin.onboarding.status",
             "admin.onboarding.apply",
             "admin.pairing.list",

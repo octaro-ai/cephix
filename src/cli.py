@@ -75,6 +75,9 @@ class CliUI:
         self._console.print(header)
         self._console.print(self._pretty_cls(event.get("payload", {})))
 
+    def print_mounted_tools(self, tools: list[str]) -> None:
+        self._console.print(f"[dim]Mounted tools ({len(tools)}): {tools}[/dim]")
+
     def print_json(self, payload: Any, *, title: str) -> None:
         self._console.print(self._panel_cls(self._pretty_cls(payload), title=title, border_style="blue"))
 
@@ -171,6 +174,11 @@ def main(argv: list[str] | None = None) -> None:
     admin_pairings.add_argument("--url", default="ws://127.0.0.1:8765/ws")
     admin_pairings.add_argument("--admin-token", default="")
     admin_pairings.add_argument("--device-id", default=_default_device_id("admin"))
+
+    admin_tools = admin_subparsers.add_parser("tools", help="List available tools.")
+    admin_tools.add_argument("--url", default="ws://127.0.0.1:8765/ws")
+    admin_tools.add_argument("--admin-token", default="")
+    admin_tools.add_argument("--device-id", default=_default_device_id("admin"))
 
     admin_config = admin_subparsers.add_parser("config", help="Reconfigure a running robot.")
     admin_config.add_argument("--url", default="ws://127.0.0.1:8765/ws")
@@ -456,6 +464,12 @@ async def _run_robot(
             encoding="utf-8",
         )
 
+    # Show available tools at startup (like MCS discovery output).
+    catalog = service.robot.kernel.context_assembler.tool_catalog
+    if catalog is not None:
+        tools = catalog.list_available()
+        ui.print_info(f"Tools discovered ({len(tools)}): {[t.name for t in tools]}")
+
     ui.print_success(f"Cephix robot '{service.robot.robot_id}' listening on ws://{actual_host}:{actual_port}/ws")
     try:
         await stop_event.wait()
@@ -521,7 +535,9 @@ async def _run_chat(
                 ui.print_error("Robot is not initialised. Run: cephix init <robot-id>")
                 return
 
-            if debug_state["enabled"]:
+            # Admins always subscribe to telemetry (for tools.mounted etc.),
+            # non-admins only when --debug is set.
+            if is_admin or debug_state["enabled"]:
                 await ws.send_json({"type": "subscribe_telemetry", "enabled": True})
                 telemetry_ack = await ws.receive_json()
                 if telemetry_ack.get("type") == "error":
@@ -623,6 +639,16 @@ async def _run_admin(
                 ui.print_json(response.get("status", {}), title="Status")
                 return
 
+            if command == "tools":
+                await ws.send_json({"type": "admin.tools.list"})
+                response = await ws.receive_json()
+                tools = response.get("tools", [])
+                ui.print_info(f"Tools ({len(tools)}):")
+                for t in tools:
+                    params = ", ".join(p["name"] for p in t.get("parameters", []))
+                    ui.print_info(f"  {t['name']}({params}) — {t['description']}")
+                return
+
             if command == "pairings":
                 await ws.send_json({"type": "admin.pairing.list"})
                 response = await ws.receive_json()
@@ -679,7 +705,7 @@ async def _handle_chat_command(
     if lowered == "help":
         ui.print_info("Commands: /help, /debug on, /debug off, /admin, /chat")
         if is_admin:
-            ui.print_info("Admin: /status, /config, /pairings, /approve <device_id>")
+            ui.print_info("Admin: /status, /tools, /config, /pairings, /approve <device_id>")
         return True
 
     if lowered == "admin":
@@ -719,7 +745,7 @@ async def _handle_chat_command(
         ui.print_error("[error] admin scope required")
         return True
 
-    if lowered in {"status", "config", "pairings"} or lowered.startswith("approve "):
+    if lowered in {"status", "tools", "config", "pairings"} or lowered.startswith("approve "):
         await _handle_admin_mode_input(ws, command, ui=ui, control_queue=control_queue)
         return True
 
@@ -742,6 +768,16 @@ async def _handle_admin_mode_input(
         await ws.send_json({"type": "admin.status"})
         response = await _wait_for_control_message(control_queue, accepted_types={"admin.status", "error"})
         ui.print_json(response.get("status", {}), title="Status")
+        return
+
+    if lowered == "tools":
+        await ws.send_json({"type": "admin.tools.list"})
+        response = await _wait_for_control_message(control_queue, accepted_types={"admin.tools.list", "error"})
+        tools = response.get("tools", [])
+        ui.print_info(f"Tools ({len(tools)}):")
+        for t in tools:
+            params = ", ".join(p["name"] for p in t.get("parameters", []))
+            ui.print_info(f"  {t['name']}({params}) — {t['description']}")
         return
 
     if lowered == "config":
@@ -1120,9 +1156,13 @@ async def _receive_chat(
             if _is_chat_cycle_complete(msg_type, data, debug=debug_state["enabled"]):
                 response_done.set()
             continue
-        if msg_type == "telemetry" and debug_state["enabled"]:
+        if msg_type == "telemetry":
             event = data.get("event", {})
-            ui.print_telemetry(event)
+            # Always show mounted tools for admin (even without /debug).
+            if event.get("event_type") == "tools.mounted":
+                ui.print_mounted_tools(event.get("payload", {}).get("tools", []))
+            elif debug_state["enabled"]:
+                ui.print_telemetry(event)
             if _is_chat_cycle_complete(msg_type, data, debug=debug_state["enabled"]):
                 response_done.set()
             continue

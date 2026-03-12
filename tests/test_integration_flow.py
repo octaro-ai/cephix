@@ -547,6 +547,7 @@ class TelemetrySequenceTests(unittest.TestCase):
             expected_sequence = [
                 "input.received",
                 "memory.context_loaded",
+                "tools.mounted",
                 "plan.created",
                 "tool.requested",
                 "tool.completed",

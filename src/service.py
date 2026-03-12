@@ -83,10 +83,32 @@ class RobotService:
             if not device_id:
                 return {"type": "error", "content": "device_id is required."}
             return {"type": "admin.pairing.approve", **self.robot.control_plane.approve_pairing(device_id)}
+        if request.request_type == "admin.tools.list":
+            return self._list_tools()
         if request.request_type == "session.list":
             conversations = self.robot.kernel.memory.list_conversations()
             return {"type": "session.list", "conversations": conversations}
         return {"type": "error", "content": f"Unknown control request type: {request.request_type}"}
+
+    def _list_tools(self) -> dict[str, object]:
+        catalog = self.robot.kernel.context_assembler.tool_catalog
+        available = catalog.list_available()
+        return {
+            "type": "admin.tools.list",
+            "tools": [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": [
+                        {"name": p.name, "type": p.type, "required": p.required}
+                        for p in t.parameters
+                    ],
+                    "metadata": t.metadata,
+                }
+                for t in available
+            ],
+            "count": len(available),
+        }
 
     def _refresh_public_info(self) -> None:
         public_info = self.robot.control_plane.get_public_info()

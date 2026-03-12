@@ -155,6 +155,20 @@ class DigitalRobotKernel:
                 "memory_documents_count": len(planning_context.memory_documents),
             },
         )
+
+        registry = getattr(self.context_assembler, "tool_registry", None)
+        if registry is not None:
+            mounted = registry.list_mounted()
+            self.telemetry.emit(
+                ctx=ctx,
+                event_type="tools.mounted",
+                actor="context.assembler",
+                payload={
+                    "tools": [t.name for t in mounted],
+                    "count": len(mounted),
+                },
+            )
+
         return planning_context
 
     # ------------------------------------------------------------------
