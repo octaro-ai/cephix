@@ -103,6 +103,7 @@ def _mail_list_handler(ctx: ExecutionContext, arguments: dict[str, Any]) -> list
 def _build_demo_drivers(
     memory: InMemoryMemoryStore | PersistentMemoryStore,
     memory_dir: str | Path | None = None,
+    sops_dir: str | Path | None = None,
 ) -> list[Any]:
     """Build the list of ToolDriverPort implementations for the demo robot."""
     # System tools (memory, documents, procedures)
@@ -121,7 +122,27 @@ def _build_demo_drivers(
         _mail_list_handler,
     )
 
-    return [system_driver, domain_driver]
+    drivers: list[Any] = [system_driver, domain_driver]
+
+    # SOP tools — scan the global repository and the instance sops/ dir.
+    sop_dirs: list[Path] = []
+    global_sops = Path(__file__).resolve().parent.parent / "robot" / "sops"
+    if global_sops.exists():
+        sop_dirs.append(global_sops)
+    if sops_dir is not None:
+        instance_sops = Path(sops_dir)
+        if instance_sops.exists() and instance_sops != global_sops:
+            sop_dirs.append(instance_sops)
+    if sop_dirs:
+        from src.sop.file_repo import FileSOPRepository
+        from src.sop.driver import SOPToolDriver
+        # Use the first dir as primary; merge others by adding repos.
+        sop_repo = FileSOPRepository(sop_dirs[0])
+        for extra in sop_dirs[1:]:
+            sop_repo.add_directory(extra)
+        drivers.append(SOPToolDriver(sop_repo))
+
+    return drivers
 
 
 def _build_tool_stack(
@@ -255,7 +276,11 @@ def build_kernel_for_instance(
     firmware = MarkdownFirmwareStore(instance.paths.firmware_dir)
     memory_store = PersistentMemoryStore(instance.paths.workspace_dir / "memory_data")
     memory_documents = MarkdownMemoryDocumentStore(instance.paths.memory_dir)
-    drivers = _build_demo_drivers(memory_store, memory_dir=instance.paths.memory_dir)
+    drivers = _build_demo_drivers(
+        memory_store,
+        memory_dir=instance.paths.memory_dir,
+        sops_dir=instance.paths.sops_dir,
+    )
 
     ws_cfg = robot_cfg.get("workstation")
     if ws_cfg:
@@ -332,7 +357,11 @@ def build_websocket_service(
     if robot_cfg_path.exists():
         robot_cfg = _load_yaml(robot_cfg_path)
 
-    drivers = _build_demo_drivers(memory_store, memory_dir=instance.paths.memory_dir)
+    drivers = _build_demo_drivers(
+        memory_store,
+        memory_dir=instance.paths.memory_dir,
+        sops_dir=instance.paths.sops_dir,
+    )
 
     # Workstation driver (if configured in robot.yaml).
     ws_cfg = robot_cfg.get("workstation")

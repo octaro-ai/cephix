@@ -1,0 +1,89 @@
+name: order-export
+description: >
+  Täglicher Bestellexport: Bestellungen abrufen, XML nach PDF konvertieren,
+  per Mail versenden und Dateien in Owncloud ablegen.
+version: "1.0"
+
+trigger_patterns:
+  - "bestellung"
+  - "order.?export"
+  - "export starten"
+  - "täglicher export"
+
+required_tools:
+  - shell.exec
+  - file.get
+  - file.put
+  - workstation.start
+  - workstation.info
+  - memory.write
+  - document.read
+  - document.write
+
+learnings_document: LEARNINGS_order-export.md
+
+steps:
+  - id: prepare
+    name: Umgebung vorbereiten
+    instructions: |
+      Stelle sicher, dass die Workstation läuft (workstation.start).
+      Prüfe, ob die benötigte Umgebung vorhanden ist (PHP, Composer, Laravel-App).
+      Lies das Learnings-Dokument (LEARNINGS_order-export.md), um bekannte
+      Probleme und Lösungen griffbereit zu haben.
+
+  - id: fetch_orders
+    name: Bestellungen abrufen
+    instructions: |
+      Starte das Laravel-Kommando zum Abrufen neuer Bestellungen:
+        php artisan orders:export
+      Prüfe die Ausgabe auf Fehler. Bei Fehlern: analysiere die Ursache.
+      Wenn keine neuen Bestellungen vorliegen, beende die SOP mit einer
+      kurzen Rückmeldung.
+
+  - id: generate_pdfs
+    name: PDFs generieren
+    instructions: |
+      Konvertiere die exportierten XML-Dateien via XSL nach PDF.
+      BEKANNTE FEHLERQUELLEN:
+      - Ungültige Zeichen in XML (z.B. Sonderzeichen, Umlaute in
+        bestimmten Encodings): Bereinige das Zeichen und wiederhole
+        die Konvertierung.
+      - Konsultiere das Learnings-Dokument für bereits gelöste
+        Zeichenprobleme.
+      Prüfe, dass für jede Bestellung eine PDF-Datei erzeugt wurde.
+
+  - id: validate_shipping
+    name: Sendungen validieren
+    instructions: |
+      Prüfe die Gesamtgewichte der Sendungen gegen DHL-Limits (31,5 kg).
+      Wenn ein Paket das Limit überschreitet:
+      - Splitte die Sendung in mehrere Pakete
+      - Generiere separate Labels für jedes Paket
+      - Dokumentiere den Split für die Mail-Benachrichtigung
+      Wenn alle Sendungen im Limit sind, weiter zum nächsten Schritt.
+
+  - id: send_emails
+    name: Ergebnisse per Mail versenden
+    instructions: |
+      Versende die generierten PDFs an die konfigurierten Empfänger.
+      Bei Besonderheiten (Splits, fehlende PDFs, behobene Fehler):
+      Füge einen Hinweis in die Mail ein, damit der Empfänger
+      Bescheid weiß.
+
+  - id: upload_owncloud
+    name: Dateien in Owncloud ablegen
+    instructions: |
+      Lade alle XML- und PDF-Dateien in den konfigurierten
+      Owncloud-Ordner hoch. Prüfe, dass der Upload erfolgreich war.
+
+  - id: log_results
+    name: Ergebnisse dokumentieren
+    instructions: |
+      Fasse zusammen, was gelaufen ist:
+      - Wie viele Bestellungen verarbeitet?
+      - Gab es Fehler? Welche? Wie gelöst?
+      - Gab es Sendungs-Splits?
+      Bei NEUEN Fehlern oder Erkenntnissen:
+      Speichere das Learning im Dokument LEARNINGS_order-export.md,
+      damit du beim nächsten Durchlauf weißt wie du es löst.
+      Nutze memory.write für dauerhafte Fakten.

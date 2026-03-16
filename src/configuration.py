@@ -45,6 +45,7 @@ class RobotPaths:
     instance_env_path: Path
     firmware_dir: Path
     memory_dir: Path
+    sops_dir: Path
     logs_dir: Path
     sessions_dir: Path
 
@@ -229,6 +230,7 @@ def resolve_robot_instance(
     instance_env = instance_env_path(workspace_dir)
     firmware_dir = workspace_dir / "firmware"
     memory_dir = workspace_dir / "memory"
+    sops_dir = workspace_dir / "sops"
     logs_dir = workspace_dir / "logs"
     sessions_dir = workspace_dir / "sessions"
 
@@ -277,6 +279,7 @@ def resolve_robot_instance(
             instance_env_path=instance_env,
             firmware_dir=firmware_dir,
             memory_dir=memory_dir,
+            sops_dir=sops_dir,
             logs_dir=logs_dir,
             sessions_dir=sessions_dir,
         ),
@@ -477,6 +480,7 @@ def ensure_robot_workspace(*, workspace_dir: Path, robot_name: str) -> bool:
     env_file = instance_env_path(workspace_dir)
     firmware_dir = workspace_dir / "firmware"
     memory_dir = workspace_dir / "memory"
+    sops_dir = workspace_dir / "sops"
     logs_dir = workspace_dir / "logs"
     sessions_dir = workspace_dir / "sessions"
     daily_dir = memory_dir / "daily"

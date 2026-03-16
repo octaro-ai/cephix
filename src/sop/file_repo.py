@@ -45,15 +45,25 @@ from typing import Any
 
 import yaml
 
-from src.sop.models import SOPDefinition, SOPEdge, SOPNode
+from src.sop.models import SOPDefinition, SOPEdge, SOPNode, SOPStep
 
 
 class FileSOPRepository:
-    """Discovers SOP definitions from YAML files on disk."""
+    """Discovers SOP definitions from YAML files on disk.
+
+    Supports multiple directories — call ``add_directory`` to add
+    additional sources.  SOPs from later directories do not overwrite
+    earlier ones with the same name.
+    """
 
     def __init__(self, directory: str | Path) -> None:
-        self._directory = Path(directory)
+        self._directories: list[Path] = [Path(directory)]
         self._cache: dict[str, SOPDefinition] | None = None
+
+    def add_directory(self, directory: str | Path) -> None:
+        """Register an additional directory to scan for SOPs."""
+        self._directories.append(Path(directory))
+        self._cache = None
 
     def list_available(self) -> list[SOPDefinition]:
         return list(self._load_all().values())
@@ -69,21 +79,24 @@ class FileSOPRepository:
             return self._cache
 
         result: dict[str, SOPDefinition] = {}
-        if not self._directory.exists():
-            self._cache = result
-            return result
-
-        for path in sorted(self._directory.glob("*.yaml")):
-            defn = self._parse_file(path)
-            if defn is not None:
-                result[defn.name] = defn
-        for path in sorted(self._directory.glob("*.yml")):
-            defn = self._parse_file(path)
-            if defn is not None and defn.name not in result:
-                result[defn.name] = defn
+        for directory in self._directories:
+            self._scan_directory(directory, result)
 
         self._cache = result
         return result
+
+    @staticmethod
+    def _scan_directory(directory: Path, result: dict[str, SOPDefinition]) -> None:
+        if not directory.exists():
+            return
+        for path in sorted(directory.glob("*.yaml")):
+            defn = FileSOPRepository._parse_file(path)
+            if defn is not None and defn.name not in result:
+                result[defn.name] = defn
+        for path in sorted(directory.glob("*.yml")):
+            defn = FileSOPRepository._parse_file(path)
+            if defn is not None and defn.name not in result:
+                result[defn.name] = defn
 
     @staticmethod
     def _parse_file(path: Path) -> SOPDefinition | None:
@@ -115,6 +128,16 @@ class FileSOPRepository:
             if isinstance(e, dict) and "from_node" in e and "to_node" in e
         ]
 
+        steps = [
+            SOPStep(
+                id=s["id"],
+                name=s.get("name", s["id"]),
+                instructions=s.get("instructions", ""),
+            )
+            for s in data.get("steps", [])
+            if isinstance(s, dict) and "id" in s
+        ]
+
         return SOPDefinition(
             name=data["name"],
             description=data.get("description", ""),
@@ -122,8 +145,10 @@ class FileSOPRepository:
             entry_node=data.get("entry_node", ""),
             nodes=nodes,
             edges=edges,
+            steps=steps,
             required_skills=data.get("required_skills", []),
             required_tools=data.get("required_tools", []),
             trigger_patterns=data.get("trigger_patterns", []),
+            learnings_document=data.get("learnings_document", ""),
             metadata=data.get("metadata", {}),
         )

@@ -1,5 +1,6 @@
-from src.sop.models import SOPDefinition, SOPEdge, SOPNode
+from src.sop.models import SOPDefinition, SOPEdge, SOPNode, SOPStep
 from src.sop.ports import SOPCompilerPort, SOPRepositoryPort, SOPResolverPort
+from src.sop.driver import SOPToolDriver
 
 __all__ = [
     "SOPCompilerPort",
@@ -8,4 +9,6 @@ __all__ = [
     "SOPNode",
     "SOPRepositoryPort",
     "SOPResolverPort",
+    "SOPStep",
+    "SOPToolDriver",
 ]

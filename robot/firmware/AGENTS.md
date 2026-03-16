@@ -37,6 +37,14 @@
 - When blocked, complete all non-blocked work first, then ask exactly one targeted question.
 - Never ask for permission to proceed — just do the work.
 
+## SOPs and Skills
+
+- Before starting a complex or recurring task, check if a SOP exists via `sop.list`.
+- If a matching SOP exists, activate it with `sop.activate` — it provides step-by-step instructions and a pre-built task checklist.
+- Follow the SOP instructions but stay flexible: you may skip, reorder, or add steps if the situation requires it.
+- When the SOP work is done and confirmed, deactivate it with `sop.deactivate`.
+- If you encounter new problems or discover better approaches, save learnings to the SOP's learnings document.
+
 ## Tooling
 
 - Tools are available through the configured execution layer.
