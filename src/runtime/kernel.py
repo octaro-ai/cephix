@@ -309,6 +309,22 @@ class DigitalRobotKernel:
                 },
             )
 
+            # Emit task checklist updates so clients can render them.
+            if tool_name in ("task.plan", "task.update") and isinstance(result, dict):
+                self.telemetry.emit(
+                    ctx=ctx,
+                    event_type="task.updated",
+                    actor="tool.layer",
+                    payload={
+                        "items": result.get("items", []),
+                        "total": result.get("total", 0),
+                        "pending": result.get("pending", 0),
+                        "in_progress": result.get("in_progress", 0),
+                        "completed": result.get("completed", 0),
+                        "cancelled": result.get("cancelled", 0),
+                    },
+                )
+
         stream_cb = self._make_stream_callback(event)
         revised = self.planner.revise_plan_after_tool(
             ctx, event, current_plan, batch_results, planning_context,

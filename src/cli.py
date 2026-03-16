@@ -78,6 +78,31 @@ class CliUI:
     def print_mounted_tools(self, tools: list[str]) -> None:
         self._console.print(f"[dim]Mounted tools ({len(tools)}): {tools}[/dim]")
 
+    def print_task_update(self, payload: dict[str, Any]) -> None:
+        """Render the task checklist like a visual todo list."""
+        items = payload.get("items", [])
+        if not items:
+            return
+        status_icons = {
+            "pending": "[dim]\u25cb[/dim]",       # ○
+            "in_progress": "[yellow]\u25cf[/yellow]",  # ●
+            "completed": "[green]\u2713[/green]",   # ✓
+            "cancelled": "[red]\u2717[/red]",       # ✗
+        }
+        self._console.print("\n[bold]Task Progress[/bold]")
+        for item in items:
+            icon = status_icons.get(item.get("status", "pending"), "\u25cb")
+            content = item.get("content", "")
+            status = item.get("status", "pending")
+            if status == "completed":
+                self._console.print(f"  {icon} [strikethrough dim]{content}[/]")
+            elif status == "in_progress":
+                self._console.print(f"  {icon} [bold]{content}[/]")
+            elif status == "cancelled":
+                self._console.print(f"  {icon} [dim]{content}[/]")
+            else:
+                self._console.print(f"  {icon} {content}")
+
     def print_startup_context(self, context: dict[str, Any]) -> None:
         """Display what has been loaded into the robot's context at startup."""
         self._console.print("\n[bold]Loaded context:[/bold]")
@@ -1206,6 +1231,8 @@ async def _receive_chat(
             # Always show mounted tools for admin (even without /debug).
             if event.get("event_type") == "tools.mounted":
                 ui.print_mounted_tools(event.get("payload", {}).get("tools", []))
+            elif event.get("event_type") == "task.updated":
+                ui.print_task_update(event.get("payload", {}))
             elif debug_state["enabled"]:
                 ui.print_telemetry(event)
             if _is_chat_cycle_complete(msg_type, data, debug=debug_state["enabled"]):

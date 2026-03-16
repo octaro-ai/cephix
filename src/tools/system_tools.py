@@ -72,6 +72,50 @@ MEMORY_SEARCH = ToolDefinition(
     metadata={"system_tool": True},
 )
 
+TASK_PLAN = ToolDefinition(
+    name="task.plan",
+    description=(
+        "Create or replace the task checklist for the current work. "
+        "Use this when a request requires multiple steps. "
+        "Each item has a description and a status (pending, in_progress, completed). "
+        "Only one item should be in_progress at a time. "
+        "You MUST complete or cancel every item before giving a final response."
+    ),
+    parameters=[
+        ToolParameter(
+            name="items",
+            type="string",
+            description=(
+                "JSON array of task items. Each item: "
+                '{\"content\": \"description\", \"status\": \"pending|in_progress|completed|cancelled\"}'
+            ),
+            required=True,
+        ),
+    ],
+    metadata={"system_tool": True},
+)
+
+TASK_UPDATE = ToolDefinition(
+    name="task.update",
+    description=(
+        "Update the task checklist. Provide the full updated list (replaces the current one). "
+        "Mark items as completed as soon as you finish them. "
+        "Do NOT give a final response while pending or in_progress items remain."
+    ),
+    parameters=[
+        ToolParameter(
+            name="items",
+            type="string",
+            description=(
+                "JSON array of the full updated task list. Each item: "
+                '{\"content\": \"description\", \"status\": \"pending|in_progress|completed|cancelled\"}'
+            ),
+            required=True,
+        ),
+    ],
+    metadata={"system_tool": True},
+)
+
 PROCEDURE_PROPOSE = ToolDefinition(
     name="procedure.propose",
     description=(
@@ -191,6 +235,8 @@ ALL_SYSTEM_TOOLS: list[ToolDefinition] = [
     SELF_DOCUMENT_READ,
     SELF_DOCUMENT_WRITE,
     SELF_DOCUMENT_DELETE,
+    TASK_PLAN,
+    TASK_UPDATE,
     PROCEDURE_PROPOSE,
 ]
 
@@ -223,6 +269,7 @@ class SystemToolDriver:
         self._memory = memory
         self._memory_dir = Path(memory_dir) if memory_dir else None
         self._procedure_sink = procedure_sink
+        self._task_items: list[dict[str, str]] = []
         self._handlers: dict[str, _Handler] = {
             "memory.read": self._handle_memory_read,
             "memory.write": self._handle_memory_write,
@@ -233,6 +280,8 @@ class SystemToolDriver:
             "document.read": self._handle_self_document_read,
             "document.write": self._handle_self_document_write,
             "document.delete": self._handle_self_document_delete,
+            "task.plan": self._handle_task_plan,
+            "task.update": self._handle_task_update,
             "procedure.propose": self._handle_procedure_propose,
         }
 
@@ -373,6 +422,56 @@ class SystemToolDriver:
             return {"deleted": False, "filename": filename, "reason": "File does not exist."}
         path.unlink()
         return {"deleted": True, "filename": filename}
+
+    # -- task.plan / task.update ---------------------------------------------
+
+    def _parse_task_items(self, raw: str) -> list[dict[str, str]]:
+        """Parse a JSON array of task items from the LLM."""
+        import json as _json
+        try:
+            items = _json.loads(raw)
+        except (_json.JSONDecodeError, TypeError):
+            raise ValueError(f"task items must be a valid JSON array, got: {raw!r:.200}")
+        if not isinstance(items, list):
+            raise ValueError("task items must be a JSON array")
+        valid_statuses = {"pending", "in_progress", "completed", "cancelled"}
+        cleaned: list[dict[str, str]] = []
+        for item in items:
+            content = str(item.get("content", "")).strip()
+            status = str(item.get("status", "pending")).strip()
+            if not content:
+                continue
+            if status not in valid_statuses:
+                status = "pending"
+            cleaned.append({"content": content, "status": status})
+        return cleaned
+
+    def _task_summary(self) -> dict[str, Any]:
+        """Return a summary of the current task list."""
+        counts = {"pending": 0, "in_progress": 0, "completed": 0, "cancelled": 0}
+        for item in self._task_items:
+            counts[item["status"]] = counts.get(item["status"], 0) + 1
+        return {
+            "items": list(self._task_items),
+            "total": len(self._task_items),
+            **counts,
+        }
+
+    def _handle_task_plan(self, ctx: ExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        raw = str(arguments.get("items", "[]"))
+        try:
+            self._task_items = self._parse_task_items(raw)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        return self._task_summary()
+
+    def _handle_task_update(self, ctx: ExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        raw = str(arguments.get("items", "[]"))
+        try:
+            self._task_items = self._parse_task_items(raw)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        return self._task_summary()
 
     # -- procedure.propose ---------------------------------------------------
 
