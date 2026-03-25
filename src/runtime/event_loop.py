@@ -3,8 +3,7 @@ from __future__ import annotations
 from typing import Callable
 
 from src.domain import RobotEvent
-from src.ports import EventSourcePort, HeartbeatPort
-from src.runtime.kernel import DigitalRobotKernel
+from src.ports import EventSourcePort, HeartbeatPort, KernelPort
 
 
 class RuntimeEventLoop:
@@ -18,7 +17,7 @@ class RuntimeEventLoop:
 
     def __init__(
         self,
-        kernel: DigitalRobotKernel,
+        kernel: KernelPort,
         event_source: EventSourcePort | None = None,
         heartbeat: HeartbeatPort | None = None,
         heartbeat_enabled: Callable[[], bool] | None = None,

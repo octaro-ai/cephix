@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Protocol, runtime_checkable
 
 
-from src.domain import ControlRequest, ExecutionContext, OutboundMessage, Plan, PlanningContext, ReplyTarget, RobotEvent, ToolResult
+from src.domain import ControlRequest, ExecutionContext, OutboundMessage, Plan, PlanningContext, ReplyTarget, RobotEvent, RobotState, ToolResult
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +138,33 @@ class MemoryDocumentPort(Protocol):
 
 class ContextAssemblerPort(Protocol):
     def assemble(self, event: RobotEvent, user_id: str) -> PlanningContext:
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Kernel port – the decision-making core of the robot
+# ---------------------------------------------------------------------------
+
+
+class KernelPort(Protocol):
+    """Minimal contract for a kernel that processes robot events.
+
+    Different kernel implementations can provide different decision-making
+    strategies (LLM-based, scripted, human-operated) while sharing the same
+    infrastructure (tools, memory, channels).  The ``Plan`` object is the
+    common currency between any kernel and the execution layer – analogous
+    to ``cmd_vel`` in ROS, where the robot does not care whether a velocity
+    command originates from an autonomous planner or a joystick.
+    """
+
+    robot_id: str
+    default_output_target: ReplyTarget | None
+
+    @property
+    def state(self) -> RobotState:
+        ...
+
+    def handle_event(self, event: RobotEvent) -> None:
         ...
 
 

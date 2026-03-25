@@ -11,6 +11,7 @@ from src.ports import (
     EventSourcePort,
     FirmwarePort,
     HeartbeatPort,
+    KernelPort,
     MemoryPort,
     MessageDeliveryPort,
     PairingRegistryPort,
@@ -43,7 +44,7 @@ class DigitalRobot:
         event_source: EventSourcePort | None = None,
         heartbeat: HeartbeatPort | None = None,
         channels: list[object] | None = None,
-        _kernel_factory: Callable[..., DigitalRobotKernel] = DigitalRobotKernel,
+        _kernel_factory: Callable[..., KernelPort] = DigitalRobotKernel,
         _control_plane_factory: Callable[..., RobotControlPlane] = RobotControlPlane,
     ) -> None:
         self.robot_id = robot_id
