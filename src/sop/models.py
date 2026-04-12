@@ -45,3 +45,6 @@ class SOPDefinition:
     trigger_patterns: list[str] = field(default_factory=list)
     learnings_document: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    safe_actions: list[str] = field(default_factory=list)
+    requires_approval_for: list[str] = field(default_factory=list)
+    allowed_actor_roles: list[str] = field(default_factory=list)

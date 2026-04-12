@@ -752,7 +752,7 @@ class RealInstanceIntegrationTests(unittest.TestCase):
 
     def test_bootstrap_content_is_injected_into_system_prompt(self) -> None:
         """The actual BOOTSTRAP.md content (onboarding script) should be
-        present in the system prompt — not requiring a document.read call."""
+        present in the system prompt — not requiring a memory.read_document call."""
         received_messages: list[list[LLMMessage]] = []
 
         def capture_fn(messages, tools):
@@ -792,17 +792,19 @@ class RealInstanceIntegrationTests(unittest.TestCase):
         self.assertIn("memory.write", tool_names)
         self.assertIn("core_memory.read", tool_names)
         self.assertIn("core_memory.update", tool_names)
-        self.assertIn("document.list", tool_names)
-        self.assertIn("document.read", tool_names)
-        self.assertIn("document.write", tool_names)
-        self.assertIn("document.delete", tool_names)
+        self.assertIn("memory.list_documents", tool_names)
+        self.assertIn("memory.read_document", tool_names)
+        self.assertIn("memory.write_document", tool_names)
+        self.assertIn("memory.delete_document", tool_names)
+        self.assertIn("notebook.task", tool_names)
+        self.assertIn("notebook.sop", tool_names)
         self.assertIn("procedure.propose", tool_names)
 
         # Domain tool
         self.assertIn("mail.list_new_messages", tool_names)
 
     def test_document_write_persists_to_workspace(self) -> None:
-        """LLM calls document.write → file appears in instance memory dir."""
+        """LLM calls memory.write_document → file appears in instance memory dir."""
         from src.configuration import resolve_robot_instance
         instance = resolve_robot_instance(robot_id="test-bot", home_override=self.home_dir)
         call_count = 0
@@ -815,7 +817,7 @@ class RealInstanceIntegrationTests(unittest.TestCase):
                     tool_calls=[
                         LLMToolCall(
                             id="call_dw",
-                            name="document.write",
+                            name="memory.write_document",
                             arguments={"filename": "IDENTITY.md", "content": "# IDENTITY\nName: Aria\nEmoji: 🦊"},
                         )
                     ],
@@ -843,7 +845,7 @@ class RealInstanceIntegrationTests(unittest.TestCase):
             if call_count == 1:
                 return LLMCompletion(
                     tool_calls=[
-                        LLMToolCall(id="c1", name="document.list", arguments={})
+                        LLMToolCall(id="c1", name="memory.list_documents", arguments={})
                     ],
                     model="stub", finish_reason="tool_calls", usage={},
                 )

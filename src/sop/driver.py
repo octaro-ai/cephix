@@ -155,8 +155,8 @@ class SOPToolDriver:
         )
         if sop.learnings_document:
             result["learnings_hint"] = (
-                f"Read '{sop.learnings_document}' via document.read for known issues and solutions. "
-                f"Write new learnings back to this document via document.write when you encounter new problems."
+                f"Read '{sop.learnings_document}' via memory.read_document for known issues and solutions. "
+                f"Write new learnings back to this document via memory.write_document when you encounter new problems."
             )
         return result
 

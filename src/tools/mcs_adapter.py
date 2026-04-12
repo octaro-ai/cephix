@@ -28,9 +28,12 @@ from src.tools.models import ToolDefinition, ToolParameter
 
 
 class MCSToolDriverPort(Protocol):
-    """Protocol mirroring the MCS ToolDriver interface."""
+    """Protocol mirroring the MCS ToolDriver interface.
 
-    def list_tools(self) -> list[dict[str, Any]]:
+    Accepts both MCS ``Tool`` objects and plain dicts from ``list_tools``.
+    """
+
+    def list_tools(self) -> list[Any]:
         ...
 
     def execute_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
@@ -38,11 +41,23 @@ class MCSToolDriverPort(Protocol):
 
 
 class MCSToolDriverAdapter:
-    """Wraps an MCS ToolDriver into the Cephix ToolDriverPort interface."""
+    """Wraps an MCS ToolDriver into the Cephix ToolDriverPort interface.
 
-    def __init__(self, driver: MCSToolDriverPort, namespace: str) -> None:
+    Accepts an optional ``risk_overrides`` dict mapping original tool names
+    to their risk class (e.g. ``{"move_message": "low_risk_mutation"}``).
+    """
+
+    def __init__(
+        self,
+        driver: MCSToolDriverPort,
+        namespace: str,
+        risk_overrides: dict[str, str] | None = None,
+        context_mappings: dict[str, dict[str, str]] | None = None,
+    ) -> None:
         self._driver = driver
         self._namespace = namespace
+        self._risk_overrides = risk_overrides or {}
+        self._context_mappings = context_mappings or {}
 
     def _namespaced(self, name: str) -> str:
         return f"{self._namespace}.{name}" if self._namespace else name
@@ -74,8 +89,16 @@ class MCSToolDriverAdapter:
                 return defn
         return None
 
-    def _convert(self, raw: dict[str, Any]) -> ToolDefinition:
-        raw_params = raw.get("parameters", [])
+    def _convert(self, raw: Any) -> ToolDefinition:
+        if isinstance(raw, dict):
+            name = raw.get("name", "")
+            description = raw.get("description", "")
+            raw_params = raw.get("parameters", [])
+        else:
+            name = getattr(raw, "name", "")
+            description = getattr(raw, "description", "") or getattr(raw, "title", "") or ""
+            raw_params = getattr(raw, "parameters", [])
+
         params: list[ToolParameter] = []
         if isinstance(raw_params, list):
             for p in raw_params:
@@ -87,14 +110,30 @@ class MCSToolDriverAdapter:
                         required=p.get("required", True),
                         enum=p.get("enum"),
                     ))
+                else:
+                    schema = getattr(p, "schema", None) or {}
+                    params.append(ToolParameter(
+                        name=getattr(p, "name", ""),
+                        type=schema.get("type", "string") if isinstance(schema, dict) else "string",
+                        description=getattr(p, "description", ""),
+                        required=getattr(p, "required", False),
+                        enum=schema.get("enum") if isinstance(schema, dict) else None,
+                    ))
+
+        risk_class = self._risk_overrides.get(name, "low_risk_mutation")
+
+        metadata: dict[str, Any] = {
+            "source": "mcs",
+            "namespace": self._namespace,
+            "original_name": name,
+            "risk_class": risk_class,
+        }
+        if name in self._context_mappings:
+            metadata["context_mapping"] = self._context_mappings[name]
 
         return ToolDefinition(
-            name=self._namespaced(raw.get("name", "")),
-            description=raw.get("description", ""),
+            name=self._namespaced(name),
+            description=description,
             parameters=params,
-            metadata={
-                "source": "mcs",
-                "namespace": self._namespace,
-                "original_name": raw.get("name", ""),
-            },
+            metadata=metadata,
         )

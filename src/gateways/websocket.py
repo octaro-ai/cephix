@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from aiohttp import WSMsgType, web
 
-from src.domain import ControlRequest, OutboundMessage, ReplyTarget, RobotEvent
+from src.domain import ApprovalPrompt, ControlRequest, OutboundMessage, ReplyTarget, RobotEvent
 from src.ports import PairingRegistryPort
 from src.telemetry import WideEvent
 from src.utils import new_id
@@ -118,6 +118,21 @@ class WebSocketChannel:
 
     def send_chunk_clear(self, target: ReplyTarget) -> None:
         payload = {"type": "response_chunk_clear"}
+        self._schedule_send(target.recipient_id, payload)
+
+    def send_approval_prompt(self, target: ReplyTarget, prompt: ApprovalPrompt) -> None:
+        payload = {
+            "type": "approval_prompt",
+            "prompt_id": prompt.prompt_id,
+            "run_id": prompt.run_id,
+            "action_context": prompt.action_context,
+            "buttons": [
+                {"label": b.label, "payload": b.payload}
+                for b in prompt.buttons
+            ],
+        }
+        if prompt.companion_text:
+            payload["companion_text"] = prompt.companion_text
         self._schedule_send(target.recipient_id, payload)
 
     def send_control_payload(self, recipient_id: str, payload: dict[str, Any]) -> None:
@@ -244,6 +259,10 @@ class WebSocketChannel:
             await self._handle_session_list(session, data)
             return
 
+        if msg_type == "approval.decision":
+            await self._handle_approval_decision(session, data)
+            return
+
         if msg_type != "message":
             await self._send_json(session.ws, {"type": "error", "content": f"Unknown message type: {msg_type}"})
             return
@@ -284,6 +303,30 @@ class WebSocketChannel:
         )
         self._incoming_events.append(event)
         await self._send_json(session.ws, {"type": "ack", "content": "message_queued", "event_id": event.event_id})
+
+    async def _handle_approval_decision(self, session: _ClientSession, data: dict[str, Any]) -> None:
+        """Turn a deterministic button-click into an approval.decision RobotEvent."""
+        button_payload = data.get("payload", {})
+        sender_id = str(data.get("sender_id", session.sender_id or "owner"))
+        conversation_id = data.get("conversation_id") or f"ws-{session.client_id}"
+
+        event = RobotEvent(
+            event_id=new_id("evt"),
+            event_type="approval.decision",
+            source_channel=self.channel_id,
+            sender_id=sender_id,
+            conversation_id=str(conversation_id),
+            text=None,
+            payload=button_payload,
+            reply_target=ReplyTarget(
+                channel=self.channel_id,
+                recipient_id=session.client_id,
+                conversation_id=str(conversation_id),
+                mode="reply",
+            ),
+        )
+        self._incoming_events.append(event)
+        await self._send_json(session.ws, {"type": "ack", "content": "approval_decision_queued", "event_id": event.event_id})
 
     async def _handle_session_new(self, session: _ClientSession) -> None:
         conversation_id = new_id("conv")

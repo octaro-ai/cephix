@@ -36,6 +36,7 @@ class RobotEvent:
     available_targets: list[ReplyTarget] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: str = field(default_factory=utc_now_iso)
+    actor_context: Any = None
 
 
 @dataclass
@@ -47,6 +48,7 @@ class PlanningContext:
     active_skills: list[Any] = field(default_factory=list)
     active_sops: list[Any] = field(default_factory=list)
     sop_current_node: Any = None
+    notebook_entries: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -58,6 +60,7 @@ class ExecutionContext:
     channel: str
     trace_id: str
     created_at: str = field(default_factory=utc_now_iso)
+    actor_context: Any = None
 
 
 @dataclass
@@ -153,3 +156,23 @@ class RobotState(str, Enum):
     RESPONDING = "RESPONDING"
     DONE = "DONE"
     ERROR = "ERROR"
+
+
+# ---------------------------------------------------------------------------
+# Approval UI types – system-generated, never LLM-generated
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ApprovalButton:
+    label: str
+    payload: dict[str, str]
+
+
+@dataclass
+class ApprovalPrompt:
+    prompt_id: str
+    run_id: str
+    action_context: dict[str, str]
+    buttons: list[ApprovalButton]
+    companion_text: str | None = None

@@ -3,8 +3,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+
 from src.control import RobotControlPlane
 from src.domain import ReplyTarget
+from src.governance.ports import ActorResolverPort, ApprovalStorePort
+from src.notebooks.ports import NotebookStorePort
 from src.ports import (
     BusPort,
     ContextAssemblerPort,
@@ -44,6 +47,9 @@ class DigitalRobot:
         event_source: EventSourcePort | None = None,
         heartbeat: HeartbeatPort | None = None,
         channels: list[object] | None = None,
+        actor_resolver: ActorResolverPort | None = None,
+        approval_store: ApprovalStorePort | None = None,
+        notebook_store: NotebookStorePort | None = None,
         _kernel_factory: Callable[..., KernelPort] = DigitalRobotKernel,
         _control_plane_factory: Callable[..., RobotControlPlane] = RobotControlPlane,
     ) -> None:
@@ -65,6 +71,9 @@ class DigitalRobot:
             memory=memory,
             telemetry=telemetry,
             bus=bus,
+            actor_resolver=actor_resolver,
+            approval_store=approval_store,
+            notebook_store=notebook_store,
         )
         self.control_plane = _control_plane_factory(
             robot_id=self.kernel.robot_id,

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Protocol, runtime_checkable
 
 
-from src.domain import ControlRequest, ExecutionContext, OutboundMessage, Plan, PlanningContext, ReplyTarget, RobotEvent, RobotState, ToolResult
+from src.domain import ApprovalPrompt, ControlRequest, ExecutionContext, OutboundMessage, Plan, PlanningContext, ReplyTarget, RobotEvent, RobotState, ToolResult
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +115,12 @@ class ChannelControlPort(Protocol):
 @runtime_checkable
 class ChannelInfoPort(Protocol):
     def set_public_info(self, info: dict[str, Any]) -> None:
+        ...
+
+
+@runtime_checkable
+class ApprovalPromptPort(Protocol):
+    def send_approval_prompt(self, target: ReplyTarget, prompt: "ApprovalPrompt") -> None:
         ...
 
 

@@ -28,7 +28,7 @@ Aktualisiere diese Dateien mit dem, was du gelernt hast:
 - `IDENTITY.md` -- dein Name, Wesen, Stil, Emoji
 - `USER.md` -- ihr Name, wie du sie ansprichst, Notizen
 
-Nutze dafuer `document.write`.
+Nutze dafuer `memory.write_document`.
 
 Dann sprecht gemeinsam ueber:
 
@@ -50,7 +50,7 @@ Fuehre sie durch, was sie waehlen.
 
 ## Wenn du fertig bist
 
-Loesche diese Datei mit `document.delete`. Du brauchst kein Bootstrap-Skript mehr -- du bist jetzt du.
+Loesche diese Datei mit `memory.delete_document`. Du brauchst kein Bootstrap-Skript mehr -- du bist jetzt du.
 
 ---
 

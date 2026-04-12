@@ -42,7 +42,7 @@ class MarkdownMemoryDocumentStore:
         self.root = Path(root)
 
     def get_documents(self, event: RobotEvent, user_id: str) -> dict[str, str]:
-        names = ["BOOTSTRAP.md", "IDENTITY.md", "TOOLS.md", "DIRECTORY.md", "CORE_MEMORIES.md", "MEMORY.md"]
+        names = ["BOOTSTRAP.md", "IDENTITY.md", "DIRECTORY.md", "CORE_MEMORIES.md", "MEMORY.md"]
         if event.event_type != "heartbeat.tick" and user_id != "system":
             names.append("USER.md")
 
@@ -69,6 +69,7 @@ class DefaultContextAssembler:
         tool_catalog: ToolCatalogPort | None = None,
         system_tool_definitions: list[object] | None = None,
         autonomy_level: AutonomyLevel = AutonomyLevel.CREATIVE,
+        notebook_store: object | None = None,
     ) -> None:
         self.firmware = firmware
         self.memory_documents = memory_documents
@@ -79,6 +80,7 @@ class DefaultContextAssembler:
         self.tool_catalog = tool_catalog
         self.system_tool_definitions = system_tool_definitions or []
         self.autonomy_level = autonomy_level
+        self.notebook_store = notebook_store
 
     def assemble(self, event: RobotEvent, user_id: str) -> PlanningContext:
         firmware_documents = dict(self.firmware.get_base_guidance())
@@ -108,6 +110,8 @@ class DefaultContextAssembler:
             self._mount_tools(active_sops, all_required_tools)
             tool_schemas = self.tool_registry.get_schemas()
 
+        notebook_entries = self._load_notebook_entries(user_id, active_sops)
+
         return PlanningContext(
             firmware_documents=firmware_documents,
             memory_documents=self.memory_documents.get_documents(event, user_id),
@@ -115,7 +119,32 @@ class DefaultContextAssembler:
             tool_schemas=tool_schemas,
             active_skills=active_skills,
             active_sops=active_sops,
+            notebook_entries=notebook_entries,
         )
+
+    def _load_notebook_entries(self, user_id: str, active_sops: list) -> list:
+        """Load task-specific and SOP-level notebook entries for active SOPs."""
+        if self.notebook_store is None:
+            return []
+
+        from src.notebooks.models import NotebookType
+        entries = []
+        for sop in active_sops:
+            task_entries = self.notebook_store.load_by_principal(
+                NotebookType.USER_TASK,
+                principal_id=user_id,
+                scope_id=f"{user_id}:{sop.name}",
+                limit=20,
+            )
+            entries.extend(task_entries)
+
+            sop_entries = self.notebook_store.load(
+                NotebookType.SOP,
+                scope_id=sop.name,
+                limit=10,
+            )
+            entries.extend(sop_entries)
+        return entries
 
     def _mount_tools(self, active_sops: list, all_required_tools: set[str]) -> None:
         """Mount tools according to the autonomy level.

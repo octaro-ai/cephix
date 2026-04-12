@@ -1,6 +1,6 @@
 """System tools that are always available to the LLM, regardless of SOP/Skill.
 
-Memory, core-memory, document, and procedure tools.
+Memory, core-memory, notebook, and procedure tools.
 Implements ``ToolDriverPort`` so it plugs into the standard tool pipeline.
 """
 
@@ -12,6 +12,8 @@ from typing import Any
 
 from src.domain import ExecutionContext
 from src.memory.models import ProcedureRecord
+from src.notebooks.models import NotebookEntry, NotebookEntryKind, NotebookType
+from src.notebooks.ports import NotebookStorePort
 from src.ports import MemoryPort
 from src.tools.models import ToolDefinition, ToolParameter
 from src.utils import new_id, utc_now_iso
@@ -165,7 +167,7 @@ CORE_MEMORY_UPDATE = ToolDefinition(
 CORE_MEMORY_BUDGET = 2000
 
 SELF_DOCUMENT_LIST = ToolDefinition(
-    name="document.list",
+    name="memory.list_documents",
     description=(
         "List all editable memory documents (e.g. IDENTITY.md, USER.md, MEMORY.md). "
         "Firmware documents (AGENTS.md, POLICY.md, CONSTITUTION.md) are read-only."
@@ -175,7 +177,7 @@ SELF_DOCUMENT_LIST = ToolDefinition(
 )
 
 SELF_DOCUMENT_READ = ToolDefinition(
-    name="document.read",
+    name="memory.read_document",
     description="Read one of the robot's own memory documents by filename.",
     parameters=[
         ToolParameter(
@@ -188,10 +190,10 @@ SELF_DOCUMENT_READ = ToolDefinition(
 )
 
 SELF_DOCUMENT_WRITE = ToolDefinition(
-    name="document.write",
+    name="memory.write_document",
     description=(
         "Overwrite one of the robot's own memory documents. "
-        "Only memory documents may be written (IDENTITY.md, USER.md, MEMORY.md, etc.). "
+        "Use for stable, curated knowledge: IDENTITY.md, USER.md, MEMORY.md. "
         "Firmware documents are protected and cannot be modified."
     ),
     parameters=[
@@ -210,7 +212,7 @@ SELF_DOCUMENT_WRITE = ToolDefinition(
 )
 
 SELF_DOCUMENT_DELETE = ToolDefinition(
-    name="document.delete",
+    name="memory.delete_document",
     description=(
         "Delete one of the robot's own memory documents. "
         "Use this to remove one-time documents like BOOTSTRAP.md after they have been processed."
@@ -225,6 +227,70 @@ SELF_DOCUMENT_DELETE = ToolDefinition(
     metadata={"system_tool": True},
 )
 
+NOTEBOOK_TASK = ToolDefinition(
+    name="notebook.task",
+    description=(
+        "Write a task-specific note for the current user and active SOP. "
+        "Use when the user tells you something about how a specific task should be handled. "
+        "Example: 'Mails von Adresse X nach Archive statt Finance sortieren.'"
+    ),
+    parameters=[
+        ToolParameter(name="content", type="string", description="The note to record"),
+        ToolParameter(
+            name="sop_name",
+            type="string",
+            description="SOP this note belongs to (e.g. 'mail-sortieren')",
+            required=False,
+        ),
+    ],
+    metadata={"system_tool": True},
+)
+
+NOTEBOOK_SOP = ToolDefinition(
+    name="notebook.sop",
+    description=(
+        "Write a process note about the SOP itself -- not user-specific. "
+        "Use for unclear steps, repeated questions, missing edge cases, improvement hints. "
+        "This material can later be uploaded to the SOP repository for revision."
+    ),
+    parameters=[
+        ToolParameter(name="content", type="string", description="The observation or improvement note"),
+        ToolParameter(
+            name="sop_name",
+            type="string",
+            description="SOP this note belongs to (e.g. 'mail-sortieren')",
+            required=False,
+        ),
+    ],
+    metadata={"system_tool": True},
+)
+
+_SYSTEM_TOOL_RISK: dict[str, str] = {
+    "memory.read": "read_only",
+    "memory.write": "low_risk_mutation",
+    "memory.search": "read_only",
+    "core_memory.read": "read_only",
+    "core_memory.update": "low_risk_mutation",
+    "memory.list_documents": "read_only",
+    "memory.read_document": "read_only",
+    "memory.write_document": "low_risk_mutation",
+    "memory.delete_document": "low_risk_mutation",
+    "notebook.task": "low_risk_mutation",
+    "notebook.sop": "low_risk_mutation",
+    "task.plan": "read_only",
+    "task.update": "read_only",
+    "procedure.propose": "low_risk_mutation",
+}
+
+for _tool_def in [
+    MEMORY_READ, MEMORY_WRITE, MEMORY_SEARCH,
+    CORE_MEMORY_READ, CORE_MEMORY_UPDATE,
+    SELF_DOCUMENT_LIST, SELF_DOCUMENT_READ, SELF_DOCUMENT_WRITE, SELF_DOCUMENT_DELETE,
+    NOTEBOOK_TASK, NOTEBOOK_SOP,
+    TASK_PLAN, TASK_UPDATE, PROCEDURE_PROPOSE,
+]:
+    _tool_def.metadata["risk_class"] = _SYSTEM_TOOL_RISK.get(_tool_def.name, "low_risk_mutation")
+
 ALL_SYSTEM_TOOLS: list[ToolDefinition] = [
     MEMORY_READ,
     MEMORY_WRITE,
@@ -235,6 +301,8 @@ ALL_SYSTEM_TOOLS: list[ToolDefinition] = [
     SELF_DOCUMENT_READ,
     SELF_DOCUMENT_WRITE,
     SELF_DOCUMENT_DELETE,
+    NOTEBOOK_TASK,
+    NOTEBOOK_SOP,
     TASK_PLAN,
     TASK_UPDATE,
     PROCEDURE_PROPOSE,
@@ -265,10 +333,12 @@ class SystemToolDriver:
         memory: MemoryPort,
         memory_dir: str | Path | None = None,
         procedure_sink: _ProcedureSinkPort | None = None,
+        notebook_store: NotebookStorePort | None = None,
     ) -> None:
         self._memory = memory
         self._memory_dir = Path(memory_dir) if memory_dir else None
         self._procedure_sink = procedure_sink
+        self._notebook_store = notebook_store
         self._task_items: list[dict[str, str]] = []
         self._handlers: dict[str, _Handler] = {
             "memory.read": self._handle_memory_read,
@@ -276,10 +346,12 @@ class SystemToolDriver:
             "memory.search": self._handle_memory_search,
             "core_memory.read": self._handle_core_memory_read,
             "core_memory.update": self._handle_core_memory_update,
-            "document.list": self._handle_self_document_list,
-            "document.read": self._handle_self_document_read,
-            "document.write": self._handle_self_document_write,
-            "document.delete": self._handle_self_document_delete,
+            "memory.list_documents": self._handle_self_document_list,
+            "memory.read_document": self._handle_self_document_read,
+            "memory.write_document": self._handle_self_document_write,
+            "memory.delete_document": self._handle_self_document_delete,
+            "notebook.task": self._handle_notebook_task,
+            "notebook.sop": self._handle_notebook_sop,
             "task.plan": self._handle_task_plan,
             "task.update": self._handle_task_update,
             "procedure.propose": self._handle_procedure_propose,
@@ -422,6 +494,48 @@ class SystemToolDriver:
             return {"deleted": False, "filename": filename, "reason": "File does not exist."}
         path.unlink()
         return {"deleted": True, "filename": filename}
+
+    # -- notebook.task -------------------------------------------------------
+
+    def _handle_notebook_task(self, ctx: ExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        if self._notebook_store is None:
+            return {"error": "No notebook store configured."}
+        content = str(arguments["content"])
+        sop_name = arguments.get("sop_name", "general")
+        self._notebook_store.append(NotebookEntry(
+            entry_id=new_id("nb"),
+            notebook_type=NotebookType.USER_TASK,
+            scope_type="user_task",
+            scope_id=f"{ctx.user_id}:{sop_name}",
+            principal_id=ctx.user_id,
+            actor_id=ctx.user_id,
+            kind=NotebookEntryKind.RULE,
+            content=content,
+            related_sop=sop_name,
+            source_run_id=ctx.run_id,
+        ))
+        return {"stored": True, "notebook": "task", "sop": sop_name}
+
+    # -- notebook.sop --------------------------------------------------------
+
+    def _handle_notebook_sop(self, ctx: ExecutionContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        if self._notebook_store is None:
+            return {"error": "No notebook store configured."}
+        content = str(arguments["content"])
+        sop_name = arguments.get("sop_name", "general")
+        self._notebook_store.append(NotebookEntry(
+            entry_id=new_id("nb"),
+            notebook_type=NotebookType.SOP,
+            scope_type="sop",
+            scope_id=sop_name,
+            principal_id="system",
+            actor_id=ctx.user_id,
+            kind=NotebookEntryKind.OBSERVATION,
+            content=content,
+            related_sop=sop_name,
+            source_run_id=ctx.run_id,
+        ))
+        return {"stored": True, "notebook": "sop", "sop": sop_name}
 
     # -- task.plan / task.update ---------------------------------------------
 

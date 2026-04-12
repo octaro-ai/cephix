@@ -34,9 +34,20 @@ class GovernedToolExecutor:
             raise RuntimeError(f"Tool not mounted: {tool_name!r}")
 
         decision: GuardDecision = self._guard.check(ctx, tool_name, arguments)
+
+        if decision.approval_required:
+            return {
+                "status": "approval_required",
+                "action": tool_name,
+                "action_context": decision.action_context,
+            }
+
         if not decision.allowed:
-            raise PermissionError(
-                f"Tool execution denied by {decision.guard_name}: {decision.reason}"
-            )
+            return {
+                "status": "denied",
+                "action": tool_name,
+                "reason": decision.reason,
+                "guard_name": decision.guard_name,
+            }
 
         return self._collector.execute(ctx, tool_name, arguments)

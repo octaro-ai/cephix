@@ -1,8 +1,7 @@
-"""Telegram channel adapter.
+"""WhatsApp Business Cloud API channel adapter (stub).
 
-Currently a local-dev stub that logs to stdout.  A future iteration will
-use the Bot API (``python-telegram-bot`` or direct ``aiohttp`` calls) for
-real inline-keyboard approval prompts and callback-query handling.
+Will be backed by the WhatsApp Cloud API with Reply-Button messages
+for approval prompts and webhook-based inbound handling.
 """
 
 from __future__ import annotations
@@ -16,8 +15,8 @@ from src.utils import new_id
 logger = logging.getLogger(__name__)
 
 
-class TelegramChannel:
-    def __init__(self, *, channel_id: str = "telegram") -> None:
+class WhatsAppChannel:
+    def __init__(self, *, channel_id: str = "whatsapp") -> None:
         self.channel_id = channel_id
         self._incoming_events: list[RobotEvent] = []
 
@@ -30,7 +29,7 @@ class TelegramChannel:
         return events
 
     def send(self, target: ReplyTarget, message: OutboundMessage) -> None:
-        logger.info("[TG] -> %s: %s", target.recipient_id, message.text[:120])
+        logger.info("[WA] -> %s: %s", target.recipient_id, message.text[:120])
 
     def send_chunk(self, target: ReplyTarget, token: str) -> None:
         pass
@@ -39,11 +38,10 @@ class TelegramChannel:
         pass
 
     def send_approval_prompt(self, target: ReplyTarget, prompt: ApprovalPrompt) -> None:
-        """Log the approval prompt.  Real implementation would send an InlineKeyboard."""
         ctx = prompt.action_context
         buttons_repr = " | ".join(f"[{b.label}]" for b in prompt.buttons)
         logger.info(
-            "[TG] APPROVAL -> %s | %s: %s %s  Buttons: %s",
+            "[WA] APPROVAL -> %s | %s: %s %s  Buttons: %s",
             target.recipient_id,
             ctx.get("action", "?"),
             ctx.get("source", ""),
@@ -58,7 +56,6 @@ class TelegramChannel:
         conversation_id: str,
         button_payload: dict[str, Any],
     ) -> None:
-        """Simulate a Telegram callback-query (button press) for testing."""
         event = RobotEvent(
             event_id=new_id("evt"),
             event_type="approval.decision",

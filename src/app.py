@@ -10,11 +10,16 @@ from src.configuration import load_global_secret_candidates, onboard_robot_insta
 from src.control import InMemoryPairingRegistry, RobotControlPlane
 from src.context import DefaultContextAssembler, FirmwareHeartbeat, MarkdownFirmwareStore, MarkdownMemoryDocumentStore
 from src.domain import ExecutionContext, MessageRecord, ReplyTarget, RobotEvent
-from src.gateways import ChannelHub, TelegramChannel, WebSocketChannel
+from src.gateways import ChannelHub, TelegramChannel, WebchatChannel, WebSocketChannel, WhatsAppChannel
+from src.governance.actor_resolver import ConfigBasedActorResolver
+from src.governance.approval_store import FileApprovalStore
 from src.governance.composite import CompositeToolExecutionGuard
+from src.governance.risk_classifier import MetadataRiskClassifier
+from src.governance.tool_guard import PolicyToolExecutionGuard
 from src.memory import InMemoryMemoryStore, PersistentMemoryStore
 from src.llm import StubLLMProvider, create_llm_provider
 from src.llm.ports import LLMPort
+from src.notebooks.store import FileNotebookStore
 from src.planners import LLMPlanner
 from src.robot import DigitalRobot
 from src.runtime import RuntimeEventLoop
@@ -22,6 +27,7 @@ from src.service import RobotService
 from src.telemetry import EventLog, FanoutEventSink, LoggingEventSink, Telemetry
 from src.tools.collector import ToolCollector
 from src.tools.executor import GovernedToolExecutor
+from src.tools.mail_driver_factory import build_mail_driver
 from src.tools.models import ToolDefinition, ToolParameter
 from src.tools.registry import InMemoryToolRegistry
 from src.tools.system_tools import ALL_SYSTEM_TOOLS, SystemToolDriver
@@ -104,10 +110,12 @@ def _build_demo_drivers(
     memory: InMemoryMemoryStore | PersistentMemoryStore,
     memory_dir: str | Path | None = None,
     sops_dir: str | Path | None = None,
+    notebook_store: Any = None,
 ) -> list[Any]:
     """Build the list of ToolDriverPort implementations for the demo robot."""
-    # System tools (memory, documents, procedures)
-    system_driver = SystemToolDriver(memory=memory, memory_dir=memory_dir)
+    system_driver = SystemToolDriver(
+        memory=memory, memory_dir=memory_dir, notebook_store=notebook_store,
+    )
 
     # Domain tools (demo mail)
     domain_driver = InlineToolDriver()
@@ -118,6 +126,7 @@ def _build_demo_drivers(
             parameters=[
                 ToolParameter(name="limit", type="integer", description="Max messages to return", required=False),
             ],
+            metadata={"risk_class": "read_only"},
         ),
         _mail_list_handler,
     )
@@ -147,11 +156,23 @@ def _build_demo_drivers(
 
 def _build_tool_stack(
     drivers: list[Any],
+    *,
+    approval_store: FileApprovalStore | None = None,
 ) -> tuple[GovernedToolExecutor, InMemoryToolRegistry, ToolCollector]:
     """Wire up Collector → Registry → GovernedToolExecutor from drivers."""
     collector = ToolCollector(drivers)
     registry = InMemoryToolRegistry(collector)
-    guard = CompositeToolExecutionGuard()
+
+    if approval_store is not None:
+        risk_classifier = MetadataRiskClassifier(registry=registry)
+        guard = PolicyToolExecutionGuard(
+            risk_classifier=risk_classifier,
+            approval_store=approval_store,
+            registry=registry,
+        )
+    else:
+        guard = CompositeToolExecutionGuard()
+
     executor = GovernedToolExecutor(registry=registry, guard=guard, collector=collector)
     return executor, registry, collector
 
@@ -260,15 +281,14 @@ def build_kernel_for_instance(
     if robot_cfg_path.exists():
         robot_cfg = _load_yaml(robot_cfg_path)
 
+    secret_resolver = lambda key: read_secret(
+        key,
+        instance.paths.instance_env_path,
+        global_fallback=instance.paths.global_env_path,
+    )
+
     if llm is None and robot_cfg:
-        llm = create_llm_provider(
-            robot_cfg,
-            secret_resolver=lambda key: read_secret(
-                key,
-                instance.paths.instance_env_path,
-                global_fallback=instance.paths.global_env_path,
-            ),
-        )
+        llm = create_llm_provider(robot_cfg, secret_resolver=secret_resolver)
 
     log_path = Path(event_log_path) if event_log_path else instance.paths.logs_dir / "events.jsonl"
     event_log = EventLog(str(log_path))
@@ -276,11 +296,30 @@ def build_kernel_for_instance(
     firmware = MarkdownFirmwareStore(instance.paths.firmware_dir)
     memory_store = PersistentMemoryStore(instance.paths.workspace_dir / "memory_data")
     memory_documents = MarkdownMemoryDocumentStore(instance.paths.memory_dir)
+
+    # -- Governance components -----------------------------------------------
+    actor_resolver = ConfigBasedActorResolver(
+        principal_ids=set(robot_cfg.get("governance", {}).get("principal_ids", [])),
+        delegate_ids=set(robot_cfg.get("governance", {}).get("delegate_ids", [])),
+        operator_ids=set(robot_cfg.get("governance", {}).get("operator_ids", [])),
+    )
+    approval_store = FileApprovalStore(instance.paths.workspace_dir / "approvals")
+    notebook_store = FileNotebookStore(instance.paths.workspace_dir / "notebooks")
+
+    # -- Drivers and tool stack -----------------------------------------------
     drivers = _build_demo_drivers(
         memory_store,
         memory_dir=instance.paths.memory_dir,
         sops_dir=instance.paths.sops_dir,
+        notebook_store=notebook_store,
     )
+
+    mail_driver = build_mail_driver(
+        secret_resolver=secret_resolver,
+        mail_config=robot_cfg.get("mail"),
+    )
+    if mail_driver is not None:
+        drivers.append(mail_driver)
 
     ws_cfg = robot_cfg.get("workstation")
     if ws_cfg:
@@ -288,7 +327,10 @@ def build_kernel_for_instance(
         if ws_driver is not None:
             drivers.append(ws_driver)
 
-    tool_executor, registry, collector = _build_tool_stack(drivers)
+    tool_executor, registry, collector = _build_tool_stack(
+        drivers,
+        approval_store=approval_store,
+    )
     context_assembler = DefaultContextAssembler(
         firmware=firmware,
         memory_documents=memory_documents,
@@ -296,6 +338,7 @@ def build_kernel_for_instance(
         tool_registry=registry,
         tool_catalog=collector,
         system_tool_definitions=ALL_SYSTEM_TOOLS,
+        notebook_store=notebook_store,
     )
     # Register a sink for each channel referenced by the default output target.
     egress: dict[str, Any] = {}
@@ -313,6 +356,9 @@ def build_kernel_for_instance(
         memory=memory_store,
         telemetry=Telemetry(event_log),
         bus=bus,
+        actor_resolver=actor_resolver,
+        approval_store=approval_store,
+        notebook_store=notebook_store,
     )
     return kernel, bus, memory_store
 
@@ -357,11 +403,36 @@ def build_websocket_service(
     if robot_cfg_path.exists():
         robot_cfg = _load_yaml(robot_cfg_path)
 
+    # -- Governance components -----------------------------------------------
+    secret_resolver = lambda key: read_secret(
+        key,
+        instance.paths.instance_env_path,
+        global_fallback=instance.paths.global_env_path,
+    )
+
+    actor_resolver = ConfigBasedActorResolver(
+        principal_ids=set(robot_cfg.get("governance", {}).get("principal_ids", [])),
+        delegate_ids=set(robot_cfg.get("governance", {}).get("delegate_ids", [])),
+        operator_ids=set(robot_cfg.get("governance", {}).get("operator_ids", [])),
+    )
+    approval_store = FileApprovalStore(instance.paths.workspace_dir / "approvals")
+    notebook_store = FileNotebookStore(instance.paths.workspace_dir / "notebooks")
+
+    # -- Drivers and tool stack -----------------------------------------------
     drivers = _build_demo_drivers(
         memory_store,
         memory_dir=instance.paths.memory_dir,
         sops_dir=instance.paths.sops_dir,
+        notebook_store=notebook_store,
     )
+
+    # MCS Mail Driver (if configured in robot.yaml).
+    mail_driver = build_mail_driver(
+        secret_resolver=secret_resolver,
+        mail_config=robot_cfg.get("mail"),
+    )
+    if mail_driver is not None:
+        drivers.append(mail_driver)
 
     # Workstation driver (if configured in robot.yaml).
     ws_cfg = robot_cfg.get("workstation")
@@ -370,18 +441,15 @@ def build_websocket_service(
         if ws_driver is not None:
             drivers.append(ws_driver)
 
-    tool_executor, registry, collector = _build_tool_stack(drivers)
+    tool_executor, registry, collector = _build_tool_stack(
+        drivers,
+        approval_store=approval_store,
+    )
 
     # Resolve LLM provider from robot.yaml if not explicitly provided.
     if llm is None and robot_cfg:
-        llm = create_llm_provider(
-            robot_cfg,
-            secret_resolver=lambda key: read_secret(
-                key,
-                instance.paths.instance_env_path,
-                global_fallback=instance.paths.global_env_path,
-            ),
-        )
+        llm = create_llm_provider(robot_cfg, secret_resolver=secret_resolver)
+
     context_assembler = DefaultContextAssembler(
         firmware=firmware,
         memory_documents=memory_documents,
@@ -389,6 +457,7 @@ def build_websocket_service(
         tool_registry=registry,
         tool_catalog=collector,
         system_tool_definitions=ALL_SYSTEM_TOOLS,
+        notebook_store=notebook_store,
     )
     heartbeat = FirmwareHeartbeat(firmware=firmware, default_output_target=default_output_target)
     pairing_registry = InMemoryPairingRegistry()
@@ -421,6 +490,9 @@ def build_websocket_service(
         event_source=channel_hub,
         heartbeat=heartbeat,
         channels=[ws_channel],
+        actor_resolver=actor_resolver,
+        approval_store=approval_store,
+        notebook_store=notebook_store,
         _control_plane_factory=lambda **kwargs: RobotControlPlane(
             **kwargs,
             home_path=str(instance.paths.home_dir),

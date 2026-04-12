@@ -20,6 +20,10 @@ class ToolDefinition:
     parameters: list[ToolParameter] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def risk_class(self) -> str:
+        return str(self.metadata.get("risk_class", "low_risk_mutation"))
+
     def to_schema(self) -> dict[str, Any]:
         """Convert to JSON Schema format suitable for LLM function calling."""
         properties: dict[str, Any] = {}

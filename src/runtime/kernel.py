@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.domain import (
+    ApprovalButton,
+    ApprovalPrompt,
     DeliveryDirective,
     ExecutionContext,
     OutboundMessage,
@@ -15,6 +17,8 @@ from src.domain import (
     RobotState,
     ToolResult,
 )
+from src.governance.ports import ActorResolverPort, ApprovalStorePort
+from src.notebooks.ports import NotebookStorePort
 from src.ports import (
     BusPort,
     ContextAssemblerPort,
@@ -49,6 +53,9 @@ class DigitalRobotKernel:
         memory: MemoryPort,
         telemetry: TelemetryPort,
         bus: BusPort,
+        actor_resolver: ActorResolverPort | None = None,
+        approval_store: ApprovalStorePort | None = None,
+        notebook_store: NotebookStorePort | None = None,
     ) -> None:
         self.robot_id = robot_id
         self.default_output_target = default_output_target
@@ -59,6 +66,9 @@ class DigitalRobotKernel:
         self.memory = memory
         self.telemetry = telemetry
         self.bus = bus
+        self.actor_resolver = actor_resolver
+        self.approval_store = approval_store
+        self.notebook_store = notebook_store
         self._state = RobotState.IDLE
         self._thinking_callback: callable | None = None
 
@@ -80,6 +90,14 @@ class DigitalRobotKernel:
             channel=event.source_channel,
             trace_id=new_id("trace"),
         )
+
+        if event.event_type == "approval.decision" and self.approval_store is not None:
+            self._handle_approval_decision(ctx, event)
+            target = self._resolve_delivery_target(event, None)
+            if target is not None:
+                self.message_delivery.send(target, OutboundMessage(text="Freigabe gespeichert."))
+            self._state = RobotState.DONE
+            return
 
         try:
             planning_context = self._observe(ctx, event, user_id)
@@ -142,6 +160,11 @@ class DigitalRobotKernel:
                 "reply_target_channel": event.reply_target.channel if event.reply_target else None,
             },
         )
+
+        if self.actor_resolver is not None:
+            actor_ctx = self.actor_resolver.resolve(event)
+            event.actor_context = actor_ctx
+            ctx.actor_context = actor_ctx
 
         planning_context = self.context_assembler.assemble(event, user_id)
         self.telemetry.emit(
@@ -388,6 +411,8 @@ class DigitalRobotKernel:
         if run_result.delivery_target is not None:
             self.message_delivery.send(run_result.delivery_target, outbound)
 
+        self._maybe_send_approval_prompt(ctx, event, run_result)
+
         self.memory.remember_interaction(
             user_id=user_id,
             conversation_id=event.conversation_id,
@@ -411,6 +436,127 @@ class DigitalRobotKernel:
                     "channel": run_result.delivery_target.channel,
                     "text": outbound.text,
                     "mode": run_result.delivery_target.mode,
+                },
+            )
+
+    # ------------------------------------------------------------------
+    # Approval prompt sending
+    # ------------------------------------------------------------------
+
+    def _maybe_send_approval_prompt(
+        self,
+        ctx: ExecutionContext,
+        event: RobotEvent,
+        run_result: _RunResult,
+    ) -> None:
+        """If any tool result was approval_required, build and send an ApprovalPrompt."""
+        approval_results = [
+            v for v in run_result.tool_results.values()
+            if isinstance(v, dict) and v.get("status") == "approval_required"
+        ]
+        if not approval_results:
+            return
+
+        target = run_result.delivery_target
+        if target is None:
+            return
+
+        hub = self.message_delivery
+        if not hasattr(hub, "send_approval_prompt"):
+            return
+
+        for result in approval_results:
+            action = result.get("action", "unknown")
+            action_context = result.get("action_context", {})
+            prompt = ApprovalPrompt(
+                prompt_id=new_id("aprv"),
+                run_id=ctx.run_id,
+                action_context={"action": action, **action_context},
+                buttons=self._build_standard_buttons(action, action_context),
+                companion_text=run_result.final_response or None,
+            )
+            hub.send_approval_prompt(target, prompt)
+            self.telemetry.emit(
+                ctx=ctx,
+                event_type="approval.prompt_sent",
+                actor="executive.kernel",
+                payload={
+                    "prompt_id": prompt.prompt_id,
+                    "action": action,
+                    "channel": target.channel,
+                },
+            )
+
+    @staticmethod
+    def _build_standard_buttons(action: str, action_context: dict[str, Any]) -> list[ApprovalButton]:
+        base = {"decision": "approve", "action": action, **action_context}
+        deny_base = {"decision": "deny", "action": action, **action_context}
+        return [
+            ApprovalButton(label="Einmal", payload={**base, "scope": "once"}),
+            ApprovalButton(label="Immer so", payload={**base, "scope": "persistent"}),
+            ApprovalButton(label="Nein", payload={**deny_base, "scope": "once"}),
+            ApprovalButton(label="Nie so", payload={**deny_base, "scope": "deny_scoped"}),
+        ]
+
+    # ------------------------------------------------------------------
+    # Approval decision handling (deterministic, no LLM)
+    # ------------------------------------------------------------------
+
+    def _handle_approval_decision(self, ctx: ExecutionContext, event: RobotEvent) -> None:
+        """Process a button-press approval event deterministically."""
+        from src.governance.domain import ApprovalRule, ApprovalScope
+
+        payload = event.payload
+        decision = payload.get("decision", "")
+        scope_str = payload.get("scope", "once")
+        action = payload.get("action", "")
+
+        if not action:
+            return
+
+        principal_id = event.sender_id or ctx.user_id
+        valid_scope_values = {s.value for s in ApprovalScope}
+
+        if decision == "approve":
+            scope = ApprovalScope(scope_str) if scope_str in valid_scope_values else ApprovalScope.ONCE
+            rule = ApprovalRule(
+                principal_id=principal_id,
+                action=action,
+                source_scope=payload.get("source"),
+                target_scope=payload.get("target"),
+                scope=scope,
+                granted_by=principal_id,
+            )
+            self.approval_store.grant(rule)
+            self.telemetry.emit(
+                ctx=ctx,
+                event_type="approval.granted",
+                actor="governance.approval_store",
+                payload={
+                    "action": action,
+                    "scope": scope.value,
+                    "principal_id": principal_id,
+                },
+            )
+        elif decision == "deny":
+            rule = ApprovalRule(
+                principal_id=principal_id,
+                action=action,
+                source_scope=payload.get("source"),
+                target_scope=payload.get("target"),
+                scope=ApprovalScope.DENY,
+                granted_by=principal_id,
+            )
+            if scope_str == "deny_scoped":
+                self.approval_store.grant(rule)
+            self.telemetry.emit(
+                ctx=ctx,
+                event_type="approval.denied",
+                actor="governance.approval_store",
+                payload={
+                    "action": action,
+                    "scope": scope_str,
+                    "principal_id": principal_id,
                 },
             )
 

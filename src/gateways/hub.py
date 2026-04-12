@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from src.domain import OutboundMessage, ReplyTarget, RobotEvent
-from src.ports import ChannelEgressPort, ChannelIngressPort
+from src.domain import ApprovalPrompt, OutboundMessage, ReplyTarget, RobotEvent
+from src.ports import ApprovalPromptPort, ChannelEgressPort, ChannelIngressPort
 
 
 class ChannelHub:
@@ -43,3 +43,14 @@ class ChannelHub:
         if port is None:
             raise RuntimeError(f"No ChannelEgressPort registered for channel: {target.channel}")
         port.send_chunk_clear(target)
+
+    def send_approval_prompt(self, target: ReplyTarget, prompt: ApprovalPrompt) -> None:
+        port = self.egress_ports.get(target.channel)
+        if port is None:
+            return
+        if isinstance(port, ApprovalPromptPort):
+            port.send_approval_prompt(target, prompt)
+
+    def supports_approval_prompt(self, channel: str) -> bool:
+        port = self.egress_ports.get(channel)
+        return isinstance(port, ApprovalPromptPort) if port is not None else False

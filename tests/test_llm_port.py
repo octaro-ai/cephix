@@ -248,9 +248,9 @@ class MessageBuildingTests(unittest.TestCase):
         planner.create_initial_plan(ctx, event, planning_context)
         msgs = messages_captured[0]
 
-        # Should have: user "Hallo", assistant "Hi!", user "Wie geht's?", assistant "Gut!", user "Und jetzt?"
+        # Should have: system (governance), user "Hallo", assistant "Hi!", user "Wie geht's?", assistant "Gut!", user "Und jetzt?"
         roles = [m.role for m in msgs]
-        self.assertEqual(["user", "assistant", "user", "assistant", "user"], roles)
+        self.assertEqual(["system", "user", "assistant", "user", "assistant", "user"], roles)
         self.assertEqual("Und jetzt?", msgs[-1].content)
 
 
