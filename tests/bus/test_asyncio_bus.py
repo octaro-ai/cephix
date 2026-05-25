@@ -237,3 +237,128 @@ async def test_start_is_idempotent() -> None:
     assert bus.is_running
     await bus.stop()
     assert not bus.is_running
+
+
+def _audit_event(text: str = "boot") -> RobotInput:
+    return RobotInput(
+        topic="robot.lifecycle",
+        principal="robot:test",
+        source="robot.system",
+        run_id="boot-aaaa",
+        text=text,
+    )
+
+
+async def test_publish_broadcast_delivers_to_all_broadcast_subscribers() -> None:
+    bus = AsyncioBus()
+    seen_a: list[str] = []
+    seen_b: list[str] = []
+
+    async def handler_a(event: RobotInput) -> None:  # type: ignore[arg-type]
+        seen_a.append(event.text or "")
+
+    async def handler_b(event: RobotInput) -> None:  # type: ignore[arg-type]
+        seen_b.append(event.text or "")
+
+    bus.subscribe_broadcast("robot.lifecycle", handler_a)  # type: ignore[arg-type]
+    bus.subscribe_broadcast("robot.lifecycle", handler_b)  # type: ignore[arg-type]
+
+    await bus.start()
+    try:
+        await bus.publish_broadcast(_audit_event("hello"))
+        await asyncio.sleep(0.01)
+    finally:
+        await bus.stop()
+
+    assert seen_a == ["hello"]
+    assert seen_b == ["hello"]
+
+
+async def test_publish_broadcast_does_not_reach_routable_subscribers() -> None:
+    """Routable and broadcast subscriptions live in separate buckets."""
+    bus = AsyncioBus()
+    routable: list[str] = []
+    broadcast: list[str] = []
+
+    async def routable_handler(event: RobotInput) -> None:  # type: ignore[arg-type]
+        routable.append(event.text or "")
+
+    async def broadcast_handler(event: RobotInput) -> None:  # type: ignore[arg-type]
+        broadcast.append(event.text or "")
+
+    bus.subscribe("robot.lifecycle", routable_handler)  # type: ignore[arg-type]
+    bus.subscribe_broadcast("robot.lifecycle", broadcast_handler)  # type: ignore[arg-type]
+
+    await bus.start()
+    try:
+        await bus.publish_broadcast(_audit_event("only-broadcast"))
+        await asyncio.sleep(0.01)
+    finally:
+        await bus.stop()
+
+    assert routable == []
+    assert broadcast == ["only-broadcast"]
+
+
+async def test_retained_broadcast_delivered_to_late_subscriber() -> None:
+    """A new broadcast subscriber receives the latest retained event."""
+    bus = AsyncioBus()
+    early: list[str] = []
+    late: list[str] = []
+
+    async def early_handler(event: RobotInput) -> None:  # type: ignore[arg-type]
+        early.append(event.text or "")
+
+    async def late_handler(event: RobotInput) -> None:  # type: ignore[arg-type]
+        late.append(event.text or "")
+
+    bus.subscribe_broadcast("robot.lifecycle", early_handler)  # type: ignore[arg-type]
+
+    await bus.start()
+    try:
+        await bus.publish_broadcast(_audit_event("snapshot"), retain=True)
+        await asyncio.sleep(0.01)
+
+        # late subscriber arrives after the publish_broadcast has happened
+        bus.subscribe_broadcast("robot.lifecycle", late_handler)  # type: ignore[arg-type]
+        await asyncio.sleep(0.01)
+    finally:
+        await bus.stop()
+
+    assert early == ["snapshot"]
+    assert late == ["snapshot"]
+
+
+async def test_retained_lookup_returns_last_event_synchronously() -> None:
+    bus = AsyncioBus()
+    await bus.start()
+    try:
+        assert bus.retained("robot.lifecycle") is None
+        first = _audit_event("first")
+        await bus.publish_broadcast(first, retain=True)
+        assert bus.retained("robot.lifecycle") is first
+
+        second = _audit_event("second")
+        await bus.publish_broadcast(second, retain=True)
+        assert bus.retained("robot.lifecycle") is second
+    finally:
+        await bus.stop()
+
+
+async def test_broadcast_publish_without_retain_is_not_remembered() -> None:
+    bus = AsyncioBus()
+    received: list[str] = []
+
+    async def handler(event: RobotInput) -> None:  # type: ignore[arg-type]
+        received.append(event.text or "")
+
+    await bus.start()
+    try:
+        await bus.publish_broadcast(_audit_event("ephemeral"))  # no retain
+        bus.subscribe_broadcast("robot.lifecycle", handler)  # type: ignore[arg-type]
+        await asyncio.sleep(0.01)
+    finally:
+        await bus.stop()
+
+    # Subscriber arrived after the broadcast and nothing was retained
+    assert received == []

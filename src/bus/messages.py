@@ -1,6 +1,7 @@
 """Message types carried on the system bus.
 
-Iteration 0 covers four subtypes:
+The current set of subtypes covers the bus contract from
+``docs/architecture/robot-os-target.md``:
 
 - :class:`RobotInput`    -- conversational input from the outside world.
 - :class:`RobotOutput`   -- message to the outside world (fire-and-forget).
@@ -8,6 +9,12 @@ Iteration 0 covers four subtypes:
   that expects a response.
 - :class:`RobotResponse` -- reply to a ``RobotRequest``, correlated via
   ``correlation_id``.
+- :class:`RobotReady`    -- broadcast lifecycle event published once
+  bring-up is complete; carries the robot's identity and a snapshot of
+  the components it composed itself from.
+- :class:`RobotShutdown` -- broadcast lifecycle event announcing the
+  start of a graceful shutdown. Components that need to drain may
+  subscribe and react before they are stopped.
 
 ``RobotTrigger`` and ``RobotAuditNote`` are intentionally added later,
 once a concrete use case requires them.
@@ -19,6 +26,9 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+
+
+LIFECYCLE_TOPIC = "robot.lifecycle"
 
 
 def _new_event_id() -> str:
@@ -109,3 +119,58 @@ class RobotResponse(RobotEvent):
             raise ValueError("RobotResponse requires a correlation_id")
         if not self.ok and not self.error:
             raise ValueError("Failed RobotResponse must carry an error message")
+
+
+@dataclass(frozen=True)
+class ComponentInfo:
+    """Snapshot of a single component the robot booted with.
+
+    The robot collects one of these for every bus component it owns
+    and publishes them all together in :class:`RobotReady` so that
+    audit, observers, and identity-aware components can learn the
+    full composition with one event.
+    """
+
+    category: str
+    type: str
+    description: str = ""
+
+
+@dataclass(frozen=True, kw_only=True)
+class RobotReady(RobotEvent):
+    """Lifecycle broadcast: the robot is fully booted and ready.
+
+    Published by :class:`src.robot.Robot` exactly once per boot, on
+    the lifecycle topic, as a retained broadcast. Components that
+    subscribe to ``robot.lifecycle`` receive this event immediately
+    upon subscription and can use it as their authoritative source for
+    robot identity and component composition.
+
+    Analog: the BIOS POST beep handing off to the bootloader.
+    """
+
+    robot_id: str | None = None
+    robot_name: str | None = None
+    boot_id: str = ""
+    components: tuple[ComponentInfo, ...] = ()
+
+
+@dataclass(frozen=True, kw_only=True)
+class RobotShutdown(RobotEvent):
+    """Lifecycle broadcast: the robot is starting a graceful shutdown.
+
+    Published as a retained broadcast on the lifecycle topic. Components
+    that need to drain (close pending sessions, flush buffers, write
+    final audit notes) get ``grace_seconds`` to react before the robot
+    starts calling :meth:`stop` on them. After the grace window or once
+    every component has acknowledged, the robot proceeds to a hard
+    teardown.
+
+    Analog: the SIGTERM that systemd sends before the eventual SIGKILL.
+    """
+
+    robot_id: str | None = None
+    robot_name: str | None = None
+    boot_id: str = ""
+    grace_seconds: float = 5.0
+    reason: str = ""

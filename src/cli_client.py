@@ -35,10 +35,29 @@ logger = logging.getLogger(__name__)
 DEFAULT_URL = "ws://127.0.0.1:8765/ws"
 
 
+class _RobotIdentity:
+    """Mutable holder of the robot identity learned from the welcome frame."""
+
+    def __init__(self) -> None:
+        self.id: str | None = None
+        self.name: str | None = None
+
+    @property
+    def label(self) -> str:
+        if self.name and self.id:
+            return f"{self.name} ({self.id})"
+        if self.name:
+            return self.name
+        if self.id:
+            return self.id
+        return "Robot"
+
+
 async def _print_loop(
     ws: aiohttp.ClientWebSocketResponse,
     console: Console,
     response_done: asyncio.Event,
+    identity: _RobotIdentity,
 ) -> None:
     """Render server frames; release ``response_done`` after each output."""
     try:
@@ -52,16 +71,31 @@ async def _print_loop(
 
                 kind = data.get("type")
                 if kind == "welcome":
+                    robot_block = data.get("robot") or {}
+                    if isinstance(robot_block, dict):
+                        identity.id = robot_block.get("id") or None
+                        identity.name = robot_block.get("name") or None
                     sid = data.get("session_id", "?")
-                    console.print(f"[dim]connected · session [bold]{sid}[/][/]")
+                    if identity.id or identity.name:
+                        console.print(
+                            f"[dim]connected to[/] [bold green]{identity.label}[/] "
+                            f"[dim]· session [bold]{sid}[/][/]"
+                        )
+                    else:
+                        console.print(
+                            f"[dim]connected · session [bold]{sid}[/][/]"
+                        )
                     response_done.set()
                 elif kind == "output":
                     text = data.get("text", "") or ""
-                    source = data.get("source") or "Robot"
+                    source = data.get("source") or ""
+                    title = f"[green]{identity.label}[/green]"
+                    subtitle = f"[dim]{source}[/dim]" if source else None
                     console.print(
                         Panel(
                             text,
-                            title=f"[green]{source}[/green]",
+                            title=title,
+                            subtitle=subtitle,
                             border_style="green",
                             padding=(0, 1),
                         )
@@ -127,8 +161,9 @@ async def _run(url: str) -> None:
         try:
             async with session.ws_connect(url) as ws:
                 response_done = asyncio.Event()
+                identity = _RobotIdentity()
                 printer = asyncio.create_task(
-                    _print_loop(ws, console, response_done),
+                    _print_loop(ws, console, response_done, identity),
                     name="ws.printer",
                 )
                 try:

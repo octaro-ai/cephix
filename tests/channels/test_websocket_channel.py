@@ -19,11 +19,20 @@ from src.kernel import EchoKernel
 from src.robot import Robot
 
 
-async def _build_robot() -> tuple[Robot, WebsocketChannel]:
+async def _build_robot(
+    *, robot_id: str | None = None, robot_name: str | None = None
+) -> tuple[Robot, WebsocketChannel]:
     bus = AsyncioBus()
     kernel = EchoKernel()
     channel = WebsocketChannel(host="127.0.0.1", port=0)
-    robot = Robot(bus=bus, kernel=kernel, channels=[channel])
+    robot = Robot(
+        bus=bus,
+        kernel=kernel,
+        channels=[channel],
+        robot_id=robot_id,
+        robot_name=robot_name,
+        shutdown_grace=0.0,
+    )
     return robot, channel
 
 
@@ -41,6 +50,7 @@ async def test_round_trip_input_echo() -> None:
                 welcome = json.loads(welcome_msg.data)
                 assert welcome["type"] == "welcome"
                 assert isinstance(welcome["session_id"], str)
+                assert "robot" not in welcome  # anonymous robot omits the block
 
                 await ws.send_json({"type": "input", "text": "hello"})
 
@@ -160,6 +170,46 @@ async def test_stop_closes_open_sessions() -> None:
             finally:
                 if not ws.closed:
                     await ws.close()
+    finally:
+        if not robot._stop_event.is_set():
+            await robot.stop()
+
+
+async def test_welcome_carries_robot_identity_from_lifecycle_event() -> None:
+    """The channel learns identity from the retained RobotReady on the bus."""
+    robot, channel = await _build_robot(robot_id="dreamgirl", robot_name="Dreamgirl")
+
+    async with robot:
+        url = f"ws://127.0.0.1:{channel.actual_port}/ws"
+        async with aiohttp.ClientSession() as session:
+            async with session.ws_connect(url) as ws:
+                msg = await asyncio.wait_for(ws.receive(), timeout=2.0)
+                welcome = json.loads(msg.data)
+
+    assert welcome["type"] == "welcome"
+    assert welcome["robot"] == {"id": "dreamgirl", "name": "Dreamgirl"}
+
+
+async def test_channel_announces_shutdown_to_open_sessions() -> None:
+    """RobotShutdown broadcast triggers a 'shutdown' frame to every session."""
+    robot, channel = await _build_robot(robot_id="alpha", robot_name="Alpha")
+
+    await robot.start()
+    try:
+        url = f"ws://127.0.0.1:{channel.actual_port}/ws"
+        async with aiohttp.ClientSession() as session:
+            async with session.ws_connect(url) as ws:
+                await asyncio.wait_for(ws.receive(), timeout=2.0)  # welcome
+                stop_task = asyncio.create_task(robot.stop())
+
+                msg = await asyncio.wait_for(ws.receive(), timeout=2.0)
+                # the next frame is either the shutdown notice or a close
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    frame = json.loads(msg.data)
+                    assert frame["type"] == "shutdown"
+                    assert frame["reason"] == "lifecycle.stop"
+
+                await asyncio.wait_for(stop_task, timeout=2.0)
     finally:
         if not robot._stop_event.is_set():
             await robot.stop()

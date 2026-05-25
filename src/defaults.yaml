@@ -1,0 +1,33 @@
+# Cephix factory defaults.
+#
+# This file ships with the package and is copied to ~/.cephix/cephix.yaml on
+# first run. Update-resistance is intentional: editing the user copy keeps
+# your configuration stable across cephix upgrades. To pick up new factory
+# defaults from a newer version, delete ~/.cephix/cephix.yaml and let cephix
+# re-roll it.
+#
+# Per-bot overrides live in ~/.cephix/robots/<id>/robot.yaml.
+
+defaults:
+  bus:
+    type: asyncio
+  kernel:
+    type: echo
+    input_topic: input.message
+    output_topic: output.message
+    prefix: "echo: "
+  channels:
+    - type: websocket
+      host: 127.0.0.1
+      port: 8765
+      path: /ws
+
+# Optional list of bots whose workspace lives outside the convention
+# (~/.cephix/robots/<id>/). Bots inside the convention are auto-discovered
+# and do NOT need an entry here.
+#
+# Example:
+#   robots:
+#     - id: dreamgirl
+#       workspace: D:/special/dreamgirl
+robots: []

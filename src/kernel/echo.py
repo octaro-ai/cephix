@@ -12,10 +12,16 @@ from __future__ import annotations
 
 from src.bus.messages import RobotEvent, RobotInput, RobotOutput
 from src.bus.ports import BusPort, Subscription
+from src.components import ComponentCategory, RobotComponent
 
 
-class EchoKernel:
+class EchoKernel(RobotComponent):
     """Echoes every input as an output on the configured topics."""
+
+    component_type = "echo"
+    component_category = ComponentCategory.KERNEL
+    component_description = "Trivial echo kernel that mirrors RobotInput as RobotOutput."
+    component_wizard_fields = ("prefix",)
 
     def __init__(
         self,

@@ -115,9 +115,22 @@ Eigenschaften:
   Fehler-`RobotResponse`. Nicht zustellbare Nachrichten landen in einer
   Dead-Letter-Queue.
 
-Pub/Sub ist die Ausnahme, nicht die Regel. Nur `RobotAuditNote` ist
-Broadcast: sie muss nicht abgearbeitet werden, sondern von allen
-Beobachtern gesehen werden koennen.
+Pub/Sub ist die Ausnahme, nicht die Regel. Broadcast wird gezielt fuer
+zwei Genres genutzt:
+
+- **Lifecycle**: `RobotReady` und `RobotShutdown` auf
+  `robot.lifecycle`. Mit *retain* gepublished, damit spaete Subscriber
+  (auch nachtraeglich angeklemmte Audit-Sinks oder Operator-Tools) den
+  letzten Stand sofort als ersten Event in ihre Queue gelegt
+  bekommen. Genau einer pro Topic wird gehalten; ein neuer ersetzt
+  den alten.
+- **Audit**: `RobotAuditNote` als Strom, ohne retain. Sie muss nicht
+  abgearbeitet werden, sondern von allen Beobachtern gesehen werden
+  koennen.
+
+Routable Queue (`subscribe`) und Broadcast (`subscribe_broadcast`)
+leben in getrennten Buckets: ein `publish` erreicht keinen
+Broadcast-Subscriber, ein `publish_broadcast` keinen Routable-Subscriber.
 
 Mapping pro Nachrichtentyp:
 
@@ -127,6 +140,9 @@ Mapping pro Nachrichtentyp:
 - `RobotResponse`: Queue, ueber `correlation_id` zurueck an den Sender der
   `RobotRequest`.
 - `RobotOutput`: Queue, ueber Adressierung an den passenden Channel.
+- `RobotReady`, `RobotShutdown`: Pub/Sub mit retain auf
+  `robot.lifecycle`. Eine Quelle (der Robot selbst), beliebig viele
+  Subscriber.
 - `RobotAuditNote`: Pub/Sub mit mehreren Subscribern (Audit-Sink,
   Operator-UI, Notebooks).
 
@@ -149,6 +165,14 @@ Erwartungshaltung aus:
 - `RobotResponse`: Antwort auf eine `RobotRequest`. Verweist per
   Korrelation auf die ausloesende Anfrage. Kann Erfolg oder Fehler sein,
   Fehler ist explizit modelliert.
+- `RobotReady`: Lifecycle-Broadcast nach erfolgreichem Bring-up. Traegt
+  Roboter-Identitaet (`robot_id`, `robot_name`), `boot_id` und einen
+  Snapshot der gestarteten Komponenten. Wird retained gepublished,
+  damit spaeter angeklemmte Komponenten den Boot-Stand kennen.
+- `RobotShutdown`: Lifecycle-Broadcast bei Beginn der
+  Shutdown-Sequenz. Traegt `grace_seconds` und `reason`. Komponenten,
+  die drainen muessen, bekommen so ein Vorwarnsignal vor dem
+  eigentlichen `stop()`-Aufruf.
 - `RobotAuditNote`: ausschliesslich fuer Audit relevante Nachricht, die
   kein anderer Teilnehmer braucht.
 
@@ -160,6 +184,91 @@ Pflichtfelder pro Nachricht:
 - `topic`: logische Adresse, ueber die Subscriber gefiltert werden.
 - `principal`: wer im Namen wessen handelt.
 - `timestamp` und `source`.
+
+## Lebenszyklus und Bootsequenz
+
+Konstruktor und Bootsequenz sind getrennt. `Robot(...)` macht keine
+Arbeit, sondern stellt nur die Bauteile zusammen — Bus, Kernel,
+Channels werden in Felder gelegt, niemand subscribet, kein Socket geht
+auf, keine Task laeuft. Vergleich: zusammengeschraubte Hardware bei
+abgeschaltetem Strom.
+
+Die Bootsequenz lebt komplett in `Robot.start()`:
+
+```
+Robot.start()
+  ├─ bus.start()             POST: Bus-Backplane testet sich, FIFO-Queues bereit
+  ├─ RobotReady (retain)     BIOS-Beep: Identitaet und Component-Inventar auf den Bus
+  ├─ kernel.start(bus)       Kernel klemmt sich an, kann robot.lifecycle lesen
+  ├─ channels[*].start(bus)  Channels klemmen sich an, lesen retained Identity
+  └─ "online" log            Login-Prompt, ab hier reines Idle
+```
+
+Dass `RobotReady` *vor* Kernel und Channels publisht wird, ist das
+wesentliche Detail. Es wird als retained Broadcast auf
+`robot.lifecycle` gepublished; jede spaetere Subscription bekommt den
+letzten Stand sofort als ersten Event in ihre Queue. Damit gibt es
+keine Race: ein Channel weiss beim ersten Welcome-Frame schon, mit
+welchem Roboter ein Client redet.
+
+Nach `online` ist kein Bauteil mehr "in charge". Das System ist rein
+event-driven:
+
+- der Kernel schlaeft auf seiner Input-Topic, wacht auf wenn ein
+  `RobotInput` kommt;
+- Channels schlafen parallel auf ihrem Listen-Socket und ihrem
+  Output-Topic;
+- der Robot selbst wartet in `run_forever()` nur noch auf das
+  Stop-Event.
+
+Es gibt also keinen "Kernel uebernimmt"-Moment. Wer in der
+PC-Analogie nach dem Master sucht, findet ihn beim Bus, nicht beim
+Kernel. Der Cephix-Kernel ist Kontext-Kurator und Actor-Vermittler,
+kein OS-Kernel.
+
+Der Shutdown spiegelt die Bootsequenz:
+
+```
+Robot.stop()
+  ├─ RobotShutdown (retain)  SIGTERM-Broadcast: Komponenten duerfen drainen
+  ├─ sleep(shutdown_grace)   Drain-Phase, default 5s
+  └─ teardown                SIGKILL: Components in Reverse-Order, Bus zuletzt
+```
+
+Komponenten, die auf den Shutdown-Broadcast subscriben, koennen
+waehrend der Grace-Phase Cleanup machen. Beispiel: der
+WebsocketChannel schickt ein `{"type": "shutdown", ...}`-Frame an
+offene Sessions, damit Clients ihre Verbindung sauber schliessen.
+Auch bei `shutdown_grace = 0` wird mindestens einmal ge-yieldet,
+damit Broadcast-Subscriber den Shutdown-Event sehen, bevor ihre
+Consumer-Tasks im Teardown gecancelt werden.
+
+Zuordnung zur PC-Analogie:
+
+| PC-Architektur | Cephix |
+|---|---|
+| OS-Kernel (zentrale Vermittlung) | Bus |
+| Userspace-Daemon (reagiert auf Events) | Kernel im Cephix-Sinn |
+| Treiber / IO | Channels |
+| ACPI-/EFI-Tabelle | retained `RobotReady` auf `robot.lifecycle` |
+| SIGTERM | `RobotShutdown` |
+| SIGKILL | `Robot._teardown()` nach Grace |
+
+Konsequenzen fuer das Komponenten-Design:
+
+- Eine Komponente, die ihre Roboter-Identitaet braucht, liest sie
+  ueber den Bus. Sie subscribet `robot.lifecycle` als Broadcast und
+  liest synchron `bus.retained(...)` im eigenen `start(bus)` ab,
+  damit ihre erste Reaktion (z.B. der Welcome-Frame eines Channels)
+  bereits korrekt befuellt ist. Setter wie `set_robot_identity` sind
+  nicht vorgesehen — die einzige Wahrheit fliesst ueber den Bus.
+- Eine Komponente, die fuer einen sauberen Shutdown Vorbereitungszeit
+  braucht, subscribet ebenfalls `robot.lifecycle` und reagiert auf
+  `RobotShutdown`, anstatt erst in ihrem eigenen `stop()`
+  Cleanup-Logik einzubauen.
+- Audit-Sinks und Observer-Tools, die nach dem Boot anlanden, lernen
+  durch das retained `RobotReady` automatisch, mit welcher
+  Roboterinstanz sie es zu tun haben.
 
 ## Teilnehmer am Bus
 
@@ -301,7 +410,8 @@ Bus liegt.
 |---|---|
 | Bus-Topologie | In-Process Bus pro Roboterinstanz. Tool Execution Layer darf Driver in eigenen Prozessen oder ueber Netzwerk anbinden. |
 | Persistenz | Erste Implementierung in-memory; der Bus ist als Port mit den Eigenschaften persistenter Queue-Bibliotheken modelliert (Adapter-Tausch ohne Architekturschnitt). Prio fuer fruehe Persistenz haben Audit und ausstehende Approvals. |
-| Bus-Semantik | Routende Queues, FIFO pro Teilnehmer, Priority erlaubt, Timeouts und Dead Letter. Pub/Sub nur fuer `RobotAuditNote`. |
+| Bus-Semantik | Routende Queues, FIFO pro Teilnehmer, Priority erlaubt, Timeouts und Dead Letter. Pub/Sub fuer Lifecycle (`RobotReady`, `RobotShutdown` mit retain) und Audit (`RobotAuditNote` ohne retain). Routable und Broadcast leben in getrennten Buckets. |
+| Bootstrap | `Robot.start()` ist die Bootsequenz: `bus.start`, dann retained `RobotReady` auf `robot.lifecycle` (BIOS-POST), dann Kernel und Channels attachen. Identitaet, Komponenten-Inventar und Boot-ID fliessen ueber den Bus, nicht ueber Setter. Shutdown spiegelbildlich mit retained `RobotShutdown` plus Grace-Phase vor dem Teardown (SIGTERM-/SIGKILL-Pattern). |
 | Topic-ACLs | Teil des Bus-Vertrags. Beim Subscribe deklariert ein Teilnehmer die gewuenschten Topics; der Bus prueft die Berechtigung. |
 | Governance-Platzierung | Hybrid. Harte Policy als Bus-Middleware, inhaltliche Filter als expliziter Teilnehmer per `RobotRequest`/`RobotResponse`. |
 | Run-Identitaet | Flache `run_id` pro Vorgang. Optionale `parent_run_id` fuer SOP-in-SOP, Skill-in-Skill und Approval-Continuation wird in der Implementierung entschieden, nicht jetzt im Bus-Vertrag fixiert. |
@@ -315,8 +425,12 @@ Bewusst noch nicht entschieden:
 
 - **Timeouts und Dead Letter** im Detail (Default-Owner, DLQ-Konsument).
 - **Priority-Schema**: feste Klassen oder pro Queue konfigurierbar.
-- **Bootstrap und Federation**: wie ein Roboter mit Firmware/Memory hochfaehrt;
-  wie mehrere Roboter ueber Bus-Federation kooperieren.
+- **Federation**: wie mehrere Roboter ueber Bus-Federation kooperieren
+  (mehrere Roboterinstanzen = mehrere Busse, die Bruecke ist offen).
+- **Firmware-Bootstrap**: wie SOPs, Skills und Memory beim Start in
+  den Roboter geladen werden. Die `RobotReady`-Sequenz traegt das
+  Komponenten-Inventar; der Inhalt der Loader-Kette ist davon noch
+  nicht beruehrt.
 
 ## Verhaeltnis zum Ist-Code unter `_reference/`
 

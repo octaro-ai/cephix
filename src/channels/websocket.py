@@ -13,7 +13,16 @@ Client -> Server::
 
 Server -> Client (on connect)::
 
-    {"type": "welcome", "session_id": "abc12345"}
+    {
+        "type": "welcome",
+        "session_id": "abc12345",
+        "robot": {"id": "dreamgirl", "name": "Dreamgirl"}
+    }
+
+The ``robot`` block is sourced from the retained
+:class:`RobotReady` broadcast on the ``robot.lifecycle`` topic which
+the channel subscribes to during :meth:`start`. If the owning robot
+runs without identity, the block is omitted.
 
 Server -> Client (kernel response)::
 
@@ -51,8 +60,16 @@ from typing import Any
 
 from aiohttp import WSMsgType, web
 
-from src.bus.messages import RobotEvent, RobotInput, RobotOutput
+from src.bus.messages import (
+    LIFECYCLE_TOPIC,
+    RobotEvent,
+    RobotInput,
+    RobotOutput,
+    RobotReady,
+    RobotShutdown,
+)
 from src.bus.ports import BusPort, Subscription
+from src.components import ComponentCategory, RobotComponent
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +82,13 @@ def _new_session_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
-class WebsocketChannel:
+class WebsocketChannel(RobotComponent):
     """aiohttp-based WebSocket bridge between bus and outside world."""
+
+    component_type = "websocket"
+    component_category = ComponentCategory.CHANNEL
+    component_description = "WebSocket bridge over aiohttp. JSON frames, session-based routing."
+    component_wizard_fields = ("host", "port")
 
     def __init__(
         self,
@@ -88,11 +110,16 @@ class WebsocketChannel:
         self._bus: BusPort | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
-        self._subscription: Subscription | None = None
+        self._output_subscription: Subscription | None = None
+        self._lifecycle_subscription: Subscription | None = None
 
         self._sessions: dict[str, web.WebSocketResponse] = {}
         self._run_to_session: dict[str, str] = {}
         self._actual_port: int | None = None
+
+        self._robot_id: str | None = None
+        self._robot_name: str | None = None
+        self._shutting_down = False
 
     @property
     def actual_port(self) -> int | None:
@@ -107,8 +134,17 @@ class WebsocketChannel:
         if self._runner is not None:
             return
         self._bus = bus
+        self._shutting_down = False
 
-        self._subscription = bus.subscribe(self._output_topic, self._handle_output)
+        self._bootstrap_identity_from_retained(bus)
+        self._lifecycle_subscription = bus.subscribe_broadcast(
+            LIFECYCLE_TOPIC,
+            self._handle_lifecycle,
+        )
+        self._output_subscription = bus.subscribe(
+            self._output_topic,
+            self._handle_output,
+        )
 
         app = web.Application()
         app.router.add_get(self._path, self._handle_ws)
@@ -128,6 +164,7 @@ class WebsocketChannel:
         logger.info("WebsocketChannel listening on ws://%s:%s%s", self._host, self._actual_port, self._path)
 
     async def stop(self) -> None:
+        self._shutting_down = True
         for ws in list(self._sessions.values()):
             try:
                 await ws.close()
@@ -142,11 +179,50 @@ class WebsocketChannel:
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
-        if self._subscription is not None:
-            await self._subscription.unsubscribe()
-            self._subscription = None
+        if self._output_subscription is not None:
+            await self._output_subscription.unsubscribe()
+            self._output_subscription = None
+        if self._lifecycle_subscription is not None:
+            await self._lifecycle_subscription.unsubscribe()
+            self._lifecycle_subscription = None
         self._actual_port = None
         self._bus = None
+        self._robot_id = None
+        self._robot_name = None
+
+    def _bootstrap_identity_from_retained(self, bus: BusPort) -> None:
+        """Read identity synchronously from the bus's retained lifecycle event.
+
+        Lets the channel's first welcome frame carry the correct
+        identity even if the consumer task for the broadcast
+        subscription hasn't run yet.
+        """
+        retained = bus.retained(LIFECYCLE_TOPIC)
+        if isinstance(retained, RobotReady):
+            self._robot_id = retained.robot_id
+            self._robot_name = retained.robot_name
+
+    async def _handle_lifecycle(self, event: RobotEvent) -> None:
+        if isinstance(event, RobotReady):
+            self._robot_id = event.robot_id
+            self._robot_name = event.robot_name
+        elif isinstance(event, RobotShutdown):
+            self._shutting_down = True
+            for session_id, ws in list(self._sessions.items()):
+                try:
+                    await ws.send_json(
+                        {
+                            "type": "shutdown",
+                            "reason": event.reason,
+                            "grace_seconds": event.grace_seconds,
+                        }
+                    )
+                except Exception:
+                    logger.debug(
+                        "error notifying session %s of shutdown",
+                        session_id,
+                        exc_info=True,
+                    )
 
     def _require_bus(self) -> BusPort:
         if self._bus is None:
@@ -159,7 +235,15 @@ class WebsocketChannel:
 
         session_id = _new_session_id()
         self._sessions[session_id] = ws
-        await ws.send_json({"type": "welcome", "session_id": session_id})
+        welcome: dict[str, Any] = {"type": "welcome", "session_id": session_id}
+        if self._robot_id or self._robot_name:
+            robot_block: dict[str, Any] = {}
+            if self._robot_id:
+                robot_block["id"] = self._robot_id
+            if self._robot_name:
+                robot_block["name"] = self._robot_name
+            welcome["robot"] = robot_block
+        await ws.send_json(welcome)
 
         try:
             async for msg in ws:

@@ -1,26 +1,13 @@
-"""Cephix robot daemon.
+"""Legacy demo entry point: a robot built from hard-coded components.
 
-Boots a robot composed from:
+This module predates the configuration-driven toolchain in :mod:`src.cli`
+and is kept around as a smoke-test path: it boots a robot exactly the
+way the iteration-2 docs describe it, without touching ``~/.cephix/``.
 
-- an :class:`AsyncioBus` (the system bus);
-- an :class:`EchoKernel` (the active kernel implementation);
-- a :class:`WebsocketChannel` (the outside-world boundary).
-
-The process runs until SIGINT (Ctrl-C). External clients communicate
-with the robot through the WebSocket channel, e.g. ``python -m
-src.cli_client``.
-
-This module is deliberately tiny: it parses CLI arguments, configures
-operational logging once, builds the robot from its three axes, and
-hands control over to ``robot.run()``. Everything operationally
-interesting (boot sequence, errors, shutdown) is logged by the robot
-and its components -- not from here.
-
-Run with::
-
-    python -m src.app
-    python -m src.app --host 0.0.0.0 --port 8765
-    python -m src.app --log-file /var/log/cephix/cephix.log
+Prefer ``cephix`` (the console script defined by :mod:`src.cli`) for
+real use. ``python -m src.app`` will keep working but it does not
+participate in onboarding, configuration, multi-instance handling or
+``cephix.yaml`` defaults.
 """
 
 from __future__ import annotations
@@ -35,7 +22,9 @@ from src.robot import Robot
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Cephix robot daemon.")
+    parser = argparse.ArgumentParser(
+        description="Legacy hard-coded robot daemon. Prefer the 'cephix' CLI."
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(

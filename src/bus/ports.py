@@ -62,8 +62,18 @@ class Subscription(Protocol):
 class BusPort(Protocol):
     """Contract of the system bus.
 
-    The bus carries :class:`RobotEvent` messages, routes them to
-    per-subscriber queues by topic, and additionally supports a
+    The bus carries :class:`RobotEvent` messages and supports two
+    distinct delivery semantics:
+
+    * **Routable queue** (default): :meth:`publish` and :meth:`subscribe`.
+      Each subscriber gets its own FIFO queue. Used for the bulk of
+      traffic where every event needs to be processed.
+    * **Broadcast** with optional retention: :meth:`publish_broadcast`
+      and :meth:`subscribe_broadcast`. Used for lifecycle events and
+      audit notes where multiple observers need to see the same event
+      and late subscribers may need to learn the latest state.
+
+    On top of routable queues, :meth:`request` provides a directed
     request/response pattern via ``correlation_id``.
     """
 
@@ -87,6 +97,38 @@ class BusPort(Protocol):
 
         Each subscriber gets its own FIFO queue, so a slow subscriber
         only slows down its own queue.
+        """
+
+    async def publish_broadcast(
+        self,
+        event: RobotEvent,
+        *,
+        retain: bool = False,
+    ) -> None:
+        """Broadcast ``event`` to every broadcast subscriber of its topic.
+
+        When ``retain`` is true, the bus keeps ``event`` as the latest
+        retained message for the topic. Subsequent calls to
+        :meth:`subscribe_broadcast` on that topic deliver the retained
+        event to the new subscriber immediately as their first event.
+        Only one retained event is kept per topic; the latest replaces
+        any previous one.
+        """
+
+    def subscribe_broadcast(self, topic: str, handler: EventHandler) -> Subscription:
+        """Register a broadcast subscriber for a topic.
+
+        If a retained event exists on the topic, it is delivered to the
+        new subscriber as the first event. Otherwise the subscriber
+        receives only future broadcasts.
+        """
+
+    def retained(self, topic: str) -> RobotEvent | None:
+        """Return the latest retained event for ``topic`` if any.
+
+        Synchronous lookup that lets a component bootstrap its state
+        from the retained snapshot without having to wait for an async
+        consumer task to drain the queue.
         """
 
     async def request(
