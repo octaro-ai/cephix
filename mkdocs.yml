@@ -105,6 +105,7 @@ nav:
       - Governance & Approvals: concepts/governance.md
       - "Tools, Skills & Toolbuilder": concepts/toolbuilder.md
   - Architecture:
+      - "Robot OS (Target)": architecture/robot-os-target.md
       - Overview: architecture/overview.md
       - Diagrams: architecture/diagrams.md
       - Code Map: architecture/code-map.md

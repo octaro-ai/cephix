@@ -1,0 +1,194 @@
+"""In-memory implementation of :class:`BusPort` on top of asyncio.
+
+Properties of iteration 0:
+
+- Routing by exact topic match.
+- One FIFO queue with its own consumer task per subscription, so a slow
+  subscriber only slows down its own queue.
+- Request/response correlation via ``correlation_id`` backed by
+  :class:`asyncio.Future`.
+- Timeouts are surfaced as failure ``RobotResponse`` instances rather
+  than raised exceptions.
+
+Intentionally not here:
+
+- Persistence, dead-letter queue, topic ACLs, wildcard topics, priority.
+  Each of these is a future iteration; the port contract already allows
+  them.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass, field
+
+from src.bus.messages import (
+    RobotEvent,
+    RobotRequest,
+    RobotResponse,
+    _new_event_id,
+    _now_iso,
+)
+from src.bus.ports import BusPort, EventHandler, Subscription
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _AsyncSubscription:
+    topic: str
+    handler: EventHandler
+    queue: asyncio.Queue[RobotEvent] = field(default_factory=asyncio.Queue)
+    task: asyncio.Task[None] | None = None
+    bus: "AsyncioBus | None" = None
+
+    async def unsubscribe(self) -> None:
+        if self.bus is not None:
+            await self.bus._remove_subscription(self)
+
+
+class AsyncioBus(BusPort):
+    """In-memory bus on top of asyncio primitives."""
+
+    def __init__(self) -> None:
+        self._subscriptions: dict[str, list[_AsyncSubscription]] = {}
+        self._pending: dict[str, asyncio.Future[RobotResponse]] = {}
+        self._running = False
+        self._lock = asyncio.Lock()
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    async def start(self) -> None:
+        async with self._lock:
+            if self._running:
+                return
+            self._running = True
+            for subs in self._subscriptions.values():
+                for sub in subs:
+                    self._ensure_consumer(sub)
+
+    async def stop(self) -> None:
+        async with self._lock:
+            if not self._running:
+                return
+            self._running = False
+            tasks: list[asyncio.Task[None]] = []
+            for subs in self._subscriptions.values():
+                for sub in subs:
+                    if sub.task is not None:
+                        sub.task.cancel()
+                        tasks.append(sub.task)
+            self._subscriptions.clear()
+
+            for fut in self._pending.values():
+                if not fut.done():
+                    fut.set_exception(asyncio.CancelledError("bus stopped"))
+            self._pending.clear()
+
+        for task in tasks:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def publish(self, event: RobotEvent) -> None:
+        if not self._running:
+            raise RuntimeError("AsyncioBus is not running; call start() first")
+
+        if isinstance(event, RobotResponse):
+            fut = self._pending.pop(event.correlation_id or "", None)
+            if fut is not None and not fut.done():
+                fut.set_result(event)
+
+        for sub in list(self._subscriptions.get(event.topic, [])):
+            await sub.queue.put(event)
+
+    def subscribe(self, topic: str, handler: EventHandler) -> Subscription:
+        sub = _AsyncSubscription(topic=topic, handler=handler, bus=self)
+        self._subscriptions.setdefault(topic, []).append(sub)
+        if self._running:
+            self._ensure_consumer(sub)
+        return sub
+
+    async def request(
+        self,
+        request: RobotRequest,
+        *,
+        timeout: float | None = None,
+    ) -> RobotResponse:
+        if not self._running:
+            raise RuntimeError("AsyncioBus is not running; call start() first")
+
+        correlation_id = request.correlation_id
+        if not correlation_id:
+            raise ValueError("RobotRequest requires a correlation_id")
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[RobotResponse] = loop.create_future()
+        self._pending[correlation_id] = future
+
+        try:
+            await self.publish(request)
+            if timeout is None:
+                return await future
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._pending.pop(correlation_id, None)
+            return RobotResponse(
+                event_id=_new_event_id(),
+                topic=request.topic,
+                principal=request.principal,
+                source="bus",
+                run_id=request.run_id,
+                correlation_id=correlation_id,
+                timestamp=_now_iso(),
+                ok=False,
+                error=f"timeout after {timeout}s for action {request.action!r}",
+            )
+        except asyncio.CancelledError:
+            self._pending.pop(correlation_id, None)
+            raise
+
+    async def _remove_subscription(self, sub: _AsyncSubscription) -> None:
+        async with self._lock:
+            subs = self._subscriptions.get(sub.topic, [])
+            if sub in subs:
+                subs.remove(sub)
+            if not subs:
+                self._subscriptions.pop(sub.topic, None)
+            if sub.task is not None:
+                sub.task.cancel()
+                task = sub.task
+                sub.task = None
+            else:
+                task = None
+        if task is not None:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    def _ensure_consumer(self, sub: _AsyncSubscription) -> None:
+        if sub.task is not None and not sub.task.done():
+            return
+        sub.task = asyncio.create_task(
+            self._run_consumer(sub),
+            name=f"bus-consumer:{sub.topic}",
+        )
+
+    async def _run_consumer(self, sub: _AsyncSubscription) -> None:
+        while True:
+            event = await sub.queue.get()
+            try:
+                await sub.handler(event)
+            except Exception:
+                logger.exception(
+                    "subscriber for topic %r raised on event %s",
+                    sub.topic,
+                    event.event_id,
+                )
+            finally:
+                sub.queue.task_done()
