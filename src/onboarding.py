@@ -18,16 +18,21 @@ from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
+import secrets
+
 from src.components import ComponentCategory, RobotComponent
 from src.configuration import (
+    CONTROL_PLANE_TOKEN_ENV,
     RobotInstance,
     default_workspace_for,
     home_defaults,
     load_robot_config,
+    load_robot_env,
     robots_root,
     save_robot_config,
     slugify_robot_id,
     unique_slug,
+    write_robot_env,
 )
 from src.registry import all_registered, list_by_category
 
@@ -109,13 +114,16 @@ def run_wizard(
     workspace.mkdir(parents=True, exist_ok=True)
     save_robot_config(workspace, robot_yaml)
 
+    env_path = _ensure_control_plane_token(workspace)
+
     console.print()
     console.print(
         Panel(
             f"[bold]{name}[/] is ready.\n\n"
             f"  ID:        {slug}\n"
             f"  Workspace: {workspace}\n"
-            f"  Config:    {workspace / 'robot.yaml'}",
+            f"  Config:    {workspace / 'robot.yaml'}\n"
+            f"  Secrets:   {env_path}  [dim](control-plane token)[/]",
             title="[green]Robot created[/]",
             border_style="green",
             padding=(0, 1),
@@ -178,6 +186,7 @@ def reconfigure(
         new_yaml["channels"] = channel_specs
 
     save_robot_config(instance.workspace, new_yaml)
+    _ensure_control_plane_token(instance.workspace)
     console.print(
         f"[green]updated[/] {instance.workspace / 'robot.yaml'}"
     )
@@ -193,6 +202,20 @@ def _existing_slugs(home_override: str | Path | None) -> set[str]:
     if not root.is_dir():
         return set()
     return {p.name for p in root.iterdir() if p.is_dir()}
+
+
+def _ensure_control_plane_token(workspace: Path) -> Path:
+    """Make sure ``CEPHIX_CONTROL_PLANE_TOKEN`` is in the bot-local .env.
+
+    Existing tokens are kept (token rotation is then a deliberate
+    manual step). Only generates a new value if the variable is
+    missing. Returns the path to the ``.env`` file for display.
+    """
+    existing = load_robot_env(workspace)
+    if existing.get(CONTROL_PLANE_TOKEN_ENV):
+        return workspace / ".env"
+    token = secrets.token_hex(32)
+    return write_robot_env(workspace, {CONTROL_PLANE_TOKEN_ENV: token})
 
 
 def _pick_component(

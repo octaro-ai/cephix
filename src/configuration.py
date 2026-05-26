@@ -40,13 +40,21 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import dotenv_values, set_key
 
 logger = logging.getLogger(__name__)
 
 ROBOT_CONFIG_FILENAME = "robot.yaml"
+ROBOT_ENV_FILENAME = ".env"
 ROBOTS_DIRNAME = "robots"
 HOME_CONFIG_FILENAME = "cephix.yaml"
 HOME_ENV_FILENAME = ".env"
+
+# The single environment variable used by the bot's local .env to
+# carry the control-plane token. Kept here so the wire-side
+# (``ControlPlane``) and the producer side (``onboarding``) stay in
+# sync without each importing the other.
+CONTROL_PLANE_TOKEN_ENV = "CEPHIX_CONTROL_PLANE_TOKEN"
 
 _PACKAGED_DEFAULTS = Path(__file__).with_name("defaults.yaml")
 
@@ -215,6 +223,56 @@ def save_robot_config(workspace: str | Path, config: dict[str, Any]) -> Path:
     target = robot_config_path(workspace)
     _dump_yaml(config, target)
     return target
+
+
+# ---------------------------------------------------------------------------
+# .env files (per-bot secrets)
+# ---------------------------------------------------------------------------
+
+
+def robot_env_path(workspace: str | Path) -> Path:
+    return Path(workspace) / ROBOT_ENV_FILENAME
+
+
+def load_robot_env(workspace: str | Path) -> dict[str, str]:
+    """Load the bot-local ``.env`` next to ``robot.yaml`` (empty if missing).
+
+    Backed by :func:`dotenv.dotenv_values` so we get the same parser
+    behaviour everyone else in the Python ecosystem uses (quoted
+    values, escapes, multi-line values, comments, ...).
+    """
+    path = robot_env_path(workspace)
+    if not path.is_file():
+        return {}
+    parsed = dotenv_values(path)
+    return {k: v for k, v in parsed.items() if v is not None}
+
+
+def write_robot_env(workspace: str | Path, values: dict[str, str]) -> Path:
+    """Merge ``values`` into the bot-local ``.env`` and rewrite the file.
+
+    Existing variables are preserved with their original formatting;
+    the ones in ``values`` are overwritten in place or appended at the
+    end. ``dotenv.set_key`` does the heavy lifting so quoting and
+    escaping match what other tools expect.
+
+    On POSIX the file is chmod'd to 0600 (owner-only) since it
+    typically holds secrets like the control-plane token. On Windows
+    the call is best-effort.
+    """
+    path = robot_env_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.touch()
+    for key, value in values.items():
+        set_key(str(path), key, value, quote_mode="never")
+    try:
+        path.chmod(0o600)
+    except (OSError, NotImplementedError):
+        # Windows or restricted filesystem: best effort, the file lives
+        # under the user's home anyway.
+        pass
+    return path
 
 
 # ---------------------------------------------------------------------------

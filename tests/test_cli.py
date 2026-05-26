@@ -194,9 +194,10 @@ def test_smart_default_many_bots_quit_returns_error(
 # ---------------------------------------------------------------------------
 
 
-def test_remove_with_yes_flag_unregisters(
+def test_remove_unregisters_external_workspace(
     home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Removing an out-of-convention bot deletes both index and workspace."""
     other_ws = home / "elsewhere" / "alpha"
     other_ws.mkdir(parents=True)
     save_robot_config(
@@ -207,29 +208,90 @@ def test_remove_with_yes_flag_unregisters(
 
     rc = cli.main(["remove", "alpha", "--yes"])
     assert rc == 0
+    assert not other_ws.exists()
     rc = cli.main(["start", "alpha"])
     assert rc == 1
 
 
-def test_remove_with_purge_deletes_workspace(home: Path) -> None:
+def test_remove_deletes_convention_workspace(home: Path) -> None:
+    """Default behaviour: workspace under ~/.cephix/robots/<id>/ is wiped."""
     _make_bot(home, "alpha")
     workspace = default_workspace_for("alpha", home)
     assert workspace.exists()
-    rc = cli.main(["remove", "alpha", "--yes", "--purge"])
+    rc = cli.main(["remove", "alpha", "--yes"])
     assert rc == 0
     assert not workspace.exists()
+    # Re-running smart default in TTY mode should NOT find the bot any more.
+    rc = cli.main(["list"])
+    assert rc == 0
 
 
 def test_remove_aborts_without_confirmation(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _make_bot(home, "alpha")
+    workspace = default_workspace_for("alpha", home)
     inputs = iter([""])
     monkeypatch.setattr("builtins.input", lambda *args, **kwargs: next(inputs))
     rc = cli.main(["remove", "alpha"])
     out = capsys.readouterr().out
     assert rc == 1
     assert "aborted" in out
+    # Workspace must still be there when the user said no.
+    assert workspace.exists()
+
+
+# ---------------------------------------------------------------------------
+# disable / enable
+# ---------------------------------------------------------------------------
+
+
+def test_disable_flips_enabled_flag(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _make_bot(home, "alpha", enabled=True)
+    rc = cli.main(["disable", "alpha"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "disabled" in out
+    workspace = default_workspace_for("alpha", home)
+    cfg = save_robot_config  # avoid lint about unused import
+    from src.configuration import load_robot_config
+
+    assert load_robot_config(workspace)["enabled"] is False
+
+
+def test_enable_flips_enabled_flag(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _make_bot(home, "alpha", enabled=False)
+    rc = cli.main(["enable", "alpha"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "enabled" in out
+    workspace = default_workspace_for("alpha", home)
+    from src.configuration import load_robot_config
+
+    assert load_robot_config(workspace)["enabled"] is True
+
+
+def test_disable_is_idempotent(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _make_bot(home, "alpha", enabled=False)
+    rc = cli.main(["disable", "alpha"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "already disabled" in out
+
+
+def test_disable_unknown_id_returns_error(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = cli.main(["disable", "ghost"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "ghost" in err
 
 
 # ---------------------------------------------------------------------------

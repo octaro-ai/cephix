@@ -17,15 +17,18 @@ from src.configuration import (
     home_dir,
     load_home_config,
     load_robot_config,
+    load_robot_env,
     register_robot_override,
     resolve_robot_instance,
     robot_config_path,
+    robot_env_path,
     robots_root,
     save_home_config,
     save_robot_config,
     slugify_robot_id,
     unique_slug,
     unregister_robot_override,
+    write_robot_env,
 )
 
 
@@ -253,3 +256,58 @@ def test_deep_merge_preserves_originals() -> None:
     deep_merge(base, override)
     assert base == {"k": {"a": 1}}
     assert override == {"k": {"b": 2}}
+
+
+# ---------------------------------------------------------------------------
+# .env handling (parser + writer come from python-dotenv)
+# ---------------------------------------------------------------------------
+
+
+def test_load_robot_env_returns_empty_when_missing(tmp_path: Path) -> None:
+    assert load_robot_env(tmp_path) == {}
+
+
+def test_load_robot_env_reads_simple_keys(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text("FOO=bar\nBAZ=qux\n", encoding="utf-8")
+    assert load_robot_env(tmp_path) == {"FOO": "bar", "BAZ": "qux"}
+
+
+def test_load_robot_env_skips_comments_and_blanks(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        "# leading\n\nKEY=value\n# trailing\n", encoding="utf-8"
+    )
+    assert load_robot_env(tmp_path) == {"KEY": "value"}
+
+
+def test_load_robot_env_strips_quotes(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        'A="quoted"\nB=\'single\'\nC=plain\n', encoding="utf-8"
+    )
+    assert load_robot_env(tmp_path) == {
+        "A": "quoted",
+        "B": "single",
+        "C": "plain",
+    }
+
+
+def test_write_robot_env_creates_file(tmp_path: Path) -> None:
+    path = write_robot_env(tmp_path, {"FOO": "bar"})
+    assert path == robot_env_path(tmp_path)
+    assert load_robot_env(tmp_path) == {"FOO": "bar"}
+
+
+def test_write_robot_env_merges_with_existing(tmp_path: Path) -> None:
+    write_robot_env(tmp_path, {"FOO": "bar", "BAZ": "qux"})
+    write_robot_env(tmp_path, {"BAZ": "new", "EXTRA": "yes"})
+    env = load_robot_env(tmp_path)
+    assert env == {"FOO": "bar", "BAZ": "new", "EXTRA": "yes"}
+
+
+def test_write_robot_env_preserves_comments(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        "# important\nFOO=bar\n", encoding="utf-8"
+    )
+    write_robot_env(tmp_path, {"FOO": "baz"})
+    text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "# important" in text
+    assert "FOO=baz" in text

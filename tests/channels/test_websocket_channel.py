@@ -16,7 +16,7 @@ import pytest
 from src.bus import AsyncioBus, RobotEvent, RobotInput, RobotOutput
 from src.channels import WebsocketChannel
 from src.kernel import EchoKernel
-from src.robot import Robot
+from src.robot import ControlPlaneConfig, Robot, RobotIdentity
 
 
 async def _build_robot(
@@ -26,11 +26,9 @@ async def _build_robot(
     kernel = EchoKernel()
     channel = WebsocketChannel(host="127.0.0.1", port=0)
     robot = Robot(
-        bus=bus,
-        kernel=kernel,
-        channels=[channel],
-        robot_id=robot_id,
-        robot_name=robot_name,
+        identity=RobotIdentity(id=robot_id, name=robot_name),
+        components=[bus, kernel, channel],
+        control_plane_config=ControlPlaneConfig(enabled=False),
         shutdown_grace=0.0,
     )
     return robot, channel

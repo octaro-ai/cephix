@@ -18,7 +18,7 @@ from src.bus import AsyncioBus
 from src.channels import WebsocketChannel
 from src.kernel import EchoKernel
 from src.logging_config import configure_logging
-from src.robot import Robot
+from src.robot import ControlPlaneConfig, Robot, RobotIdentity
 
 
 def main() -> None:
@@ -44,7 +44,15 @@ def main() -> None:
     bus = AsyncioBus()
     kernel = EchoKernel()
     websocket = WebsocketChannel(host=args.host, port=args.port)
-    robot = Robot(bus=bus, kernel=kernel, channels=[websocket])
+
+    robot = Robot(
+        identity=RobotIdentity(),
+        components=[bus, kernel, websocket],
+        # No control plane in the legacy demo: it has no token and the
+        # quickstart story is "I just want to talk to the kernel". Use
+        # the cephix CLI for the full management experience.
+        control_plane_config=ControlPlaneConfig(enabled=False),
+    )
 
     robot.run()
 

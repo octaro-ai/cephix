@@ -35,6 +35,7 @@ flowchart LR
     user["User"]
     timer["Timer und Sensoren"]
     operator["Operator"]
+    admin["Admin / Maintenance"]
   end
 
   subgraph channels [Channels am Bus]
@@ -44,11 +45,16 @@ flowchart LR
     op["Operator UI"]
   end
 
+  subgraph oob [Out-of-band]
+    cp["ControlPlane<br/>localhost only, token auth"]
+  end
+
   subgraph bus [Systembus]
     direction LR
     topicInput["RobotInput und RobotTrigger"]
     topicOutput["RobotOutput"]
     topicReqRes["RobotRequest und RobotResponse"]
+    topicLifecycle["RobotBoot RobotReady RobotShutdown"]
     topicAudit["RobotAuditNote"]
   end
 
@@ -70,6 +76,9 @@ flowchart LR
   user --> ws
   operator --> op
   timer --> http
+  admin --> cp
+  cp -.->|sovereign ops| robot["Robot<br/>identity owner<br/>lifecycle conductor"]
+  robot --> bus
   ws --> bus
   http --> bus
   tg --> bus
@@ -85,9 +94,13 @@ flowchart LR
   bus --> audit
 ```
 
-Lese-Reihenfolge: alle Pfeile gegen den Bus. Governance sitzt als
-Pre-Delivery-Middleware in den Bus, nicht daneben. Audit haengt als
-Subscriber dran.
+Lese-Reihenfolge: alle Pfeile gegen den Bus, mit *einer* Ausnahme.
+Governance sitzt als Pre-Delivery-Middleware *im* Bus, nicht daneben.
+Audit haengt als Subscriber dran. Die Ausnahme ist die `ControlPlane`:
+sie sitzt parallel zum Bus, nicht auf ihm, und spricht direkt mit
+dem `Robot`. Genau diese Out-of-band-Position ist der Grund, warum
+Operator-Zugriff und Identitaetsfuehrung auch dann funktionieren,
+wenn der Bus ausfaellt.
 
 ## Bus-Semantik
 
@@ -118,12 +131,15 @@ Eigenschaften:
 Pub/Sub ist die Ausnahme, nicht die Regel. Broadcast wird gezielt fuer
 zwei Genres genutzt:
 
-- **Lifecycle**: `RobotReady` und `RobotShutdown` auf
-  `robot.lifecycle`. Mit *retain* gepublished, damit spaete Subscriber
-  (auch nachtraeglich angeklemmte Audit-Sinks oder Operator-Tools) den
-  letzten Stand sofort als ersten Event in ihre Queue gelegt
-  bekommen. Genau einer pro Topic wird gehalten; ein neuer ersetzt
-  den alten.
+- **Lifecycle**: `RobotBoot`, `RobotReady` und `RobotShutdown` auf
+  `robot.lifecycle`. Alle drei mit *retain* gepublished, damit spaete
+  Subscriber (auch nachtraeglich angeklemmte Audit-Sinks oder
+  Operator-Tools) den jeweils letzten Stand sofort als ersten Event in
+  ihre Queue gelegt bekommen. Es wird nur **ein** Slot pro Topic
+  gehalten — ein neuer Event ersetzt den alten. Damit `RobotReady`
+  einen verspaeteten Subscriber so vollstaendig informieren kann wie
+  `RobotBoot` es getan haette, traegt `RobotReady` denselben
+  Komponenten-Manifest mit.
 - **Audit**: `RobotAuditNote` als Strom, ohne retain. Sie muss nicht
   abgearbeitet werden, sondern von allen Beobachtern gesehen werden
   koennen.
@@ -140,8 +156,8 @@ Mapping pro Nachrichtentyp:
 - `RobotResponse`: Queue, ueber `correlation_id` zurueck an den Sender der
   `RobotRequest`.
 - `RobotOutput`: Queue, ueber Adressierung an den passenden Channel.
-- `RobotReady`, `RobotShutdown`: Pub/Sub mit retain auf
-  `robot.lifecycle`. Eine Quelle (der Robot selbst), beliebig viele
+- `RobotBoot`, `RobotReady`, `RobotShutdown`: Pub/Sub mit retain auf
+  `robot.lifecycle`. Eine Quelle (der `Robot`), beliebig viele
   Subscriber.
 - `RobotAuditNote`: Pub/Sub mit mehreren Subscribern (Audit-Sink,
   Operator-UI, Notebooks).
@@ -165,14 +181,22 @@ Erwartungshaltung aus:
 - `RobotResponse`: Antwort auf eine `RobotRequest`. Verweist per
   Korrelation auf die ausloesende Anfrage. Kann Erfolg oder Fehler sein,
   Fehler ist explizit modelliert.
-- `RobotReady`: Lifecycle-Broadcast nach erfolgreichem Bring-up. Traegt
-  Roboter-Identitaet (`robot_id`, `robot_name`), `boot_id` und einen
-  Snapshot der gestarteten Komponenten. Wird retained gepublished,
-  damit spaeter angeklemmte Komponenten den Boot-Stand kennen.
+- `RobotBoot`: Lifecycle-Broadcast *frueh* in der Bootsequenz, sobald
+  Identitaet und Komponenten-Inventar bekannt sind, aber bevor Kernel
+  und Channels attachen. Traegt `robot_id`, `robot_name`, `boot_id`
+  und einen Snapshot der gestarteten Komponenten. Wird retained
+  gepublished, damit spaeter angeklemmte Komponenten den Stand kennen.
+  Analogon: Kernel-dmesg.
+- `RobotReady`: Lifecycle-Broadcast *spaet*, nachdem Kernel und alle
+  Channels attached sind. Traegt dieselbe Identitaet und denselben
+  Manifest-Snapshot wie `RobotBoot`, ueberschreibt den retained-Slot
+  und signalisiert "Roboter ist im Vollbetrieb". Analogon:
+  `multi-user.target reached` bei systemd.
 - `RobotShutdown`: Lifecycle-Broadcast bei Beginn der
-  Shutdown-Sequenz. Traegt `grace_seconds` und `reason`. Komponenten,
-  die drainen muessen, bekommen so ein Vorwarnsignal vor dem
-  eigentlichen `stop()`-Aufruf.
+  Shutdown-Sequenz. Traegt `grace_seconds` und `reason`. Audit-
+  und Observer-Subscriber lernen so, dass eine Shutdown-Phase laeuft.
+  Der Drain selbst wird *nicht* ueber den Bus orchestriert (siehe
+  Lebenszyklus-Abschnitt). Analogon: SIGTERM.
 - `RobotAuditNote`: ausschliesslich fuer Audit relevante Nachricht, die
   kein anderer Teilnehmer braucht.
 
@@ -188,28 +212,93 @@ Pflichtfelder pro Nachricht:
 ## Lebenszyklus und Bootsequenz
 
 Konstruktor und Bootsequenz sind getrennt. `Robot(...)` macht keine
-Arbeit, sondern stellt nur die Bauteile zusammen — Bus, Kernel,
-Channels werden in Felder gelegt, niemand subscribet, kein Socket geht
-auf, keine Task laeuft. Vergleich: zusammengeschraubte Hardware bei
+Arbeit, sondern stellt nur die Bauteile zusammen — Identitaet,
+ControlPlane-Konfiguration und eine Liste von `RobotComponent`s
+werden in Felder gelegt; niemand subscribet, kein Socket geht auf,
+keine Task laeuft. Vergleich: zusammengeschraubte Hardware bei
 abgeschaltetem Strom.
 
-Die Bootsequenz lebt komplett in `Robot.start()`:
+### Rollen waehrend des Bootens
+
+- `Robot` ist eine *Single-Class*-Komposition aus Persona,
+  ControlPlane-Host und Lifecycle-Orchestrator. Identitaet (id, name)
+  liegt direkt im Konstruktor und ist ohne Bus erreichbar; die
+  ControlPlane wird vom selben Objekt hochgefahren; Boot- und
+  Shutdown-Sequenz werden von ihm orchestriert. Es gibt keine eigene
+  `RobotService`-Schicht mehr -- der Roboter *ist* sein eigener
+  Init/PID-1.
+- `Bus` ist *Mechanik* und eine `RobotComponent` mit
+  `category=BUS`. Liefert Nachrichten von A nach B. Keine Identitaet,
+  keine Kompetenzen ausserhalb von "Routing und Retain".
+- `Kernel` ist eine `RobotComponent` mit `category=KERNEL` --
+  *austauschbarer Userspace-Reasoner*. Kontext-Kurator und
+  Actor-Vermittler, *nicht* OS-Kernel.
+- `Channels` sind `RobotComponent`s mit `category=CHANNEL` --
+  Bruecken zur Aussenwelt. Sie ziehen ihre Identitaet aus dem
+  retained Lifecycle-Event auf dem Bus.
+
+### Komponenten-Reihenfolge: BOOT_PRIORITY
+
+Die Lifecycle-Reihenfolge ist *nicht* hartkodiert. Jede Kategorie
+hat einen Boot-Prioritaetswert in `src.components.BOOT_PRIORITY`,
+niedrige Werte starten zuerst:
+
+| Kategorie | Prioritaet | Bedeutung |
+|---|---|---|
+| `BUS` | `0` | Skelett -- muss als erstes oben sein |
+| `KERNEL` | `10` | Userspace-Reasoner |
+| `CHANNEL` | `20` | Aussenwelt-Bruecken, brauchen Bus *und* Kernel |
+| Reserviert: `AUDIT` (5), `GOVERNANCE` (15) | -- | Werden eingefuehrt, sobald die Komponenten existieren |
+
+Der Roboter sortiert die im Konstruktor uebergebenen Komponenten beim
+Bauen einmal nach Prioritaet und walkt diese Liste -- vorwaerts beim
+Boot, rueckwaerts beim Shutdown. Eine neue Komponentenklasse erfordert
+*keinen* Edit am Lifecycle-Code, nur einen Eintrag in `BOOT_PRIORITY`.
+
+`SKELETON_CATEGORIES` markiert die Kategorien, die zum *Skelett*
+gehoeren (aktuell nur `BUS`). Skelett-Komponenten werden in Phase 2
+gestartet, bevor `RobotBoot` auf den Bus geht; alle anderen
+Komponenten werden in Phase 3 als Userspace gestartet, nachdem
+`RobotBoot` retained verfuegbar ist.
+
+### Drei-Phasen-Bootsequenz
+
+`Robot.start()` walks through three phases:
 
 ```
 Robot.start()
-  ├─ bus.start()             POST: Bus-Backplane testet sich, FIFO-Queues bereit
-  ├─ RobotReady (retain)     BIOS-Beep: Identitaet und Component-Inventar auf den Bus
-  ├─ kernel.start(bus)       Kernel klemmt sich an, kann robot.lifecycle lesen
-  ├─ channels[*].start(bus)  Channels klemmen sich an, lesen retained Identity
-  └─ "online" log            Login-Prompt, ab hier reines Idle
+  Phase 1: Out-of-band kommt zuerst (_phase1_control_plane)
+    ├─ ControlPlane geht auf eigenem Port hoch (ohne Bus,
+    │                                          ohne Kernel,
+    │                                          ohne Channels)
+    └─ "control plane online at <url>"        Operator kann sich
+                                              verbinden, auch wenn
+                                              der Rest gleich scheitert
+
+  Phase 2: Skelett + RobotBoot (_phase2_skeleton)
+    ├─ for c in components if c in SKELETON_CATEGORIES:  c.start()
+    │   (aktuell nur Bus -- FIFO-Queues bereit)
+    └─ bus.publish_broadcast(RobotBoot, retain=True)
+        RobotBoot traegt Identitaet + Komponenten-Manifest
+
+  Phase 3: Userspace + RobotReady (_phase3_userspace)
+    ├─ for c in components if c not in SKELETON_CATEGORIES, sortiert
+    │   nach BOOT_PRIORITY:                   c.start(bus)
+    │   (Kernel zuerst (Prio 10), dann Channels (Prio 20))
+    └─ bus.publish_broadcast(RobotReady, retain=True)
+        "online" log -- ab hier reines Idle
 ```
 
-Dass `RobotReady` *vor* Kernel und Channels publisht wird, ist das
-wesentliche Detail. Es wird als retained Broadcast auf
-`robot.lifecycle` gepublished; jede spaetere Subscription bekommt den
-letzten Stand sofort als ersten Event in ihre Queue. Damit gibt es
-keine Race: ein Channel weiss beim ersten Welcome-Frame schon, mit
-welchem Roboter ein Client redet.
+Dass `RobotBoot` *vor* Kernel und Channels publisht wird, ist das
+wesentliche Detail von Phase 2. Jede spaetere Subscription auf
+`robot.lifecycle` bekommt den letzten Stand sofort als ersten Event in
+ihre Queue. Damit gibt es keine Race: ein Channel weiss beim ersten
+Welcome-Frame schon, mit welchem Roboter ein Client redet.
+
+`RobotReady` ueberschreibt den retained-Slot am Ende; ein verspaeteter
+Subscriber sieht damit nur das spaetere Event, weiss aber durch dessen
+mitgeschicktes Komponenten-Manifest immer noch, mit *was fuer einem*
+Roboter er es zu tun hat.
 
 Nach `online` ist kein Bauteil mehr "in charge". Das System ist rein
 event-driven:
@@ -218,41 +307,160 @@ event-driven:
   `RobotInput` kommt;
 - Channels schlafen parallel auf ihrem Listen-Socket und ihrem
   Output-Topic;
+- die ControlPlane horcht auf ihrem eigenen Port;
 - der Robot selbst wartet in `run_forever()` nur noch auf das
   Stop-Event.
 
-Es gibt also keinen "Kernel uebernimmt"-Moment. Wer in der
-PC-Analogie nach dem Master sucht, findet ihn beim Bus, nicht beim
-Kernel. Der Cephix-Kernel ist Kontext-Kurator und Actor-Vermittler,
-kein OS-Kernel.
+### Drei-Phasen-Shutdown
 
-Der Shutdown spiegelt die Bootsequenz:
+Der Shutdown spiegelt die Bootsequenz strikt: die in `BOOT_PRIORITY`
+definierte Reihenfolge wird rueckwaerts gewalkt, jede Komponente
+einzeln gedrained und gestoppt:
 
 ```
 Robot.stop()
-  ├─ RobotShutdown (retain)  SIGTERM-Broadcast: Komponenten duerfen drainen
-  ├─ sleep(shutdown_grace)   Drain-Phase, default 5s
-  └─ teardown                SIGKILL: Components in Reverse-Order, Bus zuletzt
+  Phase 3↓: Userspace verabschieden (_phase3_down)
+    ├─ bus.publish_broadcast(RobotShutdown, retain=True)
+    │   -> Audit/Observer-Awareness
+    ├─ asyncio.sleep(0)                   (lass Subscriber zustellen)
+    └─ for c in userspace_components, sortiert reverse(BOOT_PRIORITY):
+        ├─ c.drain() mit per-Komponente shutdown_grace als Hard-Cap
+        └─ c.stop()
+        (z.B. Channels (Prio 20) zuerst, dann Kernel (Prio 10))
+
+  Phase 2↓: Skelett verabschieden (_phase2_down)
+    └─ for c in skeleton_components, sortiert reverse(BOOT_PRIORITY):
+        ├─ c.drain()  (bei Bus: queue flush -- aktuell no-op default)
+        └─ c.stop()
+
+  Phase 1↓: Persona offline (_phase1_down)
+    └─ ControlPlane.stop()                "robot offline"
 ```
 
-Komponenten, die auf den Shutdown-Broadcast subscriben, koennen
-waehrend der Grace-Phase Cleanup machen. Beispiel: der
-WebsocketChannel schickt ein `{"type": "shutdown", ...}`-Frame an
-offene Sessions, damit Clients ihre Verbindung sauber schliessen.
-Auch bei `shutdown_grace = 0` wird mindestens einmal ge-yieldet,
-damit Broadcast-Subscriber den Shutdown-Event sehen, bevor ihre
-Consumer-Tasks im Teardown gecancelt werden.
+#### Drain-Protokoll
 
-Zuordnung zur PC-Analogie:
+Der Drain ist ein **Lifecycle-Hook**, kein Bus-Roundtrip. Begruendung:
+`start()` und `stop()` laufen ebenfalls als direkter Methodenaufruf
+vom Roboter auf seine Komponenten -- der Bus-Mechanismus ist fuer
+*Pub/Sub-Kommunikation* zwischen losen Teilnehmern gedacht, nicht fuer
+die geordnete Lifecycle-Steuerung der eigenen Kinder. Genau dasselbe
+Muster findet sich in:
+
+- **ROS 2 Lifecycle Nodes**: der Lifecycle-Manager ruft
+  `on_shutdown(state)` direkt auf jedem Node auf und wartet auf
+  Return; parallel emittiert er `transition_event` auf einem Topic
+  fuer Observer.
+- **Erlang/OTP**: der Supervisor ruft `gen_server:terminate/2` als
+  Callback auf seine Kinder auf und wartet auf Return; der
+  konfigurierte `shutdown`-Wert ist der Hard-Cap.
+- **Windows SCM**: ruft `OnStop()` auf den Service-Handler.
+- **systemd**: sendet SIGTERM (Awareness), wartet via `waitpid()` auf
+  Prozess-Exit (Lifecycle-Ack), erzwingt nach `TimeoutStopSec` einen
+  SIGKILL.
+
+Cephix mappt diese Trennung sauber:
+
+| Anteil | In Cephix |
+|---|---|
+| Awareness-Signal | `RobotShutdown` retained auf `robot.lifecycle` |
+| Lifecycle-Vertrag | `RobotComponent.drain()` Methode, Default `pass` |
+| Hard-Cap pro Komponente | `shutdown_grace` (Default 5s), danach Task-Cancel |
+
+Ablauf in `Robot._phase3_down()` (analog `_phase2_down()`):
+
+1. `bus.publish_broadcast(RobotShutdown, retain=True)`. Audit- und
+   Observer-Subscriber sehen die Shutdown-Phase via Bus.
+2. `await asyncio.sleep(0)` -- ein Yield, damit Broadcast-Subscriber
+   das Event zustellen koennen, bevor unter ihnen abgeraeumt wird.
+3. Fuer jede Komponente in **reverse `BOOT_PRIORITY`** wird
+   `_drain_then_stop(c, grace)` ausgefuehrt:
+   1. `await asyncio.wait_for(c.drain(), timeout=grace)` --
+      bounded per Komponente, frischer Timer pro Komponente.
+   2. Bei `TimeoutError` wird ein Warning geloggt
+      (`drain grace ... elapsed for ...; forcing stop`); die
+      drain-Coroutine ist dann bereits gecancelt.
+   3. Bei Exception innerhalb von `drain()` Logging mit Stack-Trace,
+      Shutdown-Pfad geht weiter. `stop()` wird *trotzdem* aufgerufen,
+      sonst leakt die Komponente (Sockets, Tasks, Subscriptions).
+   4. `await c.stop()` schliesst die Komponente regulaer.
+4. Wenn alle Userspace-Komponenten down sind, beginnt
+   `_phase2_down()` mit demselben Schema fuer das Skelett (aktuell
+   nur Bus). Der Bus ist immer als letztes weg, weil seine niedrige
+   Prioritaet ihn zuerst startet und damit zuletzt stoppt.
+
+Konsequenzen fuer Komponenten:
+
+- **Default `drain()` returnt sofort.** `EchoKernel`, `AsyncioBus`
+  und jede triviale Komponente erbt damit "fertig in 0 ms" --
+  vergessenes Opt-in kann es nicht geben.
+- **Wer was zu tun hat, ueberschreibt `drain()`.** Beispiel
+  `WebsocketChannel`: notifiziert alle Sessions per JSON-Frame,
+  schliesst die WebSockets, returnt. `LLMKernel` (zukuenftig):
+  flusht offene Reasoning-Traces, persistiert pending Memory.
+  Ein zukuenftiger persistenter Bus wuerde `drain()` ueberschreiben,
+  um seine Queues final auf die Persistenzschicht zu spuelen, bevor
+  `stop()` ihn schliesst.
+- **Strikt sequenziell**, nicht parallel: jede Komponente bekommt die
+  volle Grace fuer sich. Damit kann eine spaete (channel) Komponente
+  ihren Drain nicht durch einen vorangegangenen Hang verlieren, und
+  Logmeldungen bleiben deterministisch ("ch-bus.drain done -> stop ->
+  kernel.drain ..."). Begruendung in der Plattform-Konzeption: ein
+  paralleles Drain wuerde die kategoriebasierte Reihenfolge
+  aushebeln, ohne dass das in der Praxis Zeit spart.
+- **`drain()` ist *kein* `stop()`.** Drain ist beschraenktes
+  Cleanup-mit-Zeitlimit (Sessions, Buffer, Persistierung); `stop()`
+  ist die Endgueltigkeit (Sockets schliessen, Subscriptions cancel,
+  interne Refs nullen). Komponenten, die beides brauchen, halten
+  beides separat.
+
+### Out-of-band ControlPlane
+
+Die `ControlPlane` ist *kein* Bus-Teilnehmer. Sie laeuft auf einem
+eigenen TCP-Port (per Default `127.0.0.1:9876`, mit Auto-Resolve in
+einer konfigurierbaren Range, finaler Fallback auf einen
+OS-Port). Authentifizierung erfolgt ueber einen Token, der beim
+`cephix init` automatisch generiert wird und in
+`~/.cephix/robots/<slug>/.env` als `CEPHIX_CONTROL_PLANE_TOKEN`
+abgelegt wird. Der Token erscheint nie in `robot.yaml`.
+
+Das Wire-Protokoll ist WebSocket mit JSON-Frames; die ersten
+Operationen sind:
+
+- `status` -- Schnappschuss von Phase, Bus-Status, Uptime, Identitaet
+  und Komponenten-Manifest;
+- `component.list` -- nur das Manifest;
+- `shutdown` -- bittet den Roboter, einen geordneten Shutdown
+  einzuleiten (`Robot.request_shutdown()`).
+
+Failure-Modes, die genau dieses Out-of-band-Design rechtfertigen:
+
+| Fehler im Boot | ControlPlane bleibt erreichbar? | Was sieht der Operator |
+|---|---|---|
+| `bus.start()` schlaegt fehl | Ja (Phase 1 war vorher fertig) | `phase=booting/booted`, kein Bus |
+| `RobotBoot`-Publish schlaegt fehl | Ja | `phase=attaching/attached`, Bus laeuft |
+| Kernel oder Channel scheitert | Ja | `phase=activating`, Manifest ohne den Toten |
+| Bus blockiert / wedged | Ja (out-of-band) | `phase=serving`, `bus.running=true`, aber Operator kann `shutdown` rufen ohne ueber den Bus zu gehen |
+
+Analoga: IPMI/BMC bei einem Server (out-of-band Management-Lan auch
+wenn das OS verklemmt ist), oder Magic SysRq im Linux-Kernel
+(direkter Pfad zum Kernel, der die Userspace-Locks umgeht).
+
+### Zuordnung zur PC-Analogie
 
 | PC-Architektur | Cephix |
 |---|---|
-| OS-Kernel (zentrale Vermittlung) | Bus |
-| Userspace-Daemon (reagiert auf Events) | Kernel im Cephix-Sinn |
-| Treiber / IO | Channels |
-| ACPI-/EFI-Tabelle | retained `RobotReady` auf `robot.lifecycle` |
-| SIGTERM | `RobotShutdown` |
-| SIGKILL | `Robot._teardown()` nach Grace |
+| OS-Kernel (Routing und Mechanik) | Bus (`category=BUS`, `BOOT_PRIORITY=0`) |
+| init / PID 1 (Lifecycle, Persona) | `Robot` selbst -- keine eigene Service-Klasse |
+| Userspace-Daemon (reagiert auf Events) | Kernel im Cephix-Sinn (`category=KERNEL`, Prio 10) |
+| Treiber / IO | Channels (`category=CHANNEL`, Prio 20) |
+| BMC / IPMI / Magic SysRq | ControlPlane (Out-of-band, eigener Port, Token-Auth) |
+| systemd `unit dependencies` / `Before=` / `After=` | `BOOT_PRIORITY` Mapping |
+| dmesg-Boot-Log | retained `RobotBoot` auf `robot.lifecycle` |
+| `multi-user.target reached` | retained `RobotReady` auf `robot.lifecycle` |
+| SIGTERM | `RobotShutdown` (Awareness-Broadcast) |
+| ROS 2 `on_shutdown(state)` / OTP `terminate/2` / SCM `OnStop()` | `RobotComponent.drain()` (Lifecycle-Hook) |
+| `TimeoutStopSec` / `terminationGracePeriodSeconds` | `shutdown_grace` (per Komponente) |
+| SIGKILL | Task-Cancel nach Grace + `c.stop()` |
 
 Konsequenzen fuer das Komponenten-Design:
 
@@ -263,12 +471,21 @@ Konsequenzen fuer das Komponenten-Design:
   bereits korrekt befuellt ist. Setter wie `set_robot_identity` sind
   nicht vorgesehen — die einzige Wahrheit fliesst ueber den Bus.
 - Eine Komponente, die fuer einen sauberen Shutdown Vorbereitungszeit
-  braucht, subscribet ebenfalls `robot.lifecycle` und reagiert auf
-  `RobotShutdown`, anstatt erst in ihrem eigenen `stop()`
-  Cleanup-Logik einzubauen.
+  braucht, ueberschreibt `RobotComponent.drain()`. Der Roboter ruft
+  diese Methode parallel auf allen Komponenten auf, sobald er
+  `RobotShutdown` ausgesandt hat, und wartet bis zur konfigurierten
+  Grace auf Return. `RobotShutdown` selbst ist also *Awareness*
+  (Audit, Observer); die Lifecycle-Aktion ist die Methode. Externe
+  Subscriber, die eigene Drain-Logik brauchen, registrieren sich
+  ebenfalls als `RobotComponent` und ueberschreiben `drain()`.
 - Audit-Sinks und Observer-Tools, die nach dem Boot anlanden, lernen
-  durch das retained `RobotReady` automatisch, mit welcher
-  Roboterinstanz sie es zu tun haben.
+  durch das retained `RobotReady` (resp. `RobotBoot` falls noch
+  nicht serving) automatisch, mit welcher Roboterinstanz sie es zu
+  tun haben.
+- Sovereign-Operationen (Bus-Flush, Komponenten-Restart, Shutdown)
+  gehen nicht ueber den Bus, sondern ueber die ControlPlane direkt
+  an den `Robot`. Damit funktionieren sie auch dann, wenn der Bus
+  selbst defekt ist.
 
 ## Teilnehmer am Bus
 
@@ -410,8 +627,11 @@ Bus liegt.
 |---|---|
 | Bus-Topologie | In-Process Bus pro Roboterinstanz. Tool Execution Layer darf Driver in eigenen Prozessen oder ueber Netzwerk anbinden. |
 | Persistenz | Erste Implementierung in-memory; der Bus ist als Port mit den Eigenschaften persistenter Queue-Bibliotheken modelliert (Adapter-Tausch ohne Architekturschnitt). Prio fuer fruehe Persistenz haben Audit und ausstehende Approvals. |
-| Bus-Semantik | Routende Queues, FIFO pro Teilnehmer, Priority erlaubt, Timeouts und Dead Letter. Pub/Sub fuer Lifecycle (`RobotReady`, `RobotShutdown` mit retain) und Audit (`RobotAuditNote` ohne retain). Routable und Broadcast leben in getrennten Buckets. |
-| Bootstrap | `Robot.start()` ist die Bootsequenz: `bus.start`, dann retained `RobotReady` auf `robot.lifecycle` (BIOS-POST), dann Kernel und Channels attachen. Identitaet, Komponenten-Inventar und Boot-ID fliessen ueber den Bus, nicht ueber Setter. Shutdown spiegelbildlich mit retained `RobotShutdown` plus Grace-Phase vor dem Teardown (SIGTERM-/SIGKILL-Pattern). |
+| Bus-Semantik | Routende Queues, FIFO pro Teilnehmer, Priority erlaubt, Timeouts und Dead Letter. Pub/Sub fuer Lifecycle (`RobotBoot`, `RobotReady`, `RobotShutdown` mit retain) und Audit (`RobotAuditNote` ohne retain). Routable und Broadcast leben in getrennten Buckets. Der Bus ist Mechanik, *kein* Identitaetstraeger. |
+| Identitaet und Lifecycle-Owner | `Robot` ist eine *Single Class*: Identitaet (id, name) liegt direkt im Konstruktor (ohne Bus-Abhaengigkeit), die ControlPlane ist ein Feld der Klasse, und Boot/Shutdown werden vom selben Objekt orchestriert. Es gibt keine eigene `RobotService`-Schicht -- der Roboter ist sein eigener Init/PID-1. |
+| Komponenten-Reihenfolge | `BOOT_PRIORITY: dict[ComponentCategory, int]` legt die Boot-Reihenfolge fest (BUS=0, KERNEL=10, CHANNEL=20). Der Roboter sortiert die uebergebenen Komponenten einmal und walkt sie vorwaerts beim Boot, rueckwaerts beim Shutdown. Neue Komponenten-Kategorien aendern `BOOT_PRIORITY` -- der Lifecycle-Code bleibt unangetastet. |
+| Bootstrap | Drei-Phasen-Sequenz in `Robot.start()`: Phase 1 bringt die ControlPlane out-of-band hoch; Phase 2 startet alle `SKELETON_CATEGORIES`-Komponenten (aktuell nur Bus) und published retained `RobotBoot`; Phase 3 startet alle uebrigen Komponenten in Prioritaets-Reihenfolge und published retained `RobotReady`. Shutdown spiegelbildlich mit retained `RobotShutdown` und per-Komponente sequenziellem Drain mit Hard-Cap (SIGTERM/SIGKILL-Pattern); ControlPlane geht zuletzt offline. |
+| ControlPlane | Out-of-band WebSocket auf eigenem Port (default `127.0.0.1:9876`, mit Auto-Resolve in `port_range` und finalem Fallback auf OS-assigned). Token-Auth via `CEPHIX_CONTROL_PLANE_TOKEN` in der bot-lokalen `.env`. Erste Operationen: `status`, `component.list`, `shutdown`. Bewusst nicht am Bus, damit Sovereign-Operationen auch bei wedged Bus funktionieren -- Analogie IPMI/BMC und Magic SysRq. |
 | Topic-ACLs | Teil des Bus-Vertrags. Beim Subscribe deklariert ein Teilnehmer die gewuenschten Topics; der Bus prueft die Berechtigung. |
 | Governance-Platzierung | Hybrid. Harte Policy als Bus-Middleware, inhaltliche Filter als expliziter Teilnehmer per `RobotRequest`/`RobotResponse`. |
 | Run-Identitaet | Flache `run_id` pro Vorgang. Optionale `parent_run_id` fuer SOP-in-SOP, Skill-in-Skill und Approval-Continuation wird in der Implementierung entschieden, nicht jetzt im Bus-Vertrag fixiert. |
@@ -428,9 +648,13 @@ Bewusst noch nicht entschieden:
 - **Federation**: wie mehrere Roboter ueber Bus-Federation kooperieren
   (mehrere Roboterinstanzen = mehrere Busse, die Bruecke ist offen).
 - **Firmware-Bootstrap**: wie SOPs, Skills und Memory beim Start in
-  den Roboter geladen werden. Die `RobotReady`-Sequenz traegt das
+  den Roboter geladen werden. Die `RobotBoot`-Sequenz traegt das
   Komponenten-Inventar; der Inhalt der Loader-Kette ist davon noch
   nicht beruehrt.
+- **ControlPlane-Operationen jenseits MVP**: `bus.flush`,
+  `component.restart`, `config.reload`, Live-Tracing und
+  Eventueller Multiplex zu mehreren Roboterinstanzen sind Themen
+  fuer spaetere Iterationen.
 
 ## Verhaeltnis zum Ist-Code unter `_reference/`
 

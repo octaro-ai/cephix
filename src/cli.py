@@ -38,6 +38,7 @@ from src.configuration import (
     home_dir,
     load_robot_config,
     resolve_robot_instance,
+    save_robot_config,
     unregister_robot_override,
 )
 from src.logging_config import configure_logging
@@ -105,6 +106,11 @@ def _cmd_config(args: argparse.Namespace) -> int:
 
 
 def _cmd_remove(args: argparse.Namespace) -> int:
+    """Delete a robot for good: workspace and index entry both go.
+
+    For the soft case ("hide it from the smart default but keep the
+    config"), use ``cephix disable`` instead.
+    """
     home_override = _normalise_home(args.home)
     ensure_home_config(home_override)
     try:
@@ -114,7 +120,12 @@ def _cmd_remove(args: argparse.Namespace) -> int:
         return 1
 
     if not args.yes:
-        prompt = f"remove robot {instance.id!r} from the registry? [y/N] "
+        prompt = (
+            f"this will permanently delete robot {instance.id!r} and its "
+            f"workspace at {instance.workspace}.\n"
+            "(use 'cephix disable' to keep it on disk.)\n"
+            "continue? [y/N] "
+        )
         try:
             answer = input(prompt).strip().lower()
         except EOFError:
@@ -124,16 +135,38 @@ def _cmd_remove(args: argparse.Namespace) -> int:
             return 1
 
     unregister_robot_override(instance.id, home_override=home_override)
+    if instance.workspace.exists():
+        shutil.rmtree(instance.workspace, ignore_errors=False)
+        print(f"deleted workspace {instance.workspace}")
+    print(f"removed robot {instance.id!r}")
+    return 0
 
-    if args.purge:
-        if instance.workspace.exists():
-            shutil.rmtree(instance.workspace, ignore_errors=False)
-            print(f"purged workspace {instance.workspace}")
-    else:
-        if instance.robot_yaml.exists():
-            print(
-                f"workspace kept at {instance.workspace} (use --purge to delete)"
-            )
+
+def _cmd_disable(args: argparse.Namespace) -> int:
+    return _set_enabled(args, enabled=False)
+
+
+def _cmd_enable(args: argparse.Namespace) -> int:
+    return _set_enabled(args, enabled=True)
+
+
+def _set_enabled(args: argparse.Namespace, *, enabled: bool) -> int:
+    home_override = _normalise_home(args.home)
+    ensure_home_config(home_override)
+    try:
+        instance = resolve_robot_instance(args.robot_id, home_override=home_override)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    cfg = load_robot_config(instance.workspace)
+    if cfg.get("enabled", True) == enabled:
+        state = "enabled" if enabled else "disabled"
+        print(f"robot {instance.id!r} is already {state}")
+        return 0
+    cfg["enabled"] = enabled
+    save_robot_config(instance.workspace, cfg)
+    state = "enabled" if enabled else "disabled"
+    print(f"robot {instance.id!r} is now {state}")
     return 0
 
 
@@ -260,7 +293,11 @@ def _start_instance(
             instance.id,
         )
 
-    robot = build_robot_from_config(robot_yaml, defaults=defaults)
+    robot = build_robot_from_config(
+        robot_yaml,
+        defaults=defaults,
+        workspace=instance.workspace,
+    )
     robot.run()
     return 0
 
@@ -316,14 +353,10 @@ def _build_parser() -> argparse.ArgumentParser:
     config_parser.set_defaults(handler=_cmd_config)
 
     remove_parser = subparsers.add_parser(
-        "remove", help="Remove a robot from the registry (and optionally its workspace)."
+        "remove",
+        help="Delete a robot and its workspace. Use 'disable' for a soft toggle.",
     )
     remove_parser.add_argument("robot_id", help="Robot id to remove.")
-    remove_parser.add_argument(
-        "--purge",
-        action="store_true",
-        help="Also delete the bot's workspace directory.",
-    )
     remove_parser.add_argument(
         "-y",
         "--yes",
@@ -331,6 +364,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip the confirmation prompt.",
     )
     remove_parser.set_defaults(handler=_cmd_remove)
+
+    disable_parser = subparsers.add_parser(
+        "disable",
+        help="Mark a robot as disabled (kept on disk, ignored by smart default).",
+    )
+    disable_parser.add_argument("robot_id", help="Robot id to disable.")
+    disable_parser.set_defaults(handler=_cmd_disable)
+
+    enable_parser = subparsers.add_parser(
+        "enable", help="Re-enable a previously disabled robot."
+    )
+    enable_parser.add_argument("robot_id", help="Robot id to enable.")
+    enable_parser.set_defaults(handler=_cmd_enable)
 
     return parser
 

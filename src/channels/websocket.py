@@ -203,26 +203,69 @@ class WebsocketChannel(RobotComponent):
             self._robot_name = retained.robot_name
 
     async def _handle_lifecycle(self, event: RobotEvent) -> None:
+        """Lifecycle hook: pick up identity from retained ``RobotReady``.
+
+        Shutdown is handled by :meth:`drain` which is invoked
+        directly by the robot after ``RobotShutdown`` is broadcast --
+        not from this subscription, to avoid racing the bus consumer
+        task against the drain coroutine.
+        """
         if isinstance(event, RobotReady):
             self._robot_id = event.robot_id
             self._robot_name = event.robot_name
-        elif isinstance(event, RobotShutdown):
-            self._shutting_down = True
-            for session_id, ws in list(self._sessions.items()):
-                try:
-                    await ws.send_json(
-                        {
-                            "type": "shutdown",
-                            "reason": event.reason,
-                            "grace_seconds": event.grace_seconds,
-                        }
-                    )
-                except Exception:
-                    logger.debug(
-                        "error notifying session %s of shutdown",
-                        session_id,
-                        exc_info=True,
-                    )
+
+    async def drain(self) -> None:
+        """Notify connected clients and close their sessions.
+
+        Called by the robot during the shutdown grace window. We
+        send a ``shutdown`` JSON frame to every open session, then
+        close the WebSocket. ``stop()`` (called afterwards by the
+        robot) only takes care of the listening socket and the bus
+        subscriptions.
+
+        Pulls the ``RobotShutdown`` from the bus retained slot to
+        forward ``reason`` and ``grace_seconds`` to clients -- they
+        are useful for UI feedback ("server is restarting in 5s").
+        """
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+
+        bus = self._bus
+        reason = ""
+        grace_seconds = 0.0
+        if bus is not None:
+            retained = bus.retained(LIFECYCLE_TOPIC)
+            if isinstance(retained, RobotShutdown):
+                reason = retained.reason
+                grace_seconds = retained.grace_seconds
+
+        for session_id, ws in list(self._sessions.items()):
+            try:
+                await ws.send_json(
+                    {
+                        "type": "shutdown",
+                        "reason": reason,
+                        "grace_seconds": grace_seconds,
+                    }
+                )
+            except Exception:
+                logger.debug(
+                    "error notifying session %s of shutdown",
+                    session_id,
+                    exc_info=True,
+                )
+            try:
+                await ws.close()
+            except Exception:
+                logger.debug(
+                    "error closing session %s on shutdown",
+                    session_id,
+                    exc_info=True,
+                )
+
+        self._sessions.clear()
+        self._run_to_session.clear()
 
     def _require_bus(self) -> BusPort:
         if self._bus is None:

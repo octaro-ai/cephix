@@ -1,4 +1,4 @@
-"""Tests for the Robot composition root."""
+"""Tests for the consolidated Robot class."""
 
 from __future__ import annotations
 
@@ -8,13 +8,26 @@ import logging
 import pytest
 
 from src.bus import AsyncioBus
-from src.robot import Robot
+from src.components import ComponentCategory, RobotComponent
+from src.robot import ControlPlaneConfig, Robot, RobotIdentity
 
 
-class _RecordingPart:
-    """Minimal fake bus component used to verify lifecycle order."""
+class _RecordingComponent(RobotComponent):
+    """Userspace component used to verify lifecycle ordering and bus injection."""
 
-    def __init__(self, name: str, log: list[str]) -> None:
+    component_description = "test fixture"
+
+    def __init__(
+        self,
+        name: str,
+        log: list[str],
+        *,
+        category: ComponentCategory = ComponentCategory.CHANNEL,
+    ) -> None:
+        # Per-instance metadata so the manifest carries unique types
+        # (the registry never sees these fakes; we just need uniqueness).
+        self.component_type = name
+        self.component_category = category
         self.name = name
         self._log = log
         self.fail_on_start = False
@@ -39,14 +52,42 @@ class _RecordingPart:
         self.injected_bus = None
 
 
-async def test_robot_starts_bus_kernel_then_channels_in_order() -> None:
+def _make_robot(
+    *,
+    bus: AsyncioBus | None = None,
+    kernel: _RecordingComponent | None = None,
+    channels: list[_RecordingComponent] | None = None,
+    robot_id: str | None = None,
+    robot_name: str | None = None,
+    shutdown_grace: float = 0.0,
+) -> Robot:
+    """Build a Robot with control plane disabled (the default for tests)."""
+    bus = bus if bus is not None else AsyncioBus()
+    log_proxy: list[str] = []
+    kernel = (
+        kernel
+        if kernel is not None
+        else _RecordingComponent("kernel", log_proxy, category=ComponentCategory.KERNEL)
+    )
+    channels = channels if channels is not None else []
+    components: list[RobotComponent] = [bus, kernel, *channels]
+    return Robot(
+        identity=RobotIdentity(id=robot_id, name=robot_name),
+        components=components,
+        control_plane_config=ControlPlaneConfig(enabled=False),
+        shutdown_grace=shutdown_grace,
+    )
+
+
+async def test_robot_starts_bus_kernel_then_channels_in_priority_order() -> None:
     log: list[str] = []
     bus = AsyncioBus()
-    kernel = _RecordingPart("kernel", log)
-    ch_a = _RecordingPart("ch-a", log)
-    ch_b = _RecordingPart("ch-b", log)
+    kernel = _RecordingComponent("kernel", log, category=ComponentCategory.KERNEL)
+    ch_a = _RecordingComponent("ch-a", log)
+    ch_b = _RecordingComponent("ch-b", log)
 
-    robot = Robot(bus=bus, kernel=kernel, channels=[ch_a, ch_b], shutdown_grace=0.0)
+    robot = _make_robot(bus=bus, kernel=kernel, channels=[ch_a, ch_b])
+
     async with robot:
         assert bus.is_running
         assert kernel.started
@@ -65,19 +106,15 @@ async def test_robot_starts_bus_kernel_then_channels_in_order() -> None:
 async def test_robot_rolls_back_on_partial_startup() -> None:
     log: list[str] = []
     bus = AsyncioBus()
-    kernel = _RecordingPart("kernel", log)
-    ch_a = _RecordingPart("ch-a", log)
-    ch_bad = _RecordingPart("ch-bad", log)
+    kernel = _RecordingComponent("kernel", log, category=ComponentCategory.KERNEL)
+    ch_a = _RecordingComponent("ch-a", log)
+    ch_bad = _RecordingComponent("ch-bad", log)
     ch_bad.fail_on_start = True
 
-    robot = Robot(bus=bus, kernel=kernel, channels=[ch_a, ch_bad], shutdown_grace=0.0)
+    robot = _make_robot(bus=bus, kernel=kernel, channels=[ch_a, ch_bad])
 
-    try:
+    with pytest.raises(RuntimeError, match="ch-bad"):
         await robot.start()
-    except RuntimeError as exc:
-        assert "ch-bad" in str(exc)
-    else:
-        raise AssertionError("expected RuntimeError")
 
     assert not bus.is_running
     assert not kernel.started
@@ -93,10 +130,7 @@ async def test_robot_rolls_back_on_partial_startup() -> None:
 
 
 async def test_robot_run_forever_blocks_until_stop() -> None:
-    log: list[str] = []
-    bus = AsyncioBus()
-    kernel = _RecordingPart("kernel", log)
-    robot = Robot(bus=bus, kernel=kernel, shutdown_grace=0.0)
+    robot = _make_robot()
 
     await robot.start()
     runner = asyncio.create_task(robot.run_forever())
@@ -111,10 +145,10 @@ async def test_robot_run_forever_blocks_until_stop() -> None:
 async def test_robot_injects_bus_into_components_at_start() -> None:
     log: list[str] = []
     bus = AsyncioBus()
-    kernel = _RecordingPart("kernel", log)
-    ch = _RecordingPart("ch", log)
+    kernel = _RecordingComponent("kernel", log, category=ComponentCategory.KERNEL)
+    ch = _RecordingComponent("ch", log)
 
-    robot = Robot(bus=bus, kernel=kernel, channels=[ch], shutdown_grace=0.0)
+    robot = _make_robot(bus=bus, kernel=kernel, channels=[ch])
 
     assert kernel.injected_bus is None
     assert ch.injected_bus is None
@@ -127,27 +161,29 @@ async def test_robot_injects_bus_into_components_at_start() -> None:
     assert ch.injected_bus is None
 
 
-async def test_robot_exposes_components() -> None:
-    bus = AsyncioBus()
+async def test_robot_exposes_components_in_boot_order() -> None:
     log: list[str] = []
-    kernel = _RecordingPart("kernel", log)
-    ch = _RecordingPart("ch", log)
+    bus = AsyncioBus()
+    kernel = _RecordingComponent("kernel", log, category=ComponentCategory.KERNEL)
+    ch = _RecordingComponent("ch", log)
 
-    robot = Robot(bus=bus, kernel=kernel, channels=[ch], shutdown_grace=0.0)
+    robot = _make_robot(bus=bus, kernel=kernel, channels=[ch])
 
-    assert robot.bus is bus
-    assert robot.kernel is kernel
-    assert robot.channels == (ch,)
+    # Before start: components are configured but the bus pointer is
+    # not active yet -- robot.bus reflects the *running* bus.
+    assert robot.components == (bus, kernel, ch)
+    assert robot.bus is None
+
+    async with robot:
+        assert robot.bus is bus
+
+    assert robot.bus is None
 
 
 async def test_robot_logs_boot_and_shutdown_narrative(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    log: list[str] = []
-    bus = AsyncioBus()
-    kernel = _RecordingPart("kernel", log)
-    ch = _RecordingPart("ch", log)
-    robot = Robot(bus=bus, kernel=kernel, channels=[ch], shutdown_grace=0.0)
+    robot = _make_robot()
 
     with caplog.at_level(logging.INFO, logger="src.robot"):
         async with robot:
@@ -156,9 +192,9 @@ async def test_robot_logs_boot_and_shutdown_narrative(
     messages = [rec.message for rec in caplog.records if rec.name == "src.robot"]
     assert "starting..." in messages
     assert "AsyncioBus started" in messages
-    assert any(m.startswith("_RecordingPart attached") for m in messages)
+    assert any(m.startswith("_RecordingComponent attached") for m in messages)
     assert "robot online (Ctrl-C to stop)" in messages
-    assert any(m.startswith("_RecordingPart detached") for m in messages)
+    assert any(m.startswith("_RecordingComponent detached") for m in messages)
     assert "AsyncioBus stopped" in messages
     assert "robot offline" in messages
 
@@ -170,16 +206,7 @@ async def test_robot_logs_boot_and_shutdown_narrative(
 async def test_robot_logs_lifecycle_with_identity(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    log: list[str] = []
-    bus = AsyncioBus()
-    kernel = _RecordingPart("kernel", log)
-    robot = Robot(
-        bus=bus,
-        kernel=kernel,
-        robot_id="dreamgirl",
-        robot_name="Dreamgirl",
-        shutdown_grace=0.0,
-    )
+    robot = _make_robot(robot_id="dreamgirl", robot_name="Dreamgirl")
 
     with caplog.at_level(logging.INFO, logger="src.robot"):
         async with robot:
@@ -189,28 +216,29 @@ async def test_robot_logs_lifecycle_with_identity(
     assert "starting robot 'Dreamgirl' (dreamgirl)..." in messages
     assert "robot 'Dreamgirl' (dreamgirl) online (Ctrl-C to stop)" in messages
     assert "robot 'Dreamgirl' (dreamgirl) offline" in messages
-    # the anonymous wording must NOT appear when an identity is set
     assert "starting..." not in messages
     assert "robot online (Ctrl-C to stop)" not in messages
     assert "robot offline" not in messages
 
 
-async def test_robot_publishes_robot_ready_on_lifecycle_topic() -> None:
-    """The robot announces itself with a retained RobotReady broadcast."""
+async def test_robot_publishes_robot_boot_then_robot_ready_with_manifest() -> None:
+    """The robot announces itself with retained RobotBoot then RobotReady.
+
+    The first event (RobotBoot) is published before the kernel and
+    channels attach, so they can pick up identity from the retained
+    slot. The second event (RobotReady) overrides the retained slot
+    once everything is up; it carries the same manifest so a late
+    subscriber still learns the full composition.
+    """
     from src.bus import LIFECYCLE_TOPIC, RobotReady
 
     log: list[str] = []
     bus = AsyncioBus()
-    kernel = _RecordingPart("kernel", log)
-    ch = _RecordingPart("ch", log)
+    kernel = _RecordingComponent("kernel", log, category=ComponentCategory.KERNEL)
+    ch = _RecordingComponent("ch", log)
 
-    robot = Robot(
-        bus=bus,
-        kernel=kernel,
-        channels=[ch],
-        robot_id="alpha",
-        robot_name="Alpha",
-        shutdown_grace=0.0,
+    robot = _make_robot(
+        bus=bus, kernel=kernel, channels=[ch], robot_id="alpha", robot_name="Alpha"
     )
 
     async with robot:
@@ -220,11 +248,8 @@ async def test_robot_publishes_robot_ready_on_lifecycle_topic() -> None:
         assert retained.robot_name == "Alpha"
         assert retained.boot_id.startswith("boot-")
         assert retained.run_id == retained.boot_id
-        # bus, kernel, one channel -- three components in the snapshot
         categories = [info.category for info in retained.components]
-        assert "bus" in categories
-        # _RecordingPart is not a RobotComponent, so it shows up as 'unknown'
-        assert categories.count("unknown") == 2
+        assert categories == ["bus", "kernel", "channel"]
 
 
 async def test_robot_publishes_robot_shutdown_on_stop() -> None:
@@ -233,16 +258,8 @@ async def test_robot_publishes_robot_shutdown_on_stop() -> None:
 
     received: list[RobotEvent] = []
 
-    log: list[str] = []
     bus = AsyncioBus()
-    kernel = _RecordingPart("kernel", log)
-    robot = Robot(
-        bus=bus,
-        kernel=kernel,
-        robot_id="alpha",
-        robot_name="Alpha",
-        shutdown_grace=0.0,
-    )
+    robot = _make_robot(bus=bus, robot_id="alpha", robot_name="Alpha")
 
     await robot.start()
     bus.subscribe_broadcast(LIFECYCLE_TOPIC, lambda evt: _record(received, evt))
@@ -261,37 +278,133 @@ async def _record(target: list, event) -> None:  # type: ignore[no-untyped-def]
     target.append(event)
 
 
-async def test_robot_grace_period_runs_before_teardown(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_robot_does_not_block_shutdown_for_default_drainers() -> None:
+    """Default drain() returns immediately -> no waste of the grace window."""
+    import time
+
+    robot = _make_robot(shutdown_grace=5.0)  # would be visible if blind sleep
+
+    await robot.start()
+    started = time.monotonic()
+    await robot.stop()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0, f"shutdown took {elapsed:.2f}s with default drains"
+
+
+async def test_robot_caps_shutdown_at_grace_when_drain_hangs(
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The robot waits shutdown_grace seconds before stopping components."""
-    sleeps: list[float] = []
+    """A drain() that doesn't return is capped at the per-component grace."""
 
-    real_sleep = asyncio.sleep
+    class _SilentDrainer(RobotComponent):
+        component_type = "silent-drainer"
+        component_category = ComponentCategory.CHANNEL
+        component_description = "test fixture"
 
-    async def tracking_sleep(seconds: float, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if seconds > 0:
-            sleeps.append(seconds)
-        await real_sleep(0)
+        def __init__(self) -> None:
+            self.started = False
 
-    monkeypatch.setattr("src.robot.asyncio.sleep", tracking_sleep)
+        async def start(self, bus: object) -> None:
+            self.started = True
 
-    log: list[str] = []
-    bus = AsyncioBus()
-    kernel = _RecordingPart("kernel", log)
-    robot = Robot(bus=bus, kernel=kernel, shutdown_grace=2.5)
+        async def stop(self) -> None:
+            self.started = False
 
-    async with robot:
-        pass
+        async def drain(self) -> None:
+            await asyncio.sleep(60.0)  # never returns within the grace window
 
-    assert 2.5 in sleeps
+    silent = _SilentDrainer()
+    robot = _make_robot(channels=[silent], shutdown_grace=0.05)
+
+    with caplog.at_level(logging.WARNING, logger="src.robot"):
+        await robot.start()
+        await robot.stop()
+
+    warnings = [
+        rec.message for rec in caplog.records if rec.levelno >= logging.WARNING
+    ]
+    assert any(
+        "_SilentDrainer" in m and "elapsed" in m and "forcing stop" in m
+        for m in warnings
+    ), f"expected drain timeout warning, got: {warnings}"
+
+
+async def test_robot_returns_immediately_when_drain_returns_fast() -> None:
+    """A drain() that returns quickly does not eat the grace window."""
+    import time
+
+    class _FastDrainer(RobotComponent):
+        component_type = "fast-drainer"
+        component_category = ComponentCategory.CHANNEL
+        component_description = "test fixture"
+
+        def __init__(self) -> None:
+            self.started = False
+            self.drained = False
+
+        async def start(self, bus: object) -> None:
+            self.started = True
+
+        async def stop(self) -> None:
+            self.started = False
+
+        async def drain(self) -> None:
+            await asyncio.sleep(0)
+            self.drained = True
+
+    drainer = _FastDrainer()
+    robot = _make_robot(channels=[drainer], shutdown_grace=10.0)
+
+    await robot.start()
+    started = time.monotonic()
+    await robot.stop()
+    elapsed = time.monotonic() - started
+
+    assert drainer.drained, "drain() was not awaited"
+    assert elapsed < 1.0, f"shutdown took {elapsed:.2f}s although drain returned fast"
+
+
+async def test_robot_logs_drain_exception_without_aborting_shutdown(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A drain() that raises is logged but doesn't break the shutdown path."""
+
+    class _RaisingDrainer(RobotComponent):
+        component_type = "raising-drainer"
+        component_category = ComponentCategory.CHANNEL
+        component_description = "test fixture"
+
+        def __init__(self) -> None:
+            self.stopped = False
+
+        async def start(self, bus: object) -> None:
+            pass
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+        async def drain(self) -> None:
+            raise RuntimeError("drain went sideways")
+
+    drainer = _RaisingDrainer()
+    robot = _make_robot(channels=[drainer], shutdown_grace=1.0)
+
+    with caplog.at_level(logging.WARNING, logger="src.robot"):
+        await robot.start()
+        await robot.stop()
+
+    assert drainer.stopped, "stop() must run even when drain() raised"
+    errors = [
+        r.message
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and "drain hook" in r.message
+    ]
+    assert errors, "expected a drain-failure log entry"
 
 
 async def test_robot_label_with_only_id(caplog: pytest.LogCaptureFixture) -> None:
-    log: list[str] = []
-    bus = AsyncioBus()
-    kernel = _RecordingPart("kernel", log)
-    robot = Robot(bus=bus, kernel=kernel, robot_id="dreamgirl", shutdown_grace=0.0)
+    robot = _make_robot(robot_id="dreamgirl")
 
     with caplog.at_level(logging.INFO, logger="src.robot"):
         async with robot:
@@ -307,10 +420,10 @@ async def test_robot_logs_rollback_on_failed_startup(
 ) -> None:
     log: list[str] = []
     bus = AsyncioBus()
-    kernel = _RecordingPart("kernel", log)
-    ch_bad = _RecordingPart("ch-bad", log)
+    kernel = _RecordingComponent("kernel", log, category=ComponentCategory.KERNEL)
+    ch_bad = _RecordingComponent("ch-bad", log)
     ch_bad.fail_on_start = True
-    robot = Robot(bus=bus, kernel=kernel, channels=[ch_bad], shutdown_grace=0.0)
+    robot = _make_robot(bus=bus, kernel=kernel, channels=[ch_bad])
 
     with caplog.at_level(logging.INFO, logger="src.robot"):
         with pytest.raises(RuntimeError):
@@ -319,3 +432,23 @@ async def test_robot_logs_rollback_on_failed_startup(
     messages = [rec.message for rec in caplog.records if rec.name == "src.robot"]
     assert "startup failed, rolling back" in messages
     assert "robot online (Ctrl-C to stop)" not in messages
+
+
+async def test_robot_sorts_components_by_boot_priority() -> None:
+    """Components handed to the constructor in any order get sorted."""
+    log: list[str] = []
+    bus = AsyncioBus()
+    kernel = _RecordingComponent("kernel", log, category=ComponentCategory.KERNEL)
+    ch = _RecordingComponent("ch", log)
+
+    # Note: bus last, channel before kernel -- robot must reorder.
+    components: list[RobotComponent] = [ch, kernel, bus]
+
+    robot = Robot(
+        identity=RobotIdentity(),
+        components=components,
+        control_plane_config=ControlPlaneConfig(enabled=False),
+        shutdown_grace=0.0,
+    )
+
+    assert robot.components == (bus, kernel, ch)

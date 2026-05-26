@@ -11,6 +11,18 @@
 defaults:
   bus:
     type: asyncio
+  # Out-of-band maintenance hatch. Not connected to the bus -- if the
+  # bus wedges, the control plane is still reachable so an operator
+  # can inspect and stop the robot. Token is taken from the bot-local
+  # .env file (key: CEPHIX_CONTROL_PLANE_TOKEN).
+  control_plane:
+    enabled: true
+    host: 127.0.0.1
+    port: 9876
+    # Tried in order if `port` is busy; final fallback is port 0
+    # (let the OS pick) so multiple bots co-exist by default.
+    port_range: [9876, 9999]
+    path: /control
   kernel:
     type: echo
     input_topic: input.message

@@ -4,6 +4,7 @@ from src.bus.asyncio_bus import AsyncioBus
 from src.bus.messages import (
     LIFECYCLE_TOPIC,
     ComponentInfo,
+    RobotBoot,
     RobotEvent,
     RobotInput,
     RobotOutput,
@@ -20,6 +21,7 @@ __all__ = [
     "BusPort",
     "ComponentInfo",
     "LIFECYCLE_TOPIC",
+    "RobotBoot",
     "RobotEvent",
     "RobotInput",
     "RobotOutput",
