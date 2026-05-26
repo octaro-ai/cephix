@@ -94,7 +94,7 @@ class JsonlEventSink:
 
     def _open_for_append(self) -> TextIO:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        return self._path.open("a", encoding="utf-8")
+        return self._path.open("a", encoding="utf-8", buffering=1)
 
     def _write_line(self, line: str) -> None:
         assert self._file is not None

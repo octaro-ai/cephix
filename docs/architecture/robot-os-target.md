@@ -251,6 +251,27 @@ abgeschaltetem Strom.
   Bruecken zur Aussenwelt. Sie ziehen ihre Identitaet aus dem
   retained Lifecycle-Event auf dem Bus.
 
+### `RobotComponent` vs. `BusComponent`
+
+Der Lifecycle-Vertrag ist zweistufig:
+
+- `RobotComponent` ist jede startbare Einheit des Roboters. Sie hat
+  `start()`, `stop()` und optional `drain()`, aber keine implizite
+  Bus-Abhaengigkeit. Das deckt den Bus selbst und spaetere lokale
+  Resource-Holder ab (z.B. ein Persistence-Provider mit Connection-
+  Pool oder ein Werkzeugprozess, dessen IO-Adapter separat am Bus
+  haengt).
+- `BusComponent` ist die Spezialisierung fuer Komponenten, die beim
+  Start den laufenden Bus brauchen. Ihre `start(bus)`-Methode bekommt
+  den `BusPort` explizit injiziert. Kernel, Channels, Telemetrie,
+  Audit und spaeter Governance/Actors gehoeren in diese Klasse.
+
+Der Bus ist bewusst **kein** `BusComponent`: er ist der Upstream,
+an den andere Komponenten andocken. Er ist `RobotComponent` plus
+`BusPort` und startet daher mit `start()` ohne Argument. Diese Trennung
+haelt die kleine Asymmetrie sichtbar, ohne so zu tun, als muesste jede
+Roboter-Komponente zwingend am Bus haengen.
+
 ### Komponenten-Reihenfolge: BOOT_PRIORITY
 
 Die Lifecycle-Reihenfolge ist *nicht* hartkodiert. Jede Kategorie
@@ -393,7 +414,7 @@ Cephix mappt diese Trennung sauber:
 | Anteil | In Cephix |
 |---|---|
 | Awareness-Signal | `RobotShutdown` retained auf `robot.lifecycle` |
-| Lifecycle-Vertrag | `RobotComponent.drain()` Methode, Default `pass` |
+| Lifecycle-Vertrag | `RobotComponent.start()/stop()/drain()`, fuer Bus-Teilnehmer spezialisiert als `BusComponent.start(bus)` |
 | Hard-Cap pro Komponente | `shutdown_grace` (Default 5s), danach Task-Cancel |
 
 Ablauf in `Robot._phase3_down()` (analog `_phase2_down()`):
@@ -789,7 +810,8 @@ Bus liegt.
 | Persistenz | Erste Implementierung in-memory; der Bus ist als Port mit den Eigenschaften persistenter Queue-Bibliotheken modelliert (Adapter-Tausch ohne Architekturschnitt). Prio fuer fruehe Persistenz haben Audit und ausstehende Approvals. |
 | Bus-Semantik | Routende Queues, FIFO pro Teilnehmer, Priority erlaubt, Timeouts und Dead Letter. Pub/Sub fuer Lifecycle (`RobotBoot`, `RobotReady`, `RobotShutdown` mit retain) und Audit (`RobotAuditNote` ohne retain). Routable und Broadcast leben in getrennten Buckets. Der Bus ist Mechanik, *kein* Identitaetstraeger. |
 | Identitaet und Lifecycle-Owner | `Robot` ist eine *Single Class*: Identitaet (id, name) liegt direkt im Konstruktor (ohne Bus-Abhaengigkeit), die ControlPlane ist ein Feld der Klasse, und Boot/Shutdown werden vom selben Objekt orchestriert. Es gibt keine eigene `RobotService`-Schicht -- der Roboter ist sein eigener Init/PID-1. |
-| Komponenten-Reihenfolge | `BOOT_PRIORITY: dict[ComponentCategory, int]` legt die Boot-Reihenfolge fest (BUS=0, KERNEL=10, CHANNEL=20). Der Roboter sortiert die uebergebenen Komponenten einmal und walkt sie vorwaerts beim Boot, rueckwaerts beim Shutdown. Neue Komponenten-Kategorien aendern `BOOT_PRIORITY` -- der Lifecycle-Code bleibt unangetastet. |
+| Komponenten-Reihenfolge | `BOOT_PRIORITY: dict[ComponentCategory, int]` legt die Boot-Reihenfolge fest (BUS=0, TELEMETRY=5, AUDIT=6, KERNEL=10, CHANNEL=20). Der Roboter sortiert die uebergebenen Komponenten einmal und walkt sie vorwaerts beim Boot, rueckwaerts beim Shutdown. Neue Komponenten-Kategorien aendern `BOOT_PRIORITY` -- der Lifecycle-Code bleibt unangetastet. |
+| Komponenten-Vertrag | `RobotComponent` ist die generische Lifecycle-Einheit mit `start()/stop()/drain()`. `BusComponent` spezialisiert das fuer Teilnehmer, die den laufenden `BusPort` in `start(bus)` brauchen. Der Bus selbst ist `RobotComponent` + `BusPort`, aber kein `BusComponent`, weil er der Upstream ist. |
 | Bootstrap | Drei-Phasen-Sequenz in `Robot.start()`: Phase 1 bringt die ControlPlane out-of-band hoch; Phase 2 startet alle `SKELETON_CATEGORIES`-Komponenten in Prioritaets-Reihenfolge -- erst den Bus (`start()` ohne Bus-Argument), dann Querschnitts-Beobachter wie Telemetrie (`start(bus)`) -- und published retained `RobotBoot`; Phase 3 startet alle uebrigen Komponenten in Prioritaets-Reihenfolge (Audit vor Kernel vor Channels) und published retained `RobotReady`. Shutdown spiegelbildlich mit retained `RobotShutdown` und per-Komponente sequenziellem Drain mit Hard-Cap (SIGTERM/SIGKILL-Pattern); ControlPlane geht zuletzt offline. |
 | ControlPlane | Out-of-band WebSocket auf eigenem Port (default `127.0.0.1:9876`, mit Auto-Resolve in `port_range` und finalem Fallback auf OS-assigned). Token-Auth via `CEPHIX_CONTROL_PLANE_TOKEN` in der bot-lokalen `.env`. Erste Operationen: `status`, `component.list`, `shutdown`. Bewusst nicht am Bus, damit Sovereign-Operationen auch bei wedged Bus funktionieren -- Analogie IPMI/BMC und Magic SysRq. |
 | Topic-ACLs | Teil des Bus-Vertrags. Beim Subscribe deklariert ein Teilnehmer die gewuenschten Topics; der Bus prueft die Berechtigung. Aktive Pre-Delivery-Pruefung (Block, Modifikation, Approval-Roundtrip) ist ein eigenes Plan-Item -- siehe "Bewusst noch nicht entschieden". |

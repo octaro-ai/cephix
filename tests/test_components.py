@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from src.bus.asyncio_bus import AsyncioBus
 from src.channels.websocket import WebsocketChannel
-from src.components import ComponentCategory, RobotComponent
+from src.components import BusComponent, ComponentCategory, RobotComponent
 from src.kernel.echo import EchoKernel
 
 
@@ -14,10 +14,14 @@ def test_component_category_is_string_enum() -> None:
     assert ComponentCategory.CHANNEL.value == "channel"
 
 
-def test_robot_component_is_a_pure_mixin() -> None:
-    assert RobotComponent.__init_subclass__ is type.__init_subclass__ or callable(
-        RobotComponent.__init_subclass__
-    )
+def test_robot_component_has_generic_lifecycle_hooks() -> None:
+    assert hasattr(RobotComponent, "start")
+    assert hasattr(RobotComponent, "stop")
+    assert hasattr(RobotComponent, "drain")
+
+
+def test_bus_component_is_robot_component_specialization() -> None:
+    assert issubclass(BusComponent, RobotComponent)
 
 
 def test_asyncio_bus_carries_metadata() -> None:

@@ -12,10 +12,11 @@ from __future__ import annotations
 
 from src.bus.messages import RobotEvent, RobotInput, RobotOutput
 from src.bus.ports import BusPort, Subscription
-from src.components import ComponentCategory, RobotComponent
+from src.components import ComponentCategory
+from src.kernel.ports import KernelPort
 
 
-class EchoKernel(RobotComponent):
+class EchoKernel(KernelPort):
     """Echoes every input as an output on the configured topics."""
 
     component_type = "echo"

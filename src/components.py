@@ -1,13 +1,17 @@
 """Self-description and lifecycle marker for cephix components.
 
 A :class:`RobotComponent` is anything the robot composes itself out of:
-the bus, the kernel, channels, later audit/governance/tools. Every
-component carries:
+the bus, kernels, channels, later audit/governance/tools, or local
+resource holders that do not attach to the bus. Every component
+carries:
 
 - self-description (``component_type``, ``component_category``,
   ``component_description``, ``component_wizard_fields``) so the
   registry can index it, the wizard can offer it, and the manifest in
   ``RobotBoot`` / ``RobotReady`` can describe it;
+- lifecycle hooks (``start``/``stop`` plus optional ``drain``). Plain
+  robot components start without a bus; :class:`BusComponent` is the
+  specialization for components that attach to the running bus;
 - the :meth:`drain` lifecycle hook, called by the robot just before
   ``stop()`` to give the component bounded time for cleanup
   (close sessions, flush buffers, queue-flush for the bus, ...).
@@ -120,8 +124,14 @@ class RobotComponent:
     classes that don't opt in). An empty tuple means "ask nothing"
     (all defaults).
 
-    Lifecycle hooks (override as needed):
+    Lifecycle hooks:
 
+    - :meth:`start` is called by the robot during boot. Plain
+      components receive no bus. Components that need the running bus
+      should inherit :class:`BusComponent`, whose ``start`` hook is
+      called with the bus.
+    - :meth:`stop` is called by the robot during shutdown to release
+      resources acquired in ``start``.
     - :meth:`drain` is called by the robot during graceful shutdown,
       *before* the component's ``stop()`` is invoked. The default
       returns immediately ("nothing to drain"). Override to close
@@ -146,6 +156,19 @@ class RobotComponent:
     component_category: ClassVar[ComponentCategory]
     component_description: ClassVar[str] = ""
     component_wizard_fields: ClassVar[tuple[str, ...] | None] = None
+
+    async def start(self) -> None:
+        """Bring the component online.
+
+        Plain components do not receive the system bus. Use
+        :class:`BusComponent` for components that subscribe to or
+        publish on the bus during their lifetime.
+        """
+        raise NotImplementedError(f"{type(self).__name__}.start() not implemented")
+
+    async def stop(self) -> None:
+        """Release every resource acquired in :meth:`start`."""
+        raise NotImplementedError(f"{type(self).__name__}.stop() not implemented")
 
     async def drain(self) -> None:
         """Pre-stop drain hook. Default: nothing to do, return immediately.
@@ -208,3 +231,18 @@ class RobotComponent:
             details=dict(details or {}),
         )
         await bus.publish(note)
+
+
+class BusComponent(RobotComponent):
+    """A :class:`RobotComponent` that attaches to the system bus.
+
+    The robot starts bus components only after the bus itself is
+    running, and injects that bus into :meth:`start`. This keeps
+    generic components available for local resource holders while
+    making the bus dependency explicit for kernels, channels,
+    telemetry, audit, governance and similar observers or actors.
+    """
+
+    async def start(self, bus: "BusPort") -> None:  # type: ignore[override]
+        """Bring the component online on ``bus``."""
+        raise NotImplementedError(f"{type(self).__name__}.start() not implemented")

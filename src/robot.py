@@ -69,6 +69,7 @@ from src.bus.ports import BusPort
 from src.components import (
     BOOT_PRIORITY,
     SKELETON_CATEGORIES,
+    BusComponent,
     ComponentCategory,
     RobotComponent,
 )
@@ -484,23 +485,22 @@ class Robot:
     async def _start_component(self, component: RobotComponent) -> None:
         """Bring up a single component.
 
-        The bus is special: it has no upstream bus to attach to
-        because it *is* the upstream, so its ``start()`` takes no
-        argument. Every other component -- skeleton observers
-        (telemetry) and userspace alike -- gets the running bus
-        injected at start time.
+        Plain robot components start without a bus. Bus components
+        attach to the already-running bus, which makes the dependency
+        visible in the component type instead of smuggling it through
+        category-specific call signatures.
         """
         name = type(component).__name__
-        if component.component_category is ComponentCategory.BUS:
-            await component.start()  # type: ignore[call-arg]
-            logger.info("%s started", name)
-        else:
+        if isinstance(component, BusComponent):
             assert self._bus is not None, (
-                f"non-bus component {name} cannot start without a bus; "
+                f"bus component {name} cannot start without a bus; "
                 "the bus must boot first"
             )
-            await component.start(self._bus)  # type: ignore[call-arg]
+            await component.start(self._bus)
             logger.info("%s attached", name)
+        else:
+            await component.start()
+            logger.info("%s started", name)
         self._started.append(component)
 
     async def _drain_then_stop(

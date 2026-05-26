@@ -1,9 +1,10 @@
-"""Bus port and the shared lifecycle contract for bus components.
+"""Bus port and the bus-attached component contract.
 
 The bus is the system's central organ. Every component the robot is
 composed of -- kernel, channels, audit, governance -- attaches to the
-bus through this port and exposes the :class:`BusComponent` lifecycle
-so the robot can manage them uniformly.
+bus through this port when it inherits :class:`src.components.BusComponent`.
+Plain :class:`src.components.RobotComponent` instances can exist
+without a bus dependency.
 
 The first bus implementation lives in :mod:`src.bus.asyncio_bus`. Later
 implementations (NATS, Redis, SQLite-backed) must satisfy the same
@@ -15,32 +16,9 @@ from __future__ import annotations
 from typing import Awaitable, Callable, Protocol, runtime_checkable
 
 from src.bus.messages import RobotEvent, RobotRequest, RobotResponse
+from src.components import BusComponent
 
 EventHandler = Callable[[RobotEvent], Awaitable[None]]
-
-
-@runtime_checkable
-class BusComponent(Protocol):
-    """Common lifecycle contract for everything that lives on the bus.
-
-    A component subscribes to topics, publishes events, and possibly
-    runs background tasks. The robot owns the component and drives
-    its lifecycle. Both methods must be idempotent so the robot can
-    recover from partial startup failures.
-
-    Components are constructed with their own configuration only;
-    the bus itself is injected at :meth:`start` time. This keeps
-    "who am I" (constructor parameters: topics, ports, prefixes)
-    cleanly separated from "where am I plugged in" (runtime context:
-    the bus). It also lets the same component be moved between
-    robots without reconstruction.
-    """
-
-    async def start(self, bus: "BusPort") -> None:
-        """Bring the component online on ``bus`` (subscribe, open sockets, ...)."""
-
-    async def stop(self) -> None:
-        """Release every resource the component acquired in ``start``."""
 
 
 class Subscription(Protocol):

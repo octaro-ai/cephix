@@ -12,16 +12,15 @@ registration) is reached through the bus, not through this protocol.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
-
-from src.bus.ports import BusComponent
+from src.components import BusComponent
 
 
-@runtime_checkable
-class KernelPort(BusComponent, Protocol):
-    """Marker protocol for kernel implementations.
+class KernelPort(BusComponent):
+    """Marker base class for kernel implementations.
 
     Kernels differ from generic bus components only by role and
     privilege, not by surface. The role is documented; the privileges
     are enforced by governance middleware on the bus, not by this type.
+    Future kernels can grow actor or capability APIs here without
+    changing the generic :class:`BusComponent` lifecycle.
     """

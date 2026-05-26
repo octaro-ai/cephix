@@ -7,10 +7,10 @@ import asyncio
 from src.audit.note_sink import AuditNoteSink
 from src.bus import AUDIT_TOPIC, AsyncioBus, RobotAuditNote
 from src.bus.ports import BusPort
-from src.components import ComponentCategory, RobotComponent
+from src.components import BusComponent, ComponentCategory
 
 
-class _Producer(RobotComponent):
+class _Producer(BusComponent):
     """Tiny test component that uses publish_audit on demand."""
 
     component_type = "test_producer"

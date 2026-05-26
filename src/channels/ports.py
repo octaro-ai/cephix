@@ -19,11 +19,8 @@ channel and not part of this protocol.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
-
-from src.bus.ports import BusComponent
+from src.components import BusComponent
 
 
-@runtime_checkable
-class ChannelPort(BusComponent, Protocol):
-    """Marker protocol for channel implementations."""
+class ChannelPort(BusComponent):
+    """Marker base class for channel implementations."""

@@ -8,13 +8,13 @@ from typing import Any
 
 from src.bus.messages import AUDIT_TOPIC, RobotAuditNote, RobotEvent
 from src.bus.ports import BusPort, Subscription
-from src.components import ComponentCategory, RobotComponent
+from src.components import BusComponent, ComponentCategory
 from src.persistence.sink import EventSink
 
 logger = logging.getLogger(__name__)
 
 
-class AuditNoteSink(RobotComponent):
+class AuditNoteSink(BusComponent):
     """Subscribe to :data:`AUDIT_TOPIC` and persist every note.
 
     Unlike the :class:`BusRecorder`, the audit sink listens on a

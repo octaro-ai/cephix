@@ -69,7 +69,8 @@ from src.bus.messages import (
     RobotShutdown,
 )
 from src.bus.ports import BusPort, Subscription
-from src.components import ComponentCategory, RobotComponent
+from src.channels.ports import ChannelPort
+from src.components import ComponentCategory
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ def _new_session_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
-class WebsocketChannel(RobotComponent):
+class WebsocketChannel(ChannelPort):
     """aiohttp-based WebSocket bridge between bus and outside world."""
 
     component_type = "websocket"

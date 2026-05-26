@@ -8,11 +8,11 @@ import logging
 import pytest
 
 from src.bus import AsyncioBus
-from src.components import ComponentCategory, RobotComponent
+from src.components import BusComponent, ComponentCategory, RobotComponent
 from src.robot import ControlPlaneConfig, Robot, RobotIdentity
 
 
-class _RecordingComponent(RobotComponent):
+class _RecordingComponent(BusComponent):
     """Userspace component used to verify lifecycle ordering and bus injection."""
 
     component_description = "test fixture"
@@ -297,7 +297,7 @@ async def test_robot_caps_shutdown_at_grace_when_drain_hangs(
 ) -> None:
     """A drain() that doesn't return is capped at the per-component grace."""
 
-    class _SilentDrainer(RobotComponent):
+    class _SilentDrainer(BusComponent):
         component_type = "silent-drainer"
         component_category = ComponentCategory.CHANNEL
         component_description = "test fixture"
@@ -334,7 +334,7 @@ async def test_robot_returns_immediately_when_drain_returns_fast() -> None:
     """A drain() that returns quickly does not eat the grace window."""
     import time
 
-    class _FastDrainer(RobotComponent):
+    class _FastDrainer(BusComponent):
         component_type = "fast-drainer"
         component_category = ComponentCategory.CHANNEL
         component_description = "test fixture"
@@ -370,7 +370,7 @@ async def test_robot_logs_drain_exception_without_aborting_shutdown(
 ) -> None:
     """A drain() that raises is logged but doesn't break the shutdown path."""
 
-    class _RaisingDrainer(RobotComponent):
+    class _RaisingDrainer(BusComponent):
         component_type = "raising-drainer"
         component_category = ComponentCategory.CHANNEL
         component_description = "test fixture"
@@ -445,7 +445,7 @@ async def test_telemetry_component_starts_before_robot_boot_is_published() -> No
 
     seen: list[RobotEvent] = []
 
-    class _MiniRecorder(RobotComponent):
+    class _MiniRecorder(BusComponent):
         component_type = "mini-recorder"
         component_category = ComponentCategory.TELEMETRY
         component_description = "test fixture"

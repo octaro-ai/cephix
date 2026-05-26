@@ -20,13 +20,13 @@ from typing import Any
 
 from src.bus.messages import RobotEvent
 from src.bus.ports import BusPort, Subscription
-from src.components import ComponentCategory, RobotComponent
+from src.components import BusComponent, ComponentCategory
 from src.persistence.sink import EventSink
 
 logger = logging.getLogger(__name__)
 
 
-class BusRecorder(RobotComponent):
+class BusRecorder(BusComponent):
     """Persist every event delivered on the bus through an :class:`EventSink`."""
 
     component_type = "bus_recorder"
