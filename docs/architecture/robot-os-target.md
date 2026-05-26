@@ -140,13 +140,25 @@ zwei Genres genutzt:
   einen verspaeteten Subscriber so vollstaendig informieren kann wie
   `RobotBoot` es getan haette, traegt `RobotReady` denselben
   Komponenten-Manifest mit.
-- **Audit**: `RobotAuditNote` als Strom, ohne retain. Sie muss nicht
-  abgearbeitet werden, sondern von allen Beobachtern gesehen werden
-  koennen.
+- **Audit**: `RobotAuditNote` auf `robot.audit.note` als gerichtete
+  Queue (kein Broadcast, kein retain). Komponenten publishen Audit-
+  Notes ueber den `RobotComponent.publish_audit()`-Helper, der
+  Audit-Sink konsumiert sie ueber eine normale `subscribe`. Die
+  Trennung von Telemetrie ist absichtlich: Audit ist die kuratierte
+  Verantwortungsspur ("dies hat der Roboter bewusst getan"),
+  Telemetrie ist die rohe Bus-Spur ("das ist passiert").
 
 Routable Queue (`subscribe`) und Broadcast (`subscribe_broadcast`)
 leben in getrennten Buckets: ein `publish` erreicht keinen
 Broadcast-Subscriber, ein `publish_broadcast` keinen Routable-Subscriber.
+
+Querschnittsbeobachter (`subscribe_all`) bekommen *eine* Kopie pro
+Event-Auslieferung -- egal ob `publish` oder `publish_broadcast`,
+egal welches Topic. Read-only by design: der Handler kann eine
+Auslieferung weder modifizieren noch verhindern. Topic-ACLs und
+Governance-Pre-Delivery-Eingriffe sind ein separat zu designendes
+Mechanismus-Paket und keine Erweiterung von `subscribe_all` (siehe
+"Bewusst noch nicht entschieden").
 
 Mapping pro Nachrichtentyp:
 
@@ -159,8 +171,10 @@ Mapping pro Nachrichtentyp:
 - `RobotBoot`, `RobotReady`, `RobotShutdown`: Pub/Sub mit retain auf
   `robot.lifecycle`. Eine Quelle (der `Robot`), beliebig viele
   Subscriber.
-- `RobotAuditNote`: Pub/Sub mit mehreren Subscribern (Audit-Sink,
-  Operator-UI, Notebooks).
+- `RobotAuditNote`: Routable Queue auf `robot.audit.note`. Wird vom
+  `AuditNoteSink` konsumiert (Komponente mit `category=AUDIT`).
+  Telemetry-Recorder sieht die Note ebenfalls, aber als Teil seines
+  rohen Bus-Stroms; das curated Audit-Log liegt am Topic.
 
 ## Bus-Vertrag
 
@@ -246,9 +260,11 @@ niedrige Werte starten zuerst:
 | Kategorie | Prioritaet | Bedeutung |
 |---|---|---|
 | `BUS` | `0` | Skelett -- muss als erstes oben sein |
+| `TELEMETRY` | `5` | Skelett -- liest *alles* mit (`subscribe_all`); bootet **vor** dem `RobotBoot`-Publish, damit der Lifecycle ab dem allerersten Event lueckenlos aufgezeichnet wird |
+| `AUDIT` | `6` | Userspace -- persistiert kuratierte `RobotAuditNote`-Events; vor dem Userspace-Reasoner damit auch Audit-Notes der ersten Userspace-Komponenten landen, aber *nicht* im Skelett, weil vor Userspace nichts kuratiert wird |
 | `KERNEL` | `10` | Userspace-Reasoner |
 | `CHANNEL` | `20` | Aussenwelt-Bruecken, brauchen Bus *und* Kernel |
-| Reserviert: `AUDIT` (5), `GOVERNANCE` (15) | -- | Werden eingefuehrt, sobald die Komponenten existieren |
+| Reserviert: `GOVERNANCE` (15) | -- | Wird eingefuehrt, sobald die Komponente existiert |
 
 Der Roboter sortiert die im Konstruktor uebergebenen Komponenten beim
 Bauen einmal nach Prioritaet und walkt diese Liste -- vorwaerts beim
@@ -256,10 +272,21 @@ Boot, rueckwaerts beim Shutdown. Eine neue Komponentenklasse erfordert
 *keinen* Edit am Lifecycle-Code, nur einen Eintrag in `BOOT_PRIORITY`.
 
 `SKELETON_CATEGORIES` markiert die Kategorien, die zum *Skelett*
-gehoeren (aktuell nur `BUS`). Skelett-Komponenten werden in Phase 2
-gestartet, bevor `RobotBoot` auf den Bus geht; alle anderen
-Komponenten werden in Phase 3 als Userspace gestartet, nachdem
-`RobotBoot` retained verfuegbar ist.
+gehoeren: aktuell `BUS` und `TELEMETRY`. Skelett-Komponenten
+werden in Phase 2 in Boot-Priority-Reihenfolge gestartet -- erst
+der Bus (`start()` ohne Argument, weil er *ist* der Upstream),
+dann die Querschnitts-Beobachter (`start(bus)`); erst danach geht
+`RobotBoot` retained auf den Bus. Damit landet das allererste
+Lifecycle-Event live in der Telemetrie. Alle anderen Komponenten
+werden in Phase 3 als Userspace gestartet, nachdem `RobotBoot`
+retained verfuegbar ist.
+
+`AUDIT` ist bewusst **nicht** im Skelett: Audit konsumiert nur
+kuratierte `RobotAuditNote`-Events, und solche werden erst von
+Userspace-Komponenten erzeugt. Vor Phase 3 gibt es nichts zu
+kuratieren, also gehoert Audit in Phase 3 -- nur eben mit
+niedriger Prioritaet (`6`), damit es vor dem Kernel und Channels
+laeuft und keine Note verpasst.
 
 ### Drei-Phasen-Bootsequenz
 
@@ -276,15 +303,18 @@ Robot.start()
                                               der Rest gleich scheitert
 
   Phase 2: Skelett + RobotBoot (_phase2_skeleton)
-    ├─ for c in components if c in SKELETON_CATEGORIES:  c.start()
-    │   (aktuell nur Bus -- FIFO-Queues bereit)
+    ├─ Bus (Prio 0):                           bus.start()
+    │   (FIFO-Queues bereit, _bus auf Robot gesetzt)
+    ├─ Telemetry (Prio 5, Skelett):            recorder.start(bus)
+    │   (subscribe_all aktiv, vor RobotBoot)
     └─ bus.publish_broadcast(RobotBoot, retain=True)
-        RobotBoot traegt Identitaet + Komponenten-Manifest
+        RobotBoot traegt Identitaet + Komponenten-Manifest;
+        Telemetrie sieht ihn live als ersten Eintrag.
 
   Phase 3: Userspace + RobotReady (_phase3_userspace)
     ├─ for c in components if c not in SKELETON_CATEGORIES, sortiert
     │   nach BOOT_PRIORITY:                   c.start(bus)
-    │   (Kernel zuerst (Prio 10), dann Channels (Prio 20))
+    │   (Audit (Prio 6) -> Kernel (Prio 10) -> Channels (Prio 20))
     └─ bus.publish_broadcast(RobotReady, retain=True)
         "online" log -- ab hier reines Idle
 ```
@@ -451,6 +481,7 @@ wenn das OS verklemmt ist), oder Magic SysRq im Linux-Kernel
 |---|---|
 | OS-Kernel (Routing und Mechanik) | Bus (`category=BUS`, `BOOT_PRIORITY=0`) |
 | init / PID 1 (Lifecycle, Persona) | `Robot` selbst -- keine eigene Service-Klasse |
+| `auditd` / Linux-Auditing | `BusRecorder` (`category=TELEMETRY`, Prio 5) plus `AuditNoteSink` (`category=AUDIT`, Prio 6) |
 | Userspace-Daemon (reagiert auf Events) | Kernel im Cephix-Sinn (`category=KERNEL`, Prio 10) |
 | Treiber / IO | Channels (`category=CHANNEL`, Prio 20) |
 | BMC / IPMI / Magic SysRq | ControlPlane (Out-of-band, eigener Port, Token-Auth) |
@@ -597,13 +628,142 @@ Inhaltliche Pruefer werden per `RobotRequest` aufgerufen und antworten mit
 `RobotResponse`. Sie duerfen modellbasiert oder langsam sein, ohne den
 Hot Path zu blockieren.
 
-### Audit
+### Persistenz-Layer
 
-Audit ist ein privilegierter Subscriber. Es schreibt nicht zurueck und
-blockiert nicht. Komponenten-interne Vorgaenge, die kein anderer
-Teilnehmer braucht, werden zu `RobotAuditNote` auf dem Bus, nicht zu
-Direktaufrufen an Audit. Damit gibt es genau eine Stelle, an der die Welt
-protokolliert wird.
+Cephix hat einen *einzigen* roboterweiten Persistenz-Layer. Jede
+Komponente, die Daten ablegen will -- Telemetrie, Audit, spaeter
+Memory, Notebooks, Run-Replay -- fragt den Layer per **Channel-Name**
+nach einer Schreib-Schnittstelle und bleibt vom Backend ahnungslos.
+
+```
+PersistenceProvider          ← öffnet pro Channel einen EventSink
+   └── EventSink             ← append-only Schreibschnittstelle
+         └── append(record)
+         └── flush()
+         └── close()
+```
+
+Konkret zwei Protokolle in `src/persistence/`:
+
+- **`EventSink`** -- per-Stream Schreibschnittstelle (`append`,
+  `flush`, `close`). Das ist, womit eine Komponente arbeitet.
+- **`PersistenceProvider`** -- Roboter-weite Factory: `open(channel)`
+  liefert einen `EventSink`. Wird einmal pro Robot konstruiert, allen
+  schreibenden Komponenten als Dependency uebergeben.
+
+Der Builder ist die einzige Stelle, an der ein Provider gebaut
+wird; jede Persistenz-Konfiguration steht im **einen** Top-Level-
+Block `persistence:` der `robot.yaml`. Komponenten haben nur
+`enabled` und einen optionalen `channel`-Namen -- nichts ueber
+JSONL-Pfade, SQLite-Tables oder S3-Prefixe steht in den
+Komponenten-Blocks.
+
+Beispiel:
+
+```yaml
+persistence:
+  type: jsonl
+  path: logs       # Roboter-weiter Persistenz-Root, relativ zum Workspace
+telemetry:
+  enabled: true    # writes to channel "telemetry"
+audit:
+  enabled: true    # writes to channel "audit"
+```
+
+Wechsel des Backends ist ein einziger Block-Tausch:
+
+```yaml
+persistence:
+  type: sqlite
+  path: logs/cephix.db
+```
+
+Mitgeliefert ist heute nur `JsonlPersistenceProvider`: ein Channel
+`X` landet in `<root>/X.jsonl`. Channel-Namen duerfen Schraegstriche
+enthalten (`runs/2026-05-25`), absolute Namen sind verboten -- damit
+gibt es keine Path-Traversal-Verwirrung.
+
+#### `logs/` als Workspace-Konvention
+
+Der Default-Persistenz-Root ist `logs/`, also relativ zum
+Workspace des Bots. Alle "Aufzeichnungen" eines Roboters liegen
+damit in einem einzigen Verzeichnis nebeneinander:
+
+```
+<workspace>/
+  robot.yaml         # Konfiguration
+  .env               # Secrets (nicht in Git)
+  logs/
+    cephix.log       # operationelles Console-Log (nur in detached/non-TTY runs)
+    telemetry.jsonl  # Channel "telemetry" (rohe Bus-Spur, BusRecorder)
+    audit.jsonl      # Channel "audit" (kuratierte RobotAuditNote)
+```
+
+Das Console-Log (`logs/cephix.log`) ist *kein* Teil des Persistenz-
+Layers -- es ist menschlich lesbares stdlib-`logging` aus
+`src/logging_config.py`. Es lebt aber im selben Verzeichnis, damit
+sich beim Debuggen alle Spuren am gleichen Ort sammeln. Default-
+Verhalten:
+
+- Interaktiv (stderr ist ein TTY) -> stderr, keine Datei
+- Detached / Daemon (kein TTY: systemd, Docker, Pipe)
+  -> `logs/cephix.log` wird automatisch geschrieben
+- Explizites `--log-file <path>` -> schlaegt beides
+
+Channel-Namen mit Schraegstrich werden zu Unterverzeichnissen, ohne
+dass eine Architekturentscheidung noetig ist. Wenn spaeter Rotation
+oder Per-Run-Sharding kommt, geht das ueber den Channel-Namen
+(`telemetry/2026-05-26` -> `logs/telemetry/2026-05-26.jsonl`); das
+heutige flache Layout bleibt der Default.
+
+#### Provider als Builder-Helper, *noch* keine RobotComponent
+
+Heute ist der `PersistenceProvider` ein Builder-Helper, **keine**
+`RobotComponent`. Begruendung: der einzige verfuegbare Backend
+(JSONL) hat keine geteilte Ressource -- jeder Sink besitzt seinen
+eigenen File-Handle und schliesst sich beim Stop seiner Komponente.
+Sobald ein Backend mit geteilter Ressource dazukommt
+(SQLite-Connection-Pool, Supabase-Client, offene S3-Multipart-
+Uploads, ClickHouse-Batch-Buffer), wird der Provider zur Komponente
+mit `category=PERSISTENCE` und `BOOT_PRIORITY=3` (vor `TELEMETRY=5`,
+weil Telemetrie schon beim Start einen offenen Sink braucht). Das
+ist ein kleiner, lokal begrenzter Refactor und kein Architekturschnitt
+-- die Komponenten-Schnittstelle (`EventSink`-Injection) bleibt
+unveraendert.
+
+### Telemetrie und Audit
+
+Cephix unterscheidet *zwei* Beobachter-Subsysteme. Beide sind
+read-only, beide ziehen ihren Sink aus dem zentralen Persistenz-
+Layer, aber sie beantworten unterschiedliche Fragen und liegen an
+unterschiedlichen Stellen im Lifecycle.
+
+| Subsystem | Frage | Komponente | Lifecycle-Phase | Abonniert | Default-Channel |
+|---|---|---|---|---|---|
+| **Telemetrie** | Was ist passiert? | `BusRecorder` (`category=TELEMETRY`) | **Skelett** (Phase 2, vor `RobotBoot`) -- damit der Lifecycle ab dem ersten Event lueckenlos in der Spur landet | `subscribe_all` -- jedes Event auf jedem Topic, inkl. Broadcasts | `telemetry` |
+| **Audit** | Was hat der Roboter bewusst getan oder verweigert? | `AuditNoteSink` (`category=AUDIT`) | **Userspace** (Phase 3, vor Kernel/Channels) -- vor Audit gibt es nichts zu kuratieren, weil noch keine Userspace-Komponente lebt | `subscribe(robot.audit.note)` -- nur kuratierte `RobotAuditNote` | `audit` |
+
+Telemetrie ist die rohe Spur und ist deterministisch -- alles was
+ueber den Bus geht, geht auch in die Telemetrie. Audit ist die
+narrative Verantwortungsspur und ist explizit -- ein Eintrag nur,
+weil eine Komponente bewusst `publish_audit(...)` aufgerufen hat.
+
+#### Off-Bus-Regel
+
+Was nicht auf dem Bus stattfindet, existiert in der Architektur
+nicht (siehe Leitidee). Daraus folgt eine konkrete Pflicht fuer
+Komponenten, die *aus* dem Bus heraustreten -- LLM-Provider rufen,
+HTTP-API anfragen, Mail versenden, Approval verweigern, Datei
+schreiben:
+
+> Eine Komponente, die eine Aktion ausserhalb des Busses durchfuehrt
+> oder verweigert, **muss** ueber `RobotComponent.publish_audit(...)`
+> eine Audit-Note publishen. Ohne diese Note ist die Aktion in der
+> Architektur passiert, aber nicht in der Audit-Spur sichtbar.
+
+Reine On-Bus-Aktivitaet (Routing, Filterung, Transformation
+zwischen Topics) ist von der Telemetrie bereits vollstaendig
+abgedeckt und braucht keine separate Audit-Note.
 
 ## Selbstlernen entlang der Wissensschichten
 
@@ -630,9 +790,11 @@ Bus liegt.
 | Bus-Semantik | Routende Queues, FIFO pro Teilnehmer, Priority erlaubt, Timeouts und Dead Letter. Pub/Sub fuer Lifecycle (`RobotBoot`, `RobotReady`, `RobotShutdown` mit retain) und Audit (`RobotAuditNote` ohne retain). Routable und Broadcast leben in getrennten Buckets. Der Bus ist Mechanik, *kein* Identitaetstraeger. |
 | Identitaet und Lifecycle-Owner | `Robot` ist eine *Single Class*: Identitaet (id, name) liegt direkt im Konstruktor (ohne Bus-Abhaengigkeit), die ControlPlane ist ein Feld der Klasse, und Boot/Shutdown werden vom selben Objekt orchestriert. Es gibt keine eigene `RobotService`-Schicht -- der Roboter ist sein eigener Init/PID-1. |
 | Komponenten-Reihenfolge | `BOOT_PRIORITY: dict[ComponentCategory, int]` legt die Boot-Reihenfolge fest (BUS=0, KERNEL=10, CHANNEL=20). Der Roboter sortiert die uebergebenen Komponenten einmal und walkt sie vorwaerts beim Boot, rueckwaerts beim Shutdown. Neue Komponenten-Kategorien aendern `BOOT_PRIORITY` -- der Lifecycle-Code bleibt unangetastet. |
-| Bootstrap | Drei-Phasen-Sequenz in `Robot.start()`: Phase 1 bringt die ControlPlane out-of-band hoch; Phase 2 startet alle `SKELETON_CATEGORIES`-Komponenten (aktuell nur Bus) und published retained `RobotBoot`; Phase 3 startet alle uebrigen Komponenten in Prioritaets-Reihenfolge und published retained `RobotReady`. Shutdown spiegelbildlich mit retained `RobotShutdown` und per-Komponente sequenziellem Drain mit Hard-Cap (SIGTERM/SIGKILL-Pattern); ControlPlane geht zuletzt offline. |
+| Bootstrap | Drei-Phasen-Sequenz in `Robot.start()`: Phase 1 bringt die ControlPlane out-of-band hoch; Phase 2 startet alle `SKELETON_CATEGORIES`-Komponenten in Prioritaets-Reihenfolge -- erst den Bus (`start()` ohne Bus-Argument), dann Querschnitts-Beobachter wie Telemetrie (`start(bus)`) -- und published retained `RobotBoot`; Phase 3 startet alle uebrigen Komponenten in Prioritaets-Reihenfolge (Audit vor Kernel vor Channels) und published retained `RobotReady`. Shutdown spiegelbildlich mit retained `RobotShutdown` und per-Komponente sequenziellem Drain mit Hard-Cap (SIGTERM/SIGKILL-Pattern); ControlPlane geht zuletzt offline. |
 | ControlPlane | Out-of-band WebSocket auf eigenem Port (default `127.0.0.1:9876`, mit Auto-Resolve in `port_range` und finalem Fallback auf OS-assigned). Token-Auth via `CEPHIX_CONTROL_PLANE_TOKEN` in der bot-lokalen `.env`. Erste Operationen: `status`, `component.list`, `shutdown`. Bewusst nicht am Bus, damit Sovereign-Operationen auch bei wedged Bus funktionieren -- Analogie IPMI/BMC und Magic SysRq. |
-| Topic-ACLs | Teil des Bus-Vertrags. Beim Subscribe deklariert ein Teilnehmer die gewuenschten Topics; der Bus prueft die Berechtigung. |
+| Topic-ACLs | Teil des Bus-Vertrags. Beim Subscribe deklariert ein Teilnehmer die gewuenschten Topics; der Bus prueft die Berechtigung. Aktive Pre-Delivery-Pruefung (Block, Modifikation, Approval-Roundtrip) ist ein eigenes Plan-Item -- siehe "Bewusst noch nicht entschieden". |
+| Telemetrie und Audit | Zwei getrennte Beobachter-Komponenten an dedizierten Boot-Plaetzen (`TELEMETRY=5`, `AUDIT=6`). `BusRecorder` schreibt jedes Event via `subscribe_all`, `AuditNoteSink` schreibt nur kuratierte `RobotAuditNote`-Events. Off-Bus-Aktivitaeten muessen via `RobotComponent.publish_audit(...)` sichtbar gemacht werden. |
+| Persistenz | Ein Roboter-weiter Layer mit *einem* Konfig-Block `persistence:` und zwei Protokollen: `EventSink` (per-Stream Schreib-API) und `PersistenceProvider` (Channel-zu-Sink-Factory). Komponenten ziehen ihren Sink ueber den Channel-Namen, kennen das Backend nicht. Heute: `JsonlPersistenceProvider` als Builder-Helper. Sobald ein Backend mit geteilter Ressource dazukommt (SQLite-Pool, Supabase-Client), wird der Provider zur Komponente (`category=PERSISTENCE`, `BOOT_PRIORITY=3`) -- die Komponenten-Schnittstelle bleibt unveraendert. |
 | Governance-Platzierung | Hybrid. Harte Policy als Bus-Middleware, inhaltliche Filter als expliziter Teilnehmer per `RobotRequest`/`RobotResponse`. |
 | Run-Identitaet | Flache `run_id` pro Vorgang. Optionale `parent_run_id` fuer SOP-in-SOP, Skill-in-Skill und Approval-Continuation wird in der Implementierung entschieden, nicht jetzt im Bus-Vertrag fixiert. |
 | Fehler-Modellierung | `RobotResponse` traegt Erfolg- oder Fehler-Variante. Katastrophale Vorfaelle erzeugen zusaetzlich eine `RobotAuditNote`. |
@@ -655,6 +817,19 @@ Bewusst noch nicht entschieden:
   `component.restart`, `config.reload`, Live-Tracing und
   Eventueller Multiplex zu mehreren Roboterinstanzen sind Themen
   fuer spaetere Iterationen.
+- **ACL- und Governance-Layer als aktiver Bus-Teilnehmer.** Heute
+  ist `subscribe_all` bewusst read-only: ein Querschnittsbeobachter
+  kann nicht blockieren oder modifizieren. Sobald die ersten Topic-
+  ACL-, Approval- oder Governance-Regeln konkret werden, bekommt
+  dieser Layer ein eigenes Design-Item. Die Anforderungen reichen
+  ueber simples Read-Hooking hinaus: Events vor der Auslieferung
+  blocken, modifizieren, an Approval-Roundtrips umlenken, und im
+  Extremfall einen Subscriber zwangsweise vom Bus nehmen koennen.
+  Das ist nicht durch eine Erweiterung von `subscribe_all` zu
+  loesen, sondern durch einen separaten Pre-Delivery-Mechanismus
+  (Hook-Pipeline, ACL-Engine oder Middleware-Chain), dessen genaue
+  Form heute offen bleibt, weil noch keine konkrete Regel das
+  Pflichtenheft schreibt.
 
 ## Verhaeltnis zum Ist-Code unter `_reference/`
 
@@ -662,8 +837,11 @@ Bewusst nachgelagert. Der `_reference/`-Ordner enthaelt den vorherigen
 Implementierungsstand und dient als Vergleichsbasis. Beim schrittweisen
 Wiederaufbau in `src/` werden ausgewaehlte Konzepte uebernommen:
 
-- `SemanticBus`, `RuntimeEventLoop.queue` und `Telemetry` werden auf den
-  einen Systembus konsolidiert.
+- `SemanticBus` und `RuntimeEventLoop.queue` werden auf den einen
+  Systembus konsolidiert. `Telemetry` aus dem alten Code lebt als
+  eigene Komponentenkategorie weiter (`BusRecorder`,
+  `category=TELEMETRY`), aber als reiner Bus-Beobachter ohne
+  Sonder-Verdrahtung.
 - `RobotEvent` bleibt als Basistyp; die Subtypen werden eingefuehrt.
 - `system_tool`-Marker entfaellt durch die Trennung Tool Execution Layer
   und Kernel Capability Layer.

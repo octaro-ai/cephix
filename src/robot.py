@@ -323,15 +323,34 @@ class Robot:
         self._phase = RobotPhase.BOOTED
 
     async def _phase2_skeleton(self) -> None:
-        """Phase 2: start skeleton components, broadcast ``RobotBoot``."""
+        """Phase 2: start skeleton components, broadcast ``RobotBoot``.
+
+        Skeleton components start in priority order: the bus first
+        (priority 0, ``start()`` without arguments), then
+        cross-cutting observers (telemetry, ``start(bus)``). The
+        bus is registered on the robot as soon as it is up so the
+        observers can attach to it. Only after every skeleton
+        component is online is :class:`RobotBoot` broadcast --
+        otherwise the first lifecycle event would slip past
+        observers that are about to subscribe.
+        """
         self._phase = RobotPhase.ATTACHING
 
         for component in self._skeleton_components():
             await self._start_component(component)
+            # Once the bus is up, every subsequent skeleton component
+            # needs it as a constructor-time argument. Cache it as
+            # soon as it appears.
+            if (
+                self._bus is None
+                and component.component_category is ComponentCategory.BUS
+            ):
+                self._bus = self._locate_bus()
 
-        # Skeleton must include exactly one bus; locate it for the
-        # rest of the lifecycle.
-        self._bus = self._locate_bus()
+        if self._bus is None:
+            # No bus component was registered at all -- _locate_bus
+            # raises with the canonical error message.
+            self._bus = self._locate_bus()
 
         boot = RobotBoot(
             topic=LIFECYCLE_TOPIC,
@@ -465,16 +484,21 @@ class Robot:
     async def _start_component(self, component: RobotComponent) -> None:
         """Bring up a single component.
 
-        Skeleton components (e.g. the bus) take no upstream-bus
-        argument because they *are* the upstream. Every other
-        component is wired with the bus the skeleton produced.
+        The bus is special: it has no upstream bus to attach to
+        because it *is* the upstream, so its ``start()`` takes no
+        argument. Every other component -- skeleton observers
+        (telemetry) and userspace alike -- gets the running bus
+        injected at start time.
         """
         name = type(component).__name__
-        if component.component_category in SKELETON_CATEGORIES:
+        if component.component_category is ComponentCategory.BUS:
             await component.start()  # type: ignore[call-arg]
             logger.info("%s started", name)
         else:
-            assert self._bus is not None  # phase 2 has run
+            assert self._bus is not None, (
+                f"non-bus component {name} cannot start without a bus; "
+                "the bus must boot first"
+            )
             await component.start(self._bus)  # type: ignore[call-arg]
             logger.info("%s attached", name)
         self._started.append(component)

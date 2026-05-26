@@ -36,6 +36,9 @@ from src.components import ComponentCategory, RobotComponent
 logger = logging.getLogger(__name__)
 
 
+_ALL_TOPIC_MARKER = "__all__"
+
+
 @dataclass
 class _AsyncSubscription:
     topic: str
@@ -44,6 +47,7 @@ class _AsyncSubscription:
     task: asyncio.Task[None] | None = None
     bus: "AsyncioBus | None" = None
     is_broadcast: bool = False
+    is_all: bool = False
 
     async def unsubscribe(self) -> None:
         if self.bus is not None:
@@ -61,6 +65,7 @@ class AsyncioBus(BusPort, RobotComponent):
     def __init__(self) -> None:
         self._subscriptions: dict[str, list[_AsyncSubscription]] = {}
         self._broadcast_subscriptions: dict[str, list[_AsyncSubscription]] = {}
+        self._all_subscriptions: list[_AsyncSubscription] = []
         self._retained: dict[str, RobotEvent] = {}
         self._pending: dict[str, asyncio.Future[RobotResponse]] = {}
         self._running = False
@@ -81,6 +86,8 @@ class AsyncioBus(BusPort, RobotComponent):
             for subs in self._broadcast_subscriptions.values():
                 for sub in subs:
                     self._ensure_consumer(sub)
+            for sub in self._all_subscriptions:
+                self._ensure_consumer(sub)
 
     async def stop(self) -> None:
         async with self._lock:
@@ -100,6 +107,11 @@ class AsyncioBus(BusPort, RobotComponent):
                         sub.task.cancel()
                         tasks.append(sub.task)
             self._broadcast_subscriptions.clear()
+            for sub in self._all_subscriptions:
+                if sub.task is not None:
+                    sub.task.cancel()
+                    tasks.append(sub.task)
+            self._all_subscriptions.clear()
             self._retained.clear()
 
             for fut in self._pending.values():
@@ -124,6 +136,8 @@ class AsyncioBus(BusPort, RobotComponent):
 
         for sub in list(self._subscriptions.get(event.topic, [])):
             await sub.queue.put(event)
+        for sub in list(self._all_subscriptions):
+            await sub.queue.put(event)
 
     def subscribe(self, topic: str, handler: EventHandler) -> Subscription:
         sub = _AsyncSubscription(topic=topic, handler=handler, bus=self)
@@ -146,6 +160,8 @@ class AsyncioBus(BusPort, RobotComponent):
 
         for sub in list(self._broadcast_subscriptions.get(event.topic, [])):
             await sub.queue.put(event)
+        for sub in list(self._all_subscriptions):
+            await sub.queue.put(event)
 
     def subscribe_broadcast(
         self,
@@ -164,6 +180,18 @@ class AsyncioBus(BusPort, RobotComponent):
         if retained is not None:
             sub.queue.put_nowait(retained)
 
+        if self._running:
+            self._ensure_consumer(sub)
+        return sub
+
+    def subscribe_all(self, handler: EventHandler) -> Subscription:
+        sub = _AsyncSubscription(
+            topic=_ALL_TOPIC_MARKER,
+            handler=handler,
+            bus=self,
+            is_all=True,
+        )
+        self._all_subscriptions.append(sub)
         if self._running:
             self._ensure_consumer(sub)
         return sub
@@ -212,16 +240,20 @@ class AsyncioBus(BusPort, RobotComponent):
 
     async def _remove_subscription(self, sub: _AsyncSubscription) -> None:
         async with self._lock:
-            store = (
-                self._broadcast_subscriptions
-                if sub.is_broadcast
-                else self._subscriptions
-            )
-            subs = store.get(sub.topic, [])
-            if sub in subs:
-                subs.remove(sub)
-            if not subs:
-                store.pop(sub.topic, None)
+            if sub.is_all:
+                if sub in self._all_subscriptions:
+                    self._all_subscriptions.remove(sub)
+            else:
+                store = (
+                    self._broadcast_subscriptions
+                    if sub.is_broadcast
+                    else self._subscriptions
+                )
+                subs = store.get(sub.topic, [])
+                if sub in subs:
+                    subs.remove(sub)
+                if not subs:
+                    store.pop(sub.topic, None)
             if sub.task is not None:
                 sub.task.cancel()
                 task = sub.task
@@ -237,10 +269,11 @@ class AsyncioBus(BusPort, RobotComponent):
     def _ensure_consumer(self, sub: _AsyncSubscription) -> None:
         if sub.task is not None and not sub.task.done():
             return
-        sub.task = asyncio.create_task(
-            self._run_consumer(sub),
-            name=f"bus-consumer:{sub.topic}",
-        )
+        if sub.is_all:
+            name = "bus-consumer:__all__"
+        else:
+            name = f"bus-consumer:{sub.topic}"
+        sub.task = asyncio.create_task(self._run_consumer(sub), name=name)
 
     async def _run_consumer(self, sub: _AsyncSubscription) -> None:
         while True:

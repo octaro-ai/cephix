@@ -5,7 +5,11 @@ The builder is the bridge between configuration and runtime:
 - It deep-merges global defaults from ``cephix.yaml#defaults`` with the
   bot-specific ``robot.yaml`` (bot wins).
 - It resolves the ``bus``, ``kernel`` and ``channels`` blocks via the
-  component registry.
+  component registry. The cross-cutting persistence layer is built
+  *once* from the top-level ``persistence:`` block and shared by every
+  component that needs an :class:`EventSink`; observer components
+  (``telemetry:``, ``audit:``) only declare ``enabled`` and an
+  optional ``channel`` name.
 - It hands identity, the control-plane configuration and the
   components straight to the :class:`Robot` constructor. The
   control-plane token is taken from the bot-local ``.env`` (key
@@ -22,6 +26,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from src.audit.note_sink import AuditNoteSink
 from src.bus.ports import BusPort
 from src.channels.ports import ChannelPort
 from src.components import RobotComponent
@@ -31,12 +36,16 @@ from src.configuration import (
     load_robot_env,
 )
 from src.kernel.ports import KernelPort
+from src.persistence.provider import JsonlPersistenceProvider, PersistenceProvider
 from src.registry import ConfigError, build
 from src.robot import ControlPlaneConfig, Robot, RobotIdentity
+from src.telemetry.bus_recorder import BusRecorder
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_BUS_SPEC: dict[str, Any] = {"type": "asyncio"}
+_DEFAULT_TELEMETRY_CHANNEL = "telemetry"
+_DEFAULT_AUDIT_CHANNEL = "audit"
 
 
 def build_robot_from_config(
@@ -107,6 +116,10 @@ def build_robot_from_config(
             )
         channels.append(component)
 
+    persistence = _build_persistence_provider(cfg.get("persistence"), workspace)
+    telemetry = _build_telemetry(cfg.get("telemetry"), persistence)
+    audit = _build_audit(cfg.get("audit"), persistence)
+
     robot_id_raw = robot_yaml.get("id")
     robot_name_raw = robot_yaml.get("name")
     identity = RobotIdentity(
@@ -121,6 +134,10 @@ def build_robot_from_config(
         control_plane_token = env.get(CONTROL_PLANE_TOKEN_ENV) or None
 
     components: list[RobotComponent] = [bus, kernel, *channels]
+    if telemetry is not None:
+        components.append(telemetry)
+    if audit is not None:
+        components.append(audit)
 
     return Robot(
         identity=identity,
@@ -128,6 +145,108 @@ def build_robot_from_config(
         control_plane_config=control_plane_config,
         control_plane_token=control_plane_token,
     )
+
+
+def _build_persistence_provider(
+    spec: Any,
+    workspace: str | Path | None,
+) -> PersistenceProvider | None:
+    """Build the robot-wide :class:`PersistenceProvider`.
+
+    Returns ``None`` when persistence is explicitly disabled or when
+    no usable root can be derived (no explicit path *and* no
+    workspace). Components that depend on the provider take ``None``
+    as "no persistence configured" and skip themselves with an info
+    log -- the boot succeeds either way.
+    """
+    if spec is None:
+        spec = {}
+    if not isinstance(spec, dict):
+        raise ConfigError("robot.yaml#persistence must be a mapping")
+    if not bool(spec.get("enabled", True)):
+        return None
+
+    type_key = str(spec.get("type", "jsonl"))
+    if type_key != "jsonl":
+        raise ConfigError(
+            f"unknown persistence type {type_key!r}; "
+            "the only built-in persistence backend is 'jsonl'"
+        )
+
+    raw_path = spec.get("path", "logs")
+    candidate = Path(str(raw_path)).expanduser()
+    if not candidate.is_absolute():
+        if workspace is None:
+            return None
+        candidate = Path(workspace) / candidate
+
+    return JsonlPersistenceProvider(candidate)
+
+
+def _build_telemetry(
+    spec: Any,
+    persistence: PersistenceProvider | None,
+) -> BusRecorder | None:
+    """Build the telemetry component from ``robot.yaml#telemetry``.
+
+    Returns ``None`` when telemetry is explicitly disabled or when no
+    persistence provider is available -- without somewhere to write
+    to, a recorder is a passive observer with side effects and
+    nothing more.
+    """
+    if spec is None:
+        spec = {}
+    if not isinstance(spec, dict):
+        raise ConfigError("robot.yaml#telemetry must be a mapping")
+    if not bool(spec.get("enabled", True)):
+        return None
+
+    type_key = str(spec.get("type", "bus_recorder"))
+    if type_key != "bus_recorder":
+        raise ConfigError(
+            f"unknown telemetry type {type_key!r}; "
+            "the only built-in telemetry component is 'bus_recorder'"
+        )
+
+    if persistence is None:
+        logger.info(
+            "telemetry enabled but no persistence configured; "
+            "skipping BusRecorder"
+        )
+        return None
+
+    channel = str(spec.get("channel", _DEFAULT_TELEMETRY_CHANNEL))
+    return BusRecorder(sink=persistence.open(channel))
+
+
+def _build_audit(
+    spec: Any,
+    persistence: PersistenceProvider | None,
+) -> AuditNoteSink | None:
+    """Build the audit component from ``robot.yaml#audit``."""
+    if spec is None:
+        spec = {}
+    if not isinstance(spec, dict):
+        raise ConfigError("robot.yaml#audit must be a mapping")
+    if not bool(spec.get("enabled", True)):
+        return None
+
+    type_key = str(spec.get("type", "audit_note_sink"))
+    if type_key != "audit_note_sink":
+        raise ConfigError(
+            f"unknown audit type {type_key!r}; "
+            "the only built-in audit component is 'audit_note_sink'"
+        )
+
+    if persistence is None:
+        logger.info(
+            "audit enabled but no persistence configured; "
+            "skipping AuditNoteSink"
+        )
+        return None
+
+    channel = str(spec.get("channel", _DEFAULT_AUDIT_CHANNEL))
+    return AuditNoteSink(sink=persistence.open(channel))
 
 
 def _control_plane_config(spec: Any) -> ControlPlaneConfig:

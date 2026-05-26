@@ -324,3 +324,42 @@ def test_init_returns_error_when_wizard_aborts(
     monkeypatch.setattr("src.onboarding.run_wizard", lambda **kwargs: None)
     rc = cli.main(["init", "Foo"])
     assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# _resolve_log_file
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_log_file_explicit_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit --log-file argument always wins, even on a TTY."""
+    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
+    resolved = cli._resolve_log_file("/var/log/custom.log", workspace=tmp_path)
+    assert resolved == "/var/log/custom.log"
+    # Workspace logs/ directory must NOT be auto-created in the
+    # explicit-path case; the user is in charge.
+    assert not (tmp_path / "logs").exists()
+
+
+def test_resolve_log_file_tty_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In an interactive terminal, default to stderr (None)."""
+    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
+    resolved = cli._resolve_log_file(None, workspace=tmp_path)
+    assert resolved is None
+    assert not (tmp_path / "logs").exists()
+
+
+def test_resolve_log_file_non_tty_writes_to_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Detached / daemon runs auto-route to <workspace>/logs/cephix.log."""
+    monkeypatch.setattr("sys.stderr.isatty", lambda: False)
+    resolved = cli._resolve_log_file(None, workspace=tmp_path)
+    assert resolved == str(tmp_path / "logs" / "cephix.log")
+    # The directory is created lazily so the file handler can attach
+    # without further setup.
+    assert (tmp_path / "logs").is_dir()

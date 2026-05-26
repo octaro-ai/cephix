@@ -237,6 +237,33 @@ def _normalise_home(home: str | None) -> Path | None:
     return Path(home).expanduser()
 
 
+def _resolve_log_file(explicit: str | None, *, workspace: Path) -> str | None:
+    """Decide where the operational console log goes.
+
+    Precedence:
+
+    - ``--log-file <path>`` always wins. The user is in charge.
+    - Interactive terminal (stderr is a TTY) -> ``None`` -> stderr.
+      Convenient for ``cephix start`` in a developer shell: logs
+      stream to the terminal, no stale files left behind.
+    - Detached / daemon-style runs (no TTY: systemd, Docker, pipe)
+      -> ``<workspace>/logs/cephix.log``. The directory is created
+      lazily so a fresh workspace doesn't need any pre-setup.
+
+    The structured persistence files (``logs/telemetry.jsonl``,
+    ``logs/audit.jsonl``) live in the same ``logs/`` directory. The
+    operational log sits next to them so all human- and
+    machine-readable trails of one bot are co-located.
+    """
+    if explicit is not None:
+        return explicit
+    if sys.stderr.isatty():
+        return None
+    log_dir = workspace / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return str(log_dir / "cephix.log")
+
+
 def _print_instance_table(instances: Sequence[RobotInstance]) -> None:
     id_width = max((len(i.id) for i in instances), default=2)
     name_width = max((len(i.name) for i in instances), default=4)
@@ -273,7 +300,8 @@ def _start_instance(
 ) -> int:
     from src.builder import build_robot_from_config
 
-    configure_logging(level=log_level, log_file=log_file)
+    resolved_log_file = _resolve_log_file(log_file, workspace=instance.workspace)
+    configure_logging(level=log_level, log_file=resolved_log_file)
     home_override = instance.workspace.parent.parent
     if home_override.name != "robots":
         home_override = None  # workspace lives outside the convention; use defaults

@@ -434,6 +434,95 @@ async def test_robot_logs_rollback_on_failed_startup(
     assert "robot online (Ctrl-C to stop)" not in messages
 
 
+async def test_telemetry_component_starts_before_robot_boot_is_published() -> None:
+    """A TELEMETRY component subscribes via subscribe_all in Phase 2,
+    so it must witness RobotBoot live -- otherwise the very first
+    lifecycle event is missing from the recording.
+    """
+    from src.bus import RobotBoot, RobotReady
+    from src.bus.messages import RobotEvent
+    from src.bus.ports import BusPort, Subscription
+
+    seen: list[RobotEvent] = []
+
+    class _MiniRecorder(RobotComponent):
+        component_type = "mini-recorder"
+        component_category = ComponentCategory.TELEMETRY
+        component_description = "test fixture"
+
+        def __init__(self) -> None:
+            self._subscription: Subscription | None = None
+
+        async def start(self, bus: BusPort) -> None:
+            self._subscription = bus.subscribe_all(self._record)
+
+        async def stop(self) -> None:
+            if self._subscription is not None:
+                await self._subscription.unsubscribe()
+                self._subscription = None
+
+        async def _record(self, event: RobotEvent) -> None:
+            seen.append(event)
+
+    log: list[str] = []
+    bus = AsyncioBus()
+    kernel = _RecordingComponent("kernel", log, category=ComponentCategory.KERNEL)
+    recorder = _MiniRecorder()
+
+    robot = Robot(
+        identity=RobotIdentity(id="alpha", name="Alpha"),
+        components=[bus, kernel, recorder],
+        control_plane_config=ControlPlaneConfig(enabled=False),
+        shutdown_grace=0.0,
+    )
+
+    async with robot:
+        await asyncio.sleep(0.01)
+
+    # The recorder, as a TELEMETRY/skeleton component, must have
+    # been online when RobotBoot was published.
+    boots = [evt for evt in seen if isinstance(evt, RobotBoot)]
+    readys = [evt for evt in seen if isinstance(evt, RobotReady)]
+    assert len(boots) == 1, (
+        "telemetry must witness RobotBoot live, but it was missing"
+    )
+    assert len(readys) == 1
+    # Order: RobotBoot precedes RobotReady in the recording.
+    boot_idx = next(i for i, evt in enumerate(seen) if isinstance(evt, RobotBoot))
+    ready_idx = next(i for i, evt in enumerate(seen) if isinstance(evt, RobotReady))
+    assert boot_idx < ready_idx
+
+
+async def test_telemetry_starts_before_userspace_components() -> None:
+    """A TELEMETRY skeleton component starts before any KERNEL/CHANNEL."""
+    log: list[str] = []
+    bus = AsyncioBus()
+    kernel = _RecordingComponent("kernel", log, category=ComponentCategory.KERNEL)
+    channel = _RecordingComponent("ch-1", log, category=ComponentCategory.CHANNEL)
+    telemetry = _RecordingComponent(
+        "tele", log, category=ComponentCategory.TELEMETRY
+    )
+
+    robot = Robot(
+        identity=RobotIdentity(),
+        components=[bus, channel, telemetry, kernel],
+        control_plane_config=ControlPlaneConfig(enabled=False),
+        shutdown_grace=0.0,
+    )
+
+    async with robot:
+        pass
+
+    starts = [entry for entry in log if entry.startswith("start:")]
+    stops = [entry for entry in log if entry.startswith("stop:")]
+    # Telemetry boots before kernel/channel; on shutdown it stops last
+    # (after kernel and channel are gone, but before the bus -- the
+    # bus is not in `log` because the recording component is the
+    # AsyncioBus, which doesn't write to this list).
+    assert starts == ["start:tele", "start:kernel", "start:ch-1"]
+    assert stops == ["stop:ch-1", "stop:kernel", "stop:tele"]
+
+
 async def test_robot_sorts_components_by_boot_priority() -> None:
     """Components handed to the constructor in any order get sorted."""
     log: list[str] = []

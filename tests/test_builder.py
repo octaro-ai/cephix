@@ -7,12 +7,14 @@ from typing import Any
 
 import pytest
 
+from src.audit.note_sink import AuditNoteSink
 from src.builder import build_robot_from_config
 from src.bus.asyncio_bus import AsyncioBus
 from src.channels.websocket import WebsocketChannel
 from src.kernel.echo import EchoKernel
 from src.registry import ConfigError
 from src.robot import Robot
+from src.telemetry.bus_recorder import BusRecorder
 
 # control plane is not what these tests are about; force it off so the
 # builder produces a robot that won't try to bind ports if anyone
@@ -173,6 +175,115 @@ def test_builder_loads_control_plane_token_from_workspace_env(
         workspace=tmp_path,
     )
     assert robot._control_plane_token == "secret-token-xyz"  # type: ignore[attr-defined]
+
+
+def test_builder_skips_observers_without_workspace() -> None:
+    """Without a workspace the JSONL provider has nowhere to anchor;
+    telemetry and audit are silently skipped."""
+    robot = build_robot_from_config(_cfg({"kernel": {"type": "echo"}}))
+    assert not any(isinstance(c, BusRecorder) for c in robot.components)
+    assert not any(isinstance(c, AuditNoteSink) for c in robot.components)
+
+
+def test_builder_wires_telemetry_and_audit_via_persistence(
+    tmp_path: Path,
+) -> None:
+    """With a workspace, the central persistence layer is built and
+    used to wire telemetry+audit. The default channels resolve to
+    ``<workspace>/logs/telemetry.jsonl`` and
+    ``<workspace>/logs/audit.jsonl``."""
+    robot = build_robot_from_config(
+        _cfg({"kernel": {"type": "echo"}}),
+        workspace=tmp_path,
+    )
+    recorders = [c for c in robot.components if isinstance(c, BusRecorder)]
+    sinks = [c for c in robot.components if isinstance(c, AuditNoteSink)]
+    assert len(recorders) == 1
+    assert len(sinks) == 1
+    # The sink the recorder owns is the one the provider gave it.
+    recorder_sink_path = recorders[0]._sink._path  # type: ignore[attr-defined]
+    audit_sink_path = sinks[0]._sink._path  # type: ignore[attr-defined]
+    assert recorder_sink_path == tmp_path / "logs" / "telemetry.jsonl"
+    assert audit_sink_path == tmp_path / "logs" / "audit.jsonl"
+
+
+def test_builder_persistence_disabled_skips_all_observers(
+    tmp_path: Path,
+) -> None:
+    robot = build_robot_from_config(
+        _cfg(
+            {
+                "kernel": {"type": "echo"},
+                "persistence": {"enabled": False},
+            }
+        ),
+        workspace=tmp_path,
+    )
+    assert not any(isinstance(c, BusRecorder) for c in robot.components)
+    assert not any(isinstance(c, AuditNoteSink) for c in robot.components)
+
+
+def test_builder_observer_disabled_keeps_other_observer(
+    tmp_path: Path,
+) -> None:
+    robot = build_robot_from_config(
+        _cfg(
+            {
+                "kernel": {"type": "echo"},
+                "telemetry": {"enabled": False},
+            }
+        ),
+        workspace=tmp_path,
+    )
+    assert not any(isinstance(c, BusRecorder) for c in robot.components)
+    assert any(isinstance(c, AuditNoteSink) for c in robot.components)
+
+
+def test_builder_uses_explicit_channel_names(tmp_path: Path) -> None:
+    """An overridden channel routes the sink to a custom path."""
+    robot = build_robot_from_config(
+        _cfg(
+            {
+                "kernel": {"type": "echo"},
+                "telemetry": {"channel": "raw-events"},
+                "audit": {"channel": "narrative"},
+            }
+        ),
+        workspace=tmp_path,
+    )
+    recorder = next(c for c in robot.components if isinstance(c, BusRecorder))
+    audit = next(c for c in robot.components if isinstance(c, AuditNoteSink))
+    assert recorder._sink._path == tmp_path / "logs" / "raw-events.jsonl"  # type: ignore[attr-defined]
+    assert audit._sink._path == tmp_path / "logs" / "narrative.jsonl"  # type: ignore[attr-defined]
+
+
+def test_builder_persistence_absolute_path_wins(tmp_path: Path) -> None:
+    """An absolute persistence path is used as-is, regardless of workspace."""
+    abs_root = tmp_path / "elsewhere"
+    robot = build_robot_from_config(
+        _cfg(
+            {
+                "kernel": {"type": "echo"},
+                "persistence": {"path": str(abs_root)},
+            }
+        ),
+        workspace=tmp_path / "ws",
+    )
+    recorder = next(c for c in robot.components if isinstance(c, BusRecorder))
+    assert recorder._sink._path == abs_root / "telemetry.jsonl"  # type: ignore[attr-defined]
+
+
+def test_builder_rejects_unknown_persistence_type(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="persistence type"):
+        build_robot_from_config(
+            _cfg(
+                {
+                    "kernel": {"type": "echo"},
+                    "persistence": {"type": "redis"},
+                }
+            ),
+            workspace=tmp_path,
+        )
 
 
 def test_builder_control_plane_config_overrides() -> None:

@@ -25,40 +25,82 @@ ship without an extra dependency.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import Enum
-from typing import ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
+
+if TYPE_CHECKING:
+    from src.bus.ports import BusPort
 
 
 class ComponentCategory(str, Enum):
     """Coarse role buckets used by the registry, the wizard and the
-    robot's lifecycle ordering."""
+    robot's lifecycle ordering.
+
+    Two cross-cutting categories are distinguished from regular
+    userspace:
+
+    - :attr:`TELEMETRY`: read-only observers that watch *everything*
+      that flows over the bus. The reference implementation is the
+      ``BusRecorder``; future telemetry components might emit metrics
+      or distributed traces.
+    - :attr:`AUDIT`: subscribers that record curated, semantic notes
+      published via :meth:`RobotComponent.publish_audit`. The reference
+      implementation is the ``AuditNoteSink``.
+
+    Both boot right after the bus so they capture the full lifetime
+    of every userspace component, and both shut down right before the
+    bus so they see every farewell event.
+    """
 
     BUS = "bus"
+    TELEMETRY = "telemetry"
+    AUDIT = "audit"
     KERNEL = "kernel"
     CHANNEL = "channel"
-    # Future categories: AUDIT, GOVERNANCE, ACTOR, TOOL, ...
+    # Future categories: GOVERNANCE, ACTOR, TOOL, ...
 
 
 # Boot order, lower number = earlier. The robot uses this to sort its
 # components on boot; shutdown walks the same order in reverse. Adding
 # a new category here is the single edit needed for new lifecycle
 # stages -- the robot itself does not know about specific categories.
+#
+# Skeleton runs first (BUS), then the cross-cutting observers
+# (TELEMETRY records *everything*, including the boot of AUDIT
+# itself; AUDIT subscribes before any userspace component publishes
+# audit notes), and finally userspace.
 BOOT_PRIORITY: dict[ComponentCategory, int] = {
     ComponentCategory.BUS: 0,
-    # Reserved spots, no current implementation:
-    # ComponentCategory.AUDIT: 5,        # observers right after the bus
+    ComponentCategory.TELEMETRY: 5,
+    ComponentCategory.AUDIT: 6,
     ComponentCategory.KERNEL: 10,
     # ComponentCategory.GOVERNANCE: 15,  # policy layer between kernel and channels
     ComponentCategory.CHANNEL: 20,
 }
 
 
-# Categories that make up the robot's *skeleton*: they come up before
-# ``RobotBoot`` is broadcast and they take a slightly different
-# ``start()`` shape than userspace components -- a bus has no upstream
-# bus to attach to, it *is* the bus.
+# Categories that make up the robot's *skeleton*: they come up in
+# Phase 2 -- before ``RobotBoot`` is broadcast and before any
+# userspace component starts.
+#
+# Includes the bus itself and any cross-cutting infrastructure that
+# must witness the entire robot lifetime, including the boot:
+#
+# - ``BUS``       -- the routing fabric. ``start()`` with no
+#                    arguments because it *is* the upstream.
+# - ``TELEMETRY`` -- read-all observers (``BusRecorder``). Must
+#                    boot before ``RobotBoot`` is published, otherwise
+#                    the very first lifecycle event would be missing
+#                    from the recording.
+#
+# ``AUDIT`` is *not* in here on purpose: audit only consumes curated
+# ``RobotAuditNote`` events, which can only be produced by userspace
+# components that themselves boot in Phase 3. There is nothing for
+# audit to record before userspace exists.
 SKELETON_CATEGORIES: frozenset[ComponentCategory] = frozenset({
     ComponentCategory.BUS,
+    ComponentCategory.TELEMETRY,
 })
 
 
@@ -87,6 +129,17 @@ class RobotComponent:
       robot bounds each call by ``shutdown_grace``; coroutines that
       haven't returned by then are cancelled and the teardown
       proceeds.
+
+    Auditing helper:
+
+    - :meth:`publish_audit` lets a component declare a curated note
+      about an action it just performed (or refused). The note travels
+      as a :class:`RobotAuditNote` on the dedicated ``AUDIT_TOPIC``
+      and is picked up by every component of category
+      :attr:`ComponentCategory.AUDIT`. Components that talk to the
+      outside world (HTTP, file system, SMTP, LLM provider, ...) are
+      expected to leave a trace on the bus for every observable side
+      effect; otherwise the audit log is silently incomplete.
     """
 
     component_type: ClassVar[str]
@@ -107,3 +160,51 @@ class RobotComponent:
         ``OnStop()``.
         """
         return None
+
+    async def publish_audit(
+        self,
+        bus: "BusPort",
+        action: str,
+        details: Mapping[str, Any] | None = None,
+        *,
+        principal: str = "system",
+        run_id: str = "",
+        correlation_id: str | None = None,
+    ) -> None:
+        """Publish a curated :class:`RobotAuditNote` for this component.
+
+        Use this whenever the component performs (or refuses) an
+        action that should be visible in the audit trail: invoking
+        an external tool, calling an LLM provider, sending mail,
+        denying an authorization, escalating to an operator, ...
+
+        The note is published on ``AUDIT_TOPIC`` and carries:
+
+        - ``actor`` -- the component's ``component_type``;
+        - ``action`` -- a short, machine-readable label (e.g.
+          ``"tool.invoke"``, ``"approval.deny"``);
+        - ``details`` -- arbitrary serializable payload. Implementers
+          should keep it JSONable so any audit sink can persist it.
+
+        The ``bus`` argument is taken explicitly to avoid hidden
+        state on the component; pass the same bus that ``start()``
+        gave you.
+
+        Off-bus rule: if a component performs work that does not
+        already produce a regular bus event (a tool call, a remote
+        request, a file write), it must publish an audit note so the
+        audit log reflects what the robot actually did.
+        """
+        from src.bus.messages import AUDIT_TOPIC, RobotAuditNote
+
+        note = RobotAuditNote(
+            topic=AUDIT_TOPIC,
+            principal=principal,
+            source=self.component_type,
+            run_id=run_id,
+            correlation_id=correlation_id,
+            actor=self.component_type,
+            action=action,
+            details=dict(details or {}),
+        )
+        await bus.publish(note)

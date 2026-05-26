@@ -75,6 +75,14 @@ class BusPort(Protocol):
 
     On top of routable queues, :meth:`request` provides a directed
     request/response pattern via ``correlation_id``.
+
+    Cross-cutting observers (telemetry, tracing, metrics) subscribe
+    via :meth:`subscribe_all`. That subscription is read-only by
+    design -- the bus delivers a copy of every event to it, but the
+    handler cannot block, modify, or veto the event. ACL-style
+    interception ("this principal must not publish on this topic")
+    will be a separate, actively-designed mechanism, not an extension
+    of ``subscribe_all``.
     """
 
     async def start(self) -> None:
@@ -121,6 +129,24 @@ class BusPort(Protocol):
         If a retained event exists on the topic, it is delivered to the
         new subscriber as the first event. Otherwise the subscriber
         receives only future broadcasts.
+        """
+
+    def subscribe_all(self, handler: EventHandler) -> Subscription:
+        """Subscribe to *every* event published on the bus.
+
+        Each call registers an additional read-only observer that
+        receives a copy of every event delivered through
+        :meth:`publish` and :meth:`publish_broadcast`, regardless of
+        topic. Each all-subscriber gets its own FIFO queue, so a slow
+        recorder cannot back up the routable subscribers it is
+        listening alongside.
+
+        Intended for cross-cutting observers: audit recorders,
+        telemetry sinks, metrics collectors, distributed tracers.
+        The handler cannot block, modify, or refuse delivery to the
+        regular subscribers. Pre-delivery interception (topic ACLs,
+        governance) will arrive as a separately-designed mechanism
+        if and when it is needed.
         """
 
     def retained(self, topic: str) -> RobotEvent | None:

@@ -33,6 +33,30 @@ defaults:
       host: 127.0.0.1
       port: 8765
       path: /ws
+  # Robot-wide persistence layer. Components ask for sinks by channel
+  # name (e.g. "telemetry", "audit", later "memory"); the provider
+  # decides how each channel lands. Default: one .jsonl file per
+  # channel inside the bot's `logs/` directory, alongside the
+  # operational console log (`logs/cephix.log`). Set `enabled: false`
+  # to turn the whole layer off; replace `type:` with another backend
+  # (sqlite, supabase, ...) once those exist. Channel names with a
+  # slash become subdirectories on disk -- handy once rotation or
+  # per-run sharding lands (e.g. `telemetry/2026-05-26`).
+  persistence:
+    enabled: true
+    type: jsonl
+    path: logs      # relative paths anchor on the workspace; absolute paths win.
+  # Cross-cutting observers. Both default to on; the channel name
+  # selects which file/table/row inside the persistence layer is
+  # written.
+  telemetry:
+    enabled: true
+    type: bus_recorder
+    channel: telemetry
+  audit:
+    enabled: true
+    type: audit_note_sink
+    channel: audit
 
 # Optional list of bots whose workspace lives outside the convention
 # (~/.cephix/robots/<id>/). Bots inside the convention are auto-discovered

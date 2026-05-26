@@ -20,9 +20,16 @@ The current set of subtypes covers the bus contract from
   start of a graceful shutdown. Used by audit/observer subscribers;
   the robot itself coordinates the drain via the
   :meth:`RobotComponent.drain` lifecycle hook, not via a bus ack.
+- :class:`RobotAuditNote` -- curated audit note. Components publish
+  these via :meth:`RobotComponent.publish_audit` whenever they
+  perform an action that should appear in the audit trail. The
+  ``AuditNoteSink`` component subscribes to :data:`AUDIT_TOPIC` and
+  persists every note. Distinct from raw telemetry: telemetry sees
+  *every* event on the bus, audit sees only the deliberately
+  recorded ones.
 
-``RobotTrigger`` and ``RobotAuditNote`` are intentionally added later,
-once a concrete use case requires them.
+``RobotTrigger`` is intentionally added later, once a concrete use
+case requires it.
 """
 
 from __future__ import annotations
@@ -34,6 +41,7 @@ from typing import Any
 
 
 LIFECYCLE_TOPIC = "robot.lifecycle"
+AUDIT_TOPIC = "robot.audit.note"
 
 
 def _new_event_id() -> str:
@@ -212,3 +220,38 @@ class RobotShutdown(RobotEvent):
     boot_id: str = ""
     grace_seconds: float = 5.0
     reason: str = ""
+
+
+@dataclass(frozen=True, kw_only=True)
+class RobotAuditNote(RobotEvent):
+    """Curated audit note about an action a component performed.
+
+    Published via :meth:`RobotComponent.publish_audit` and consumed by
+    every component of category :attr:`ComponentCategory.AUDIT`. The
+    fields mirror a "who did what, on whose behalf, with what
+    arguments" structure:
+
+    - ``actor`` -- the component identity (typically its
+      ``component_type``).
+    - ``action`` -- a short machine-readable label (e.g.
+      ``"tool.invoke"``, ``"approval.deny"``, ``"mail.send"``).
+    - ``details`` -- arbitrary JSONable payload. Sinks serialize this
+      to their backing store.
+
+    Distinct from regular bus traffic: an :class:`AuditNoteSink`
+    persists *every* :class:`RobotAuditNote` and only those.
+    Telemetry observers (``BusRecorder``) that subscribe to all bus
+    events will of course also see the note in their full record,
+    but the deliberate audit trail is the curated stream on
+    ``AUDIT_TOPIC``.
+    """
+
+    actor: str = ""
+    action: str = ""
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.actor:
+            raise ValueError("RobotAuditNote requires a non-empty actor")
+        if not self.action:
+            raise ValueError("RobotAuditNote requires a non-empty action")
