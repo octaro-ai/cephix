@@ -331,9 +331,11 @@ class KernelPhase(RobotEvent):
     -----------------
 
     These events are the kernel's *wide-event log* (in the Charity
-    Majors / canonical-log-line sense). Each transition carries a
-    free-form ``details`` dict where the kernel attaches structured,
-    queryable analytics:
+    Majors / canonical-log-line sense). They are emitted at phase
+    *completion*, not at entry -- analogous to an OpenTelemetry span
+    that is reported once when its scope closes. Each event carries
+    a free-form ``details`` dict where the kernel attaches
+    structured, queryable analytics:
 
     - ``acting`` events carry actor name, actor latency, success
       flag, and -- for LLM actors -- model name, token counts, cost.
@@ -348,6 +350,15 @@ class KernelPhase(RobotEvent):
     both "where in the run did time go?" and "show me all failed
     runs in the last hour with model X" without a second source of
     truth.
+
+    Bus-order note: because each event is the *closing* report of
+    its phase, a :class:`RobotOutput` produced inside the
+    ``responding`` phase appears on the bus *before* the matching
+    ``responding`` :class:`KernelPhase` event. The phase event then
+    documents the publish via ``output_event_id`` /
+    ``output_text_len`` in its details. This is intentional and
+    consistent: read phase events as "what just finished",
+    not as "what is starting".
 
     Cardinal rule for ``details``: structured fields only. Durations,
     counts, IDs, model names, hashes, error codes, flags. *Not*: full

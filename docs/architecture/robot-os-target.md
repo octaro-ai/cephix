@@ -623,10 +623,22 @@ Bus IN         compute          Actor call          compute          Bus OUT
   Komponente-zu-Komponente-Verkehr (Tool Execution Layer); fuer den
   Kernel-Actor-Handoff werden sie nicht verwendet.
 
-Pro abgeschlossener Phase published der Kernel ein `KernelPhase`-
-Event auf `kernel.phase` (Topic = `KERNEL_PHASE_TOPIC`). Das ist
-nicht nur ein State-Marker, sondern der **Wide-Event-Log** des
-Kernels (im Sinne von Charity Majors / Stripe Canonical Log Lines):
+Pro **abgeschlossener** Phase published der Kernel ein
+`KernelPhase`-Event auf `kernel.phase` (Topic =
+`KERNEL_PHASE_TOPIC`). Wichtig: das Event ist der *Abschluss-
+Bericht* einer Phase, nicht ein Eintritts-Marker -- analog zu
+einem OpenTelemetry-Span, der bei Scope-Ende einmal published
+wird. Praktische Konsequenz: ein `RobotOutput`, der innerhalb der
+`responding`-Phase entsteht, landet auf dem Bus *vor* dem
+zugehoerigen `responding`-Event, das ihn dokumentiert. Das ist
+absichtlich so -- Phasen-Events sind das, was *fertig* ist, nicht
+das was *anfaengt*. Ein haengender Run hinterlaesst genau das
+letzte abgeschlossene Phasen-Event, das Fehlen des naechsten ist
+das Hang-Signal.
+
+Das Event ist nicht nur ein State-Marker, sondern der **Wide-
+Event-Log** des Kernels (im Sinne von Charity Majors / Stripe
+Canonical Log Lines):
 jedes Phasen-Event traegt ein `details: dict` mit strukturierten,
 abfragbaren Analytics-Feldern -- `phase_duration_ms`,
 `actor_name`/`actor_duration_ms`/`actor_ok`, `input_text_len`,

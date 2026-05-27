@@ -213,6 +213,20 @@ class BaseKernel(KernelPort):
         :class:`KernelPhase` event after the work returns. Phase
         details are cleared between phases so each event reflects
         exactly its own phase.
+
+        Phase-event semantics: post-completion. A ``KernelPhase``
+        event is the *report* of a finished phase, not an entry
+        marker -- analogous to an OpenTelemetry span emitted at
+        completion. This is intentional: the wide-event analytics
+        (``phase_duration_ms``, ``actor_duration_ms``,
+        ``output_text_len``, ...) only exist *after* the work ran.
+        Practical consequence to remember: in a run where ``respond``
+        publishes a :class:`RobotOutput`, the output appears on the
+        bus *before* the corresponding ``responding`` phase event
+        that documents it. The phase event is the closing report,
+        not the announcement. A hung phase produces no event for
+        itself; the previous phase's event is the last one in the
+        log, and the absence of the next is the hang signal.
         """
         ctx.phase = phase
         ctx.phase_started_at = _utcnow()
