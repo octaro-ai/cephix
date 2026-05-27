@@ -12,17 +12,14 @@ The current set of subtypes covers the bus contract from
   topic. Correlation via ``correlation_id``.
 - :class:`ComponentResponse` -- reply to a ``ComponentRequest``,
   routed back to the original sender via ``correlation_id``.
-- :class:`RobotBoot`     -- early lifecycle broadcast: identity and the
-  component manifest are now on the bus. Published *before* the kernel
-  and channels attach so that their subscriptions immediately learn
-  who the robot is. Analog: kernel boot messages / dmesg.
-- :class:`RobotReady`    -- late lifecycle broadcast: every component
-  has attached, the robot is in full service. Analog:
-  ``systemd multi-user.target reached``.
-- :class:`RobotShutdown` -- broadcast lifecycle event announcing the
-  start of a graceful shutdown. Used by audit/observer subscribers;
-  the robot itself coordinates the drain via the
-  :meth:`RobotComponent.drain` lifecycle hook, not via a bus ack.
+- :class:`RobotLifecycle` -- single lifecycle broadcast. The
+  ``phase`` field discriminates between ``boot`` (skeleton up,
+  identity and manifest on the bus), ``ready`` (full service,
+  userspace attached) and ``shutdown`` (graceful drain begins).
+  All three travel on :data:`LIFECYCLE_TOPIC`, all retained, all
+  published by :class:`src.robot.Robot`. Analogues: ``boot`` ~ kernel
+  dmesg, ``ready`` ~ ``systemd multi-user.target reached``,
+  ``shutdown`` ~ POSIX ``SIGTERM``.
 - :class:`RobotAuditNote` -- curated audit note. Components publish
   these via :meth:`RobotComponent.publish_audit` whenever they
   perform an action that should appear in the audit trail. The
@@ -50,8 +47,7 @@ publish or subscribe should import the constant rather than hard-code
 the string. This keeps the wire vocabulary in one place and makes
 renames a one-file refactor.
 
-- :data:`LIFECYCLE_TOPIC` -- ``RobotBoot`` / ``RobotReady`` /
-  ``RobotShutdown``.
+- :data:`LIFECYCLE_TOPIC` -- :class:`RobotLifecycle` (all phases).
 - :data:`AUDIT_TOPIC` -- :class:`RobotAuditNote`.
 - :data:`KERNEL_PHASE_TOPIC` -- :class:`KernelPhase`.
 - :data:`INPUT_TOPIC` -- :class:`RobotInput` from channels into the
@@ -76,7 +72,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 
 LIFECYCLE_TOPIC = "robot.lifecycle"
@@ -182,9 +178,9 @@ class ComponentInfo:
 
     The :class:`src.robot.Robot` collects one of these for every
     component it composes itself out of and publishes them all
-    together in :class:`RobotBoot` so that audit, observers and
-    identity-aware components can learn the full composition with one
-    event.
+    together in :class:`RobotLifecycle` (``phase="boot"`` and
+    ``phase="ready"``) so that audit, observers and identity-aware
+    components can learn the full composition with one event.
 
     ``category`` is the role bucket (``"bus"``, ``"actor"``,
     ``"kernel"``, ...). ``name`` is the registered component name
@@ -198,75 +194,76 @@ class ComponentInfo:
 
 
 @dataclass(frozen=True, kw_only=True)
-class RobotBoot(RobotEvent):
-    """Lifecycle broadcast: identity and component manifest are on the bus.
+class RobotLifecycle(RobotEvent):
+    """Broadcast lifecycle phase transition.
 
-    Published by :class:`src.robot.Robot` exactly once per boot, as a
-    retained broadcast on ``robot.lifecycle``, *before* the kernel and
-    channels attach. Subscribers that arrive later (the kernel,
-    channels, audit sinks attached at any time) receive this event
-    immediately upon subscription and can use it as their
-    authoritative source for robot identity and component composition.
+    One event class for the entire lifecycle. The :attr:`phase` field
+    discriminates between three retained broadcasts on
+    :data:`LIFECYCLE_TOPIC`, all published by :class:`src.robot.Robot`
+    itself:
 
-    Analog: kernel boot messages (dmesg) -- "this is who I am, this is
-    what I have loaded".
+    - ``boot`` -- early lifecycle broadcast, *before* kernel and
+      channels attach. Carries identity and the full component
+      manifest so subscriptions that arrive later (kernel, channels,
+      audit sinks) can pick up identity from the retained slot.
+      Analog: kernel boot messages (dmesg).
+    - ``ready`` -- late lifecycle broadcast, *after* kernel and all
+      channels have attached. Same identity and manifest, overrides
+      the retained slot so a late subscriber sees the most recent
+      authoritative state.
+      Analog: ``systemd multi-user.target reached``.
+    - ``shutdown`` -- graceful shutdown is starting. Audit sinks
+      and other observers learn here that drain has begun. The
+      drain itself is *not* coordinated through this event -- the
+      robot calls :meth:`RobotComponent.drain` directly on each
+      component as a lifecycle hook (analogous to ROS 2's
+      ``on_shutdown`` callback or systemd's ``ExecStop``). This
+      event is the parallel awareness signal.
+      Analog: the SIGTERM that systemd sends before the eventual
+      SIGKILL.
+
+    Discriminator design follows :class:`KernelPhase`: structural
+    variation lives in a field, not in a subclass. ``boot`` and
+    ``ready`` share envelope and manifest; ``shutdown`` shares the
+    envelope and may carry an explanatory ``message``. Splitting
+    these into three classes would have produced ~95% structural
+    overlap -- the InfoQ "schema proliferation" pattern -- without
+    any subscriber-side benefit, since the lifecycle topic and the
+    publishing component are identical for all three.
+
+    Why no ``grace_seconds``: the shutdown grace window is
+    supervisor policy, not part of the broadcast. It lives on
+    :class:`src.robot.Robot` (configured via ``shutdown_grace``)
+    and is enforced by the robot when calling ``drain()`` on each
+    component. Components and observers learn *that* a shutdown
+    has begun via this event; the *when* is the robot's
+    responsibility, not the message's. Mirrors POSIX ``SIGTERM``
+    (no payload), systemd ``TimeoutStopSec=`` (unit property),
+    Kubernetes ``terminationGracePeriodSeconds`` (pod spec).
+
+    Why ``message`` instead of ``reason``: the robot is always the
+    publisher, so this is the robot's announcement, not a
+    justification given by some external party. ``message`` is
+    short, human-readable text the robot supplies a default for and
+    that operators can override (e.g. via ``Robot.stop(message=...)``).
+    Following :class:`KernelPhase.error`, this is a label, not a
+    free-form payload -- detailed context belongs in a
+    :class:`RobotAuditNote`.
     """
 
+    phase: Literal["boot", "ready", "shutdown"] = "boot"
     robot_id: str | None = None
     robot_name: str | None = None
     boot_id: str = ""
     components: tuple[ComponentInfo, ...] = ()
+    message: str = ""
 
-
-@dataclass(frozen=True, kw_only=True)
-class RobotReady(RobotEvent):
-    """Lifecycle broadcast: every component has attached, the robot serves.
-
-    Published by :class:`src.robot.Robot` after the kernel and all
-    channels have completed their ``start(bus)``. Retained on
-    ``robot.lifecycle`` so a late subscriber knows whether the robot
-    is in full service or still booting.
-
-    Carries the same identity and component manifest as
-    :class:`RobotBoot`: a late subscriber sees only the latest
-    retained event on the topic, so the manifest must travel with
-    whichever event is the latest one to land.
-
-    Analog: ``systemd multi-user.target reached`` -- the moment the
-    system is open for business.
-    """
-
-    robot_id: str | None = None
-    robot_name: str | None = None
-    boot_id: str = ""
-    components: tuple[ComponentInfo, ...] = ()
-
-
-@dataclass(frozen=True, kw_only=True)
-class RobotShutdown(RobotEvent):
-    """Lifecycle broadcast: the robot is starting a graceful shutdown.
-
-    Published as a retained broadcast on the lifecycle topic.
-    Components that need to drain (close pending sessions, flush
-    buffers, write final audit notes) get up to ``grace_seconds`` to
-    react before the robot starts calling :meth:`stop` on them.
-
-    The drain itself is *not* coordinated through this event -- the
-    robot calls :meth:`RobotComponent.drain` directly on each
-    component as a lifecycle hook (analogous to ROS 2's
-    ``on_shutdown`` callback or systemd's ``ExecStop``). This bus
-    event is the parallel observer signal: audit sinks and other
-    bystanders learn that a shutdown has begun.
-
-    Analog: the SIGTERM that systemd sends before the eventual
-    SIGKILL.
-    """
-
-    robot_id: str | None = None
-    robot_name: str | None = None
-    boot_id: str = ""
-    grace_seconds: float = 5.0
-    reason: str = ""
+    def __post_init__(self) -> None:
+        allowed = ("boot", "ready", "shutdown")
+        if self.phase not in allowed:
+            raise ValueError(
+                f"RobotLifecycle.phase must be one of {allowed}, got {self.phase!r}"
+            )
 
 
 @dataclass(frozen=True, kw_only=True)

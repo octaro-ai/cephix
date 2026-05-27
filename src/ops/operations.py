@@ -88,10 +88,10 @@ async def shutdown(
 ) -> dict[str, Any]:
     """Trigger a shutdown.
 
-    ``force=False`` walks the regular lifecycle (RobotShutdown
-    broadcast, per-component grace, drain+stop in reverse). ``force``
-    is meant for the case where the regular path is wedged -- the
-    robot teardown then proceeds without grace.
+    ``force=False`` walks the regular lifecycle (``RobotLifecycle``
+    ``shutdown`` broadcast, per-component grace, drain+stop in
+    reverse). ``force`` is meant for the case where the regular path
+    is wedged -- the robot teardown then proceeds without grace.
     """
     logger.info(
         "shutdown requested over control plane (force=%s, %s)",

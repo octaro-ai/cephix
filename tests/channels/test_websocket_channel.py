@@ -176,7 +176,7 @@ async def test_stop_closes_open_sessions() -> None:
 
 
 async def test_welcome_carries_robot_identity_from_lifecycle_event() -> None:
-    """The channel learns identity from the retained RobotReady on the bus."""
+    """The channel learns identity from the retained lifecycle ``ready`` event."""
     robot, channel = await _build_robot(robot_id="dreamgirl", robot_name="Dreamgirl")
 
     async with robot:
@@ -191,7 +191,7 @@ async def test_welcome_carries_robot_identity_from_lifecycle_event() -> None:
 
 
 async def test_channel_announces_shutdown_to_open_sessions() -> None:
-    """RobotShutdown broadcast triggers a 'shutdown' frame to every session."""
+    """Lifecycle ``shutdown`` event triggers a 'shutdown' frame to every session."""
     robot, channel = await _build_robot(robot_id="alpha", robot_name="Alpha")
 
     await robot.start()
@@ -207,7 +207,7 @@ async def test_channel_announces_shutdown_to_open_sessions() -> None:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     frame = json.loads(msg.data)
                     assert frame["type"] == "shutdown"
-                    assert frame["reason"] == "lifecycle.stop"
+                    assert frame["message"] == "Robot shutting down"
 
                 await asyncio.wait_for(stop_task, timeout=2.0)
     finally:

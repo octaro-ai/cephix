@@ -20,9 +20,10 @@ Server -> Client (on connect)::
     }
 
 The ``robot`` block is sourced from the retained
-:class:`RobotReady` broadcast on the ``robot.lifecycle`` topic which
-the channel subscribes to during :meth:`start`. If the owning robot
-runs without identity, the block is omitted.
+:class:`RobotLifecycle` (``phase="ready"`` or ``"boot"``) broadcast
+on the ``robot.lifecycle`` topic which the channel subscribes to
+during :meth:`start`. If the owning robot runs without identity,
+the block is omitted.
 
 Server -> Client (kernel response)::
 
@@ -66,9 +67,8 @@ from src.bus.messages import (
     OUTPUT_TOPIC,
     RobotEvent,
     RobotInput,
+    RobotLifecycle,
     RobotOutput,
-    RobotReady,
-    RobotShutdown,
 )
 from src.bus.ports import BusPort, Subscription
 from src.channels.ports import ChannelPort
@@ -200,19 +200,19 @@ class WebsocketChannel(ChannelPort):
         subscription hasn't run yet.
         """
         retained = bus.retained(LIFECYCLE_TOPIC)
-        if isinstance(retained, RobotReady):
+        if isinstance(retained, RobotLifecycle) and retained.phase in ("boot", "ready"):
             self._robot_id = retained.robot_id
             self._robot_name = retained.robot_name
 
     async def _handle_lifecycle(self, event: RobotEvent) -> None:
-        """Lifecycle hook: pick up identity from retained ``RobotReady``.
+        """Lifecycle hook: pick up identity from retained boot/ready events.
 
         Shutdown is handled by :meth:`drain` which is invoked
-        directly by the robot after ``RobotShutdown`` is broadcast --
-        not from this subscription, to avoid racing the bus consumer
-        task against the drain coroutine.
+        directly by the robot after the lifecycle ``shutdown`` event
+        is broadcast -- not from this subscription, to avoid racing
+        the bus consumer task against the drain coroutine.
         """
-        if isinstance(event, RobotReady):
+        if isinstance(event, RobotLifecycle) and event.phase in ("boot", "ready"):
             self._robot_id = event.robot_id
             self._robot_name = event.robot_name
 
@@ -225,30 +225,29 @@ class WebsocketChannel(ChannelPort):
         robot) only takes care of the listening socket and the bus
         subscriptions.
 
-        Pulls the ``RobotShutdown`` from the bus retained slot to
-        forward ``reason`` and ``grace_seconds`` to clients -- they
-        are useful for UI feedback ("server is restarting in 5s").
+        Pulls the lifecycle ``shutdown`` event from the bus retained
+        slot to forward ``message`` to clients -- useful for UI
+        feedback. The grace window is robot-internal policy and not
+        relayed to clients; their meaningful signal is the close of
+        the WebSocket.
         """
         if self._shutting_down:
             return
         self._shutting_down = True
 
         bus = self._bus
-        reason = ""
-        grace_seconds = 0.0
+        message = ""
         if bus is not None:
             retained = bus.retained(LIFECYCLE_TOPIC)
-            if isinstance(retained, RobotShutdown):
-                reason = retained.reason
-                grace_seconds = retained.grace_seconds
+            if isinstance(retained, RobotLifecycle) and retained.phase == "shutdown":
+                message = retained.message
 
         for session_id, ws in list(self._sessions.items()):
             try:
                 await ws.send_json(
                     {
                         "type": "shutdown",
-                        "reason": reason,
-                        "grace_seconds": grace_seconds,
+                        "message": message,
                     }
                 )
             except Exception:

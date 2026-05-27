@@ -7,10 +7,10 @@ carries:
 
 - self-description (``component_name``, ``component_category``,
   ``component_description``) so the registry can index it and the
-  manifest in ``RobotBoot`` / ``RobotReady`` can describe it. UI
-  concerns (which fields the onboarding wizard prompts for) are not
-  on the component anymore: that lives in :mod:`src.onboarding` so
-  the component contract stays runtime-only;
+  manifest in :class:`RobotLifecycle` (``phase="boot"``/``"ready"``)
+  can describe it. UI concerns (which fields the onboarding wizard
+  prompts for) are not on the component anymore: that lives in
+  :mod:`src.onboarding` so the component contract stays runtime-only;
 - lifecycle hooks (``start``/``stop`` plus optional ``drain``). Plain
   robot components start without a bus; :class:`BusComponent` is the
   specialization for components that attach to the running bus;
@@ -98,8 +98,8 @@ BOOT_PRIORITY: dict[ComponentCategory, int] = {
 
 
 # Categories that make up the robot's *skeleton*: they come up in
-# Phase 2 -- before ``RobotBoot`` is broadcast and before any
-# userspace component starts.
+# Phase 2 -- before the ``RobotLifecycle`` ``boot`` event is
+# broadcast and before any userspace component starts.
 #
 # Includes the bus itself and any cross-cutting infrastructure that
 # must witness the entire robot lifetime, including the boot:
@@ -107,9 +107,9 @@ BOOT_PRIORITY: dict[ComponentCategory, int] = {
 # - ``BUS``       -- the routing fabric. ``start()`` with no
 #                    arguments because it *is* the upstream.
 # - ``TELEMETRY`` -- read-all observers (``BusRecorder``). Must
-#                    boot before ``RobotBoot`` is published, otherwise
-#                    the very first lifecycle event would be missing
-#                    from the recording.
+#                    boot before the lifecycle ``boot`` event is
+#                    published, otherwise the very first lifecycle
+#                    event would be missing from the recording.
 #
 # ``AUDIT`` is *not* in here on purpose: audit only consumes curated
 # ``RobotAuditNote`` events, which can only be produced by userspace

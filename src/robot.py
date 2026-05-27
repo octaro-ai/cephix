@@ -17,23 +17,23 @@ or systemd's targets ``sysinit -> basic -> multi-user``):
 
 1. **Phase 1 -- control plane up.** Out-of-band, no bus required.
    Operators can reach the maintenance hatch even if the rest fails.
-2. **Phase 2 -- skeleton up + ``RobotBoot`` retained.** Skeleton
-   components (currently: bus) start; their identities go into the
-   manifest; a retained :class:`RobotBoot` carrying identity +
-   manifest is broadcast.
-3. **Phase 3 -- userspace up + ``RobotReady`` retained.** All other
-   components start in priority order, then a retained
-   :class:`RobotReady` announces full service.
+2. **Phase 2 -- skeleton up + ``RobotLifecycle(phase="boot")`` retained.**
+   Skeleton components (currently: bus) start; their identities go
+   into the manifest; a retained :class:`RobotLifecycle` carrying
+   identity + manifest is broadcast.
+3. **Phase 3 -- userspace up + ``RobotLifecycle(phase="ready")`` retained.**
+   All other components start in priority order, then a retained
+   :class:`RobotLifecycle` announces full service.
 
 Shutdown mirrors this strictly:
 
 - **Phase 3 down -- userspace verabschieden.** Retained
-  :class:`RobotShutdown` is broadcast; then each userspace component
-  in reverse-priority order gets ``drain()`` (with ``shutdown_grace``
-  as hard cap) followed by ``stop()``.
+  :class:`RobotLifecycle` (``phase="shutdown"``) is broadcast; then
+  each userspace component in reverse-priority order gets ``drain()``
+  (with ``shutdown_grace`` as hard cap) followed by ``stop()``.
 - **Phase 2 down -- skeleton verabschieden.** Skeleton components in
-  reverse-priority order get the same drain+stop treatment. The bus is
-  last -- by then no userspace component is still publishing, so
+  reverse-priority order get the same drain+stop treatment. The bus
+  is last -- by then no userspace component is still publishing, so
   ``bus.drain()`` (queue flush) converges quickly.
 - **Phase 1 down -- persona offline.** The control plane is torn down
   last. The robot is then ``FINALIZED``.
@@ -61,9 +61,7 @@ from typing import TYPE_CHECKING, Self
 from src.bus.messages import (
     LIFECYCLE_TOPIC,
     ComponentInfo,
-    RobotBoot,
-    RobotReady,
-    RobotShutdown,
+    RobotLifecycle,
 )
 from src.bus.ports import BusPort
 from src.components import (
@@ -146,10 +144,10 @@ class RobotPhase(str, Enum):
     BOOTING = "booting"            # phase 1 in progress
     BOOTED = "booted"              # control plane up, no skeleton yet
     ATTACHING = "attaching"        # phase 2 in progress
-    ATTACHED = "attached"          # skeleton up, RobotBoot retained
+    ATTACHED = "attached"          # skeleton up, lifecycle "boot" retained
     ACTIVATING = "activating"      # phase 3 in progress
-    SERVING = "serving"            # everything up, RobotReady retained
-    DRAINING = "draining"          # phase 3 down (RobotShutdown sent)
+    SERVING = "serving"            # everything up, lifecycle "ready" retained
+    DRAINING = "draining"          # phase 3 down, lifecycle "shutdown" sent
     STOPPING = "stopping"          # phase 2 down + 1 down
     FINALIZED = "finalized"        # done
 
@@ -217,7 +215,7 @@ class Robot:
 
     @property
     def component_manifest(self) -> tuple[ComponentInfo, ...]:
-        """Manifest snapshot for ``RobotBoot`` / ``RobotReady`` payloads."""
+        """Manifest snapshot for ``RobotLifecycle`` ``boot``/``ready`` payloads."""
         return tuple(
             ComponentInfo(
                 category=c.component_category.value,
@@ -252,8 +250,8 @@ class Robot:
         """Three-phase boot. Roll back on failure.
 
         Phase 1: control plane up (no bus required).
-        Phase 2: skeleton components + retained ``RobotBoot``.
-        Phase 3: userspace components + retained ``RobotReady``.
+        Phase 2: skeleton components + retained ``RobotLifecycle(phase="boot")``.
+        Phase 3: userspace components + retained ``RobotLifecycle(phase="ready")``.
 
         On failure during phase 2 or 3 the robot tears down what it
         already started and propagates the original exception. The
@@ -324,16 +322,16 @@ class Robot:
         self._phase = RobotPhase.BOOTED
 
     async def _phase2_skeleton(self) -> None:
-        """Phase 2: start skeleton components, broadcast ``RobotBoot``.
+        """Phase 2: start skeleton components, broadcast ``RobotLifecycle(phase="boot")``.
 
         Skeleton components start in priority order: the bus first
         (priority 0, ``start()`` without arguments), then
         cross-cutting observers (telemetry, ``start(bus)``). The
         bus is registered on the robot as soon as it is up so the
         observers can attach to it. Only after every skeleton
-        component is online is :class:`RobotBoot` broadcast --
-        otherwise the first lifecycle event would slip past
-        observers that are about to subscribe.
+        component is online is the lifecycle ``boot`` event
+        broadcast -- otherwise the first lifecycle event would slip
+        past observers that are about to subscribe.
         """
         self._phase = RobotPhase.ATTACHING
 
@@ -353,11 +351,12 @@ class Robot:
             # raises with the canonical error message.
             self._bus = self._locate_bus()
 
-        boot = RobotBoot(
+        boot = RobotLifecycle(
             topic=LIFECYCLE_TOPIC,
             principal=self._system_principal(),
             source="robot",
             run_id=self._boot_id,
+            phase="boot",
             robot_id=self._identity.id,
             robot_name=self._identity.name,
             boot_id=self._boot_id,
@@ -367,18 +366,19 @@ class Robot:
         self._phase = RobotPhase.ATTACHED
 
     async def _phase3_userspace(self) -> None:
-        """Phase 3: start userspace components, broadcast ``RobotReady``."""
+        """Phase 3: start userspace components, broadcast ``RobotLifecycle(phase="ready")``."""
         self._phase = RobotPhase.ACTIVATING
 
         for component in self._userspace_components():
             await self._start_component(component)
 
         assert self._bus is not None  # set by phase 2
-        ready = RobotReady(
+        ready = RobotLifecycle(
             topic=LIFECYCLE_TOPIC,
             principal=self._system_principal(),
             source="robot",
             run_id=self._boot_id,
+            phase="ready",
             robot_id=self._identity.id,
             robot_name=self._identity.name,
             boot_id=self._boot_id,
@@ -389,28 +389,37 @@ class Robot:
 
     # ---- stop (3-phase shutdown, mirrored) --------------------------------
 
-    async def stop(self, *, grace_override: float | None = None) -> None:
+    async def stop(
+        self,
+        *,
+        grace_override: float | None = None,
+        message: str | None = None,
+    ) -> None:
         """Graceful shutdown, mirroring the boot sequence component by
         component.
 
-        Phase 3 down: announce :class:`RobotShutdown` retained, then
-        drain+stop every userspace component in reverse-boot order.
-        Phase 2 down: drain+stop every skeleton component (the bus
-        comes last; its ``drain()`` is the queue flush).
-        Phase 1 down: tear down the control plane.
+        Phase 3 down: announce :class:`RobotLifecycle` (``phase="shutdown"``)
+        retained, then drain+stop every userspace component in
+        reverse-boot order. Phase 2 down: drain+stop every skeleton
+        component (the bus comes last; its ``drain()`` is the queue
+        flush). Phase 1 down: tear down the control plane.
 
         Each component's drain hook is bounded by ``shutdown_grace``
         (or ``grace_override``) -- coroutines that don't return are
-        cancelled before the matching ``stop()`` is called.
+        cancelled before the matching ``stop()`` is called. The
+        grace window is robot-internal policy and does not travel on
+        the bus; ``message`` is the broadcast announcement and
+        defaults to ``"Robot shutting down"`` if not supplied.
         """
         if self._phase in (RobotPhase.OFFLINE, RobotPhase.FINALIZED):
             self._stop_event.set()
             return
 
         grace = grace_override if grace_override is not None else self._shutdown_grace
+        announce = message or "Robot shutting down"
 
         try:
-            await self._phase3_down(grace)
+            await self._phase3_down(grace, announce)
             await self._phase2_down(grace)
             await self._phase1_down()
             logger.info("%s offline", self._label)
@@ -418,15 +427,15 @@ class Robot:
             self._phase = RobotPhase.FINALIZED
             self._stop_event.set()
 
-    async def _phase3_down(self, grace: float) -> None:
+    async def _phase3_down(self, grace: float, message: str) -> None:
         """Phase 3 down: announce shutdown, drain+stop userspace."""
         self._phase = RobotPhase.DRAINING
-        await self._announce_shutdown(grace)
+        await self._announce_shutdown(message)
 
         # Yield once so broadcast subscribers (audit sinks, channels
         # that haven't been drained yet, ...) get a chance to see the
-        # ``RobotShutdown`` event before we start tearing components
-        # down underneath them.
+        # lifecycle ``shutdown`` event before we start tearing
+        # components down underneath them.
         await asyncio.sleep(0)
 
         for component in reversed(self._userspace_components()):
@@ -453,26 +462,27 @@ class Robot:
                 logger.exception("error stopping control plane; continuing")
             self._control_plane = None
 
-    async def _announce_shutdown(self, grace: float) -> None:
-        """Broadcast :class:`RobotShutdown` retained.
+    async def _announce_shutdown(self, message: str) -> None:
+        """Broadcast :class:`RobotLifecycle` (``phase="shutdown"``) retained.
 
         Audit sinks and other observers learn here that a shutdown
         has begun. The drain itself is *not* coordinated via this
         event -- the robot calls ``drain()`` directly on each
-        component as a lifecycle hook.
+        component as a lifecycle hook. The grace window is robot
+        policy, not part of the broadcast (POSIX SIGTERM analogue).
         """
         if self._bus is None:
             return
-        shutdown = RobotShutdown(
+        shutdown = RobotLifecycle(
             topic=LIFECYCLE_TOPIC,
             principal=self._system_principal(),
             source="robot",
             run_id=self._boot_id,
+            phase="shutdown",
             robot_id=self._identity.id,
             robot_name=self._identity.name,
             boot_id=self._boot_id,
-            grace_seconds=grace,
-            reason="lifecycle.stop",
+            message=message,
         )
         try:
             await self._bus.publish_broadcast(shutdown, retain=True)

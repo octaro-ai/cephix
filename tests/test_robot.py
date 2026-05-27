@@ -221,16 +221,17 @@ async def test_robot_logs_lifecycle_with_identity(
     assert "robot offline" not in messages
 
 
-async def test_robot_publishes_robot_boot_then_robot_ready_with_manifest() -> None:
-    """The robot announces itself with retained RobotBoot then RobotReady.
+async def test_robot_publishes_lifecycle_boot_then_ready_with_manifest() -> None:
+    """The robot announces itself with retained ``boot`` then ``ready`` lifecycle events.
 
-    The first event (RobotBoot) is published before the kernel and
-    channels attach, so they can pick up identity from the retained
-    slot. The second event (RobotReady) overrides the retained slot
-    once everything is up; it carries the same manifest so a late
-    subscriber still learns the full composition.
+    The first event (``phase="boot"``) is published before the
+    kernel and channels attach, so they can pick up identity from
+    the retained slot. The second event (``phase="ready"``)
+    overrides the retained slot once everything is up; it carries
+    the same manifest so a late subscriber still learns the full
+    composition.
     """
-    from src.bus import LIFECYCLE_TOPIC, RobotReady
+    from src.bus import LIFECYCLE_TOPIC, RobotLifecycle
 
     log: list[str] = []
     bus = AsyncioBus()
@@ -243,7 +244,8 @@ async def test_robot_publishes_robot_boot_then_robot_ready_with_manifest() -> No
 
     async with robot:
         retained = bus.retained(LIFECYCLE_TOPIC)
-        assert isinstance(retained, RobotReady)
+        assert isinstance(retained, RobotLifecycle)
+        assert retained.phase == "ready"
         assert retained.robot_id == "alpha"
         assert retained.robot_name == "Alpha"
         assert retained.boot_id.startswith("boot-")
@@ -252,9 +254,9 @@ async def test_robot_publishes_robot_boot_then_robot_ready_with_manifest() -> No
         assert categories == ["bus", "kernel", "channel"]
 
 
-async def test_robot_publishes_robot_shutdown_on_stop() -> None:
-    """The robot announces a retained RobotShutdown before it tears down."""
-    from src.bus import LIFECYCLE_TOPIC, RobotEvent, RobotShutdown
+async def test_robot_publishes_lifecycle_shutdown_on_stop() -> None:
+    """The robot announces a retained ``shutdown`` lifecycle event before it tears down."""
+    from src.bus import LIFECYCLE_TOPIC, RobotEvent, RobotLifecycle
 
     received: list[RobotEvent] = []
 
@@ -263,15 +265,44 @@ async def test_robot_publishes_robot_shutdown_on_stop() -> None:
 
     await robot.start()
     bus.subscribe_broadcast(LIFECYCLE_TOPIC, lambda evt: _record(received, evt))
-    await asyncio.sleep(0)  # let the consumer drain the retained RobotReady
+    await asyncio.sleep(0)  # let the consumer drain the retained ``ready`` event
     received.clear()
     await robot.stop()
     await asyncio.sleep(0)
 
-    shutdowns = [evt for evt in received if isinstance(evt, RobotShutdown)]
+    shutdowns = [
+        evt
+        for evt in received
+        if isinstance(evt, RobotLifecycle) and evt.phase == "shutdown"
+    ]
     assert len(shutdowns) == 1
     assert shutdowns[0].robot_id == "alpha"
-    assert shutdowns[0].reason == "lifecycle.stop"
+    assert shutdowns[0].message == "Robot shutting down"
+
+
+async def test_robot_publishes_lifecycle_shutdown_with_custom_message() -> None:
+    """Operators can override the shutdown message via ``stop(message=...)``."""
+    from src.bus import LIFECYCLE_TOPIC, RobotEvent, RobotLifecycle
+
+    received: list[RobotEvent] = []
+
+    bus = AsyncioBus()
+    robot = _make_robot(bus=bus, robot_id="alpha", robot_name="Alpha")
+
+    await robot.start()
+    bus.subscribe_broadcast(LIFECYCLE_TOPIC, lambda evt: _record(received, evt))
+    await asyncio.sleep(0)
+    received.clear()
+    await robot.stop(message="Maintenance window 03:00")
+    await asyncio.sleep(0)
+
+    shutdowns = [
+        evt
+        for evt in received
+        if isinstance(evt, RobotLifecycle) and evt.phase == "shutdown"
+    ]
+    assert len(shutdowns) == 1
+    assert shutdowns[0].message == "Maintenance window 03:00"
 
 
 async def _record(target: list, event) -> None:  # type: ignore[no-untyped-def]
@@ -434,12 +465,12 @@ async def test_robot_logs_rollback_on_failed_startup(
     assert "robot online (Ctrl-C to stop)" not in messages
 
 
-async def test_telemetry_component_starts_before_robot_boot_is_published() -> None:
+async def test_telemetry_component_starts_before_lifecycle_boot_is_published() -> None:
     """A TELEMETRY component subscribes via subscribe_all in Phase 2,
-    so it must witness RobotBoot live -- otherwise the very first
-    lifecycle event is missing from the recording.
+    so it must witness the lifecycle ``boot`` event live -- otherwise
+    the very first lifecycle event is missing from the recording.
     """
-    from src.bus import RobotBoot, RobotReady
+    from src.bus import RobotLifecycle
     from src.bus.messages import RobotEvent
     from src.bus.ports import BusPort, Subscription
 
@@ -480,16 +511,32 @@ async def test_telemetry_component_starts_before_robot_boot_is_published() -> No
         await asyncio.sleep(0.01)
 
     # The recorder, as a TELEMETRY/skeleton component, must have
-    # been online when RobotBoot was published.
-    boots = [evt for evt in seen if isinstance(evt, RobotBoot)]
-    readys = [evt for evt in seen if isinstance(evt, RobotReady)]
+    # been online when the lifecycle ``boot`` event was published.
+    boots = [
+        evt
+        for evt in seen
+        if isinstance(evt, RobotLifecycle) and evt.phase == "boot"
+    ]
+    readys = [
+        evt
+        for evt in seen
+        if isinstance(evt, RobotLifecycle) and evt.phase == "ready"
+    ]
     assert len(boots) == 1, (
-        "telemetry must witness RobotBoot live, but it was missing"
+        "telemetry must witness the lifecycle 'boot' event live, but it was missing"
     )
     assert len(readys) == 1
-    # Order: RobotBoot precedes RobotReady in the recording.
-    boot_idx = next(i for i, evt in enumerate(seen) if isinstance(evt, RobotBoot))
-    ready_idx = next(i for i, evt in enumerate(seen) if isinstance(evt, RobotReady))
+    # Order: ``boot`` precedes ``ready`` in the recording.
+    boot_idx = next(
+        i
+        for i, evt in enumerate(seen)
+        if isinstance(evt, RobotLifecycle) and evt.phase == "boot"
+    )
+    ready_idx = next(
+        i
+        for i, evt in enumerate(seen)
+        if isinstance(evt, RobotLifecycle) and evt.phase == "ready"
+    )
     assert boot_idx < ready_idx
 
 
