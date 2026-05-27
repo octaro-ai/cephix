@@ -184,19 +184,26 @@ Alle Nachrichten sind `RobotEvent`. Subtypen druecken Rolle und
 Erwartungshaltung aus:
 
 - `RobotInput`: konversationale Eingabe von aussen. Beispiel: User schickt
-  Text auf einem Channel.
+  Text auf einem Channel. Das textuelle Nutzdatum liegt im Feld
+  `message`, strukturierte Channel-Metadaten (Session-ID, Anhaenge,
+  ...) im `payload`.
 - `RobotTrigger`: autonome Anregung von aussen ohne Konversationsabsicht.
   Beispiel: Timer, Sensor, geplanter Job. Kann auch als Spezialfall von
   `RobotInput` modelliert werden, behaelt aber semantischen Eigenwert fuer
   Routing und Audit.
 - `RobotOutput`: Nachricht an die Aussenwelt, fire-and-forget. Beispiel:
-  Antworttext an User, Mailversand-Bestaetigung an Channel.
+  Antworttext an User, Mailversand-Bestaetigung an Channel. Symmetrisch
+  zu `RobotInput`: Nutztext im Feld `message`. Erbt von `Failable`, traegt
+  also `status` und optional `error: ErrorInfo` (siehe
+  "Result-Vokabular" weiter unten) — Channels rendern Fehler-Outputs
+  als Fehler (Banner, Retry-Button) statt als gewoehnliche Antwort.
 - `ComponentRequest`: gerichtete Anfrage zwischen Bus-Teilnehmern, erwartet
   Antwort. Beispiel: Kernel fragt Tool Execution Layer nach `mail.list`.
   Kernel fragt Channel nach Approval.
 - `ComponentResponse`: Antwort auf eine `ComponentRequest`. Verweist per
-  Korrelation auf die ausloesende Anfrage. Kann Erfolg oder Fehler sein,
-  Fehler ist explizit modelliert.
+  Korrelation auf die ausloesende Anfrage. Erbt von `Failable`: Erfolg
+  (`status="ok"` plus `payload`) und Fehler (`status="error"` plus
+  `error: ErrorInfo`) tragen dasselbe Vokabular wie der Rest des Bus.
 - `RobotLifecycle`: einziger Lifecycle-Typ, drei Phasen ueber das
   `phase`-Feld unterschieden:
   - `phase="boot"`: *frueh* in der Bootsequenz, sobald Identitaet
@@ -232,6 +239,67 @@ Pflichtfelder pro Nachricht:
 - `topic`: logische Adresse, ueber die Subscriber gefiltert werden.
 - `principal`: wer im Namen wessen handelt.
 - `timestamp` und `source`.
+
+### Result-Vokabular: `Failable`, `ResultStatus`, `ErrorInfo`
+
+Jeder Event, der ein Erfolg-oder-Fehler-Ergebnis transportiert
+(`RobotOutput`, `ComponentResponse`, `KernelPhase`), erbt vom
+`Failable`-Mixin. Damit liegen Erfolgs- und Fehlerfaelle bus-weit in
+*einem* Vokabular vor:
+
+- `status: ResultStatus` — Diskriminator, `Literal["ok", "error"]`.
+- `error: ErrorInfo | None` — strukturierter Fehlerdeskriptor; nur
+  gesetzt, wenn `status == "error"`. Invariante wird im
+  `Failable.__post_init__` durchgesetzt: `status == "ok"` *gdw.*
+  `error is None`.
+
+`ErrorInfo` ist die strukturierte Variante eines Fehlers (modelliert
+nach gRPC `google.rpc.Status` / HTTP RFC 9457):
+
+- `code: str` — maschinenlesbarer Fehlercode aus dem unten
+  dokumentierten kanonischen Vokabular oder ein namespaced
+  Komponentencode (`tool.mail.quota_exceeded`,
+  `actor.openai.rate_limited`).
+- `message: str` — kurze, menschenlesbare Beschreibung *dieses*
+  Vorfalls. Frei formulierter Text, keine Filterkategorie.
+- `details: dict[str, Any]` — JSON-faehiger Wide-Event-Slot fuer
+  strukturierten Kontext (`{"timeout_s": 30, "retries": 2,
+  "failed_phase": "acting"}`). *Kein* Stacktrace-Dump, *kein*
+  Roh-Payload.
+
+#### Kanonisches Error-Code-Vokabular
+
+Die folgende Liste ist die *Plattform*-Ebene; Komponenten duerfen
+namespaced Codes ergaenzen, sollen aber bei Plattform-Fehlern den
+kanonischen Code verwenden. So findet `rg '"code":"timeout"' *.jsonl`
+*alle* Timeouts, egal aus welchem Subsystem.
+
+| Code               | Bedeutung                                                |
+|--------------------|----------------------------------------------------------|
+| `timeout`          | Operation hat eine Frist ueberschritten (Actor-Timeout, Bus-`request`-Timeout, Tool-Timeout). |
+| `cancelled`        | Operation wurde aktiv abgebrochen (Shutdown, Caller-Cancel). |
+| `unavailable`      | Adressat existiert, aber kein Anbieter ist verfuegbar (kein Subscriber, Service down). |
+| `not_found`        | Angefragte Ressource oder Entitaet existiert nicht.       |
+| `invalid_argument` | Anfrage syntaktisch oder semantisch falsch geformt.       |
+| `unauthorized`     | Principal hat keine Berechtigung fuer Action / Topic.    |
+| `internal`         | Sammelposten fuer "irgendetwas ist intern schief".       |
+
+Komponenten-Codes folgen der Topic-Konvention `<namespace>.<scope>.<code>`,
+z. B. `tool.mail.quota_exceeded`, `actor.anthropic.rate_limited`,
+`channel.websocket.session_lost`.
+
+#### Konvention: User-Sichtbarkeit von Phase-Fehlern
+
+`KernelPhase` mit `status="error"` ist *Telemetrie*. Sie
+beschreibt den internen Zustand des Kernels und sollte *nicht*
+automatisch als `RobotOutput` an den User gespiegelt werden. Der
+`BaseKernel` publiziert deshalb bewusst keinen Default-Fehler-Output
+bei Phase-Fehlern: ob ein Fehler den User erreicht und in welcher
+Form (Recovery-Versuch, Skip, einzelne oder mehrere Outputs), ist
+*Kernel-Design-Entscheidung*. Spezialisierende Kernel publizieren
+selbst einen `RobotOutput(status="error", message=..., error=...)`,
+typischerweise innerhalb einer ueberschriebenen Phase oder eines
+expliziten Fehler-Pfads.
 
 ## Lebenszyklus und Bootsequenz
 
@@ -1005,7 +1073,7 @@ Bus liegt.
 | Persistenz | Ein Roboter-weiter Layer mit *einem* Konfig-Block `persistence:` und zwei Protokollen: `EventSink` (per-Stream Schreib-API) und `PersistenceProvider` (Channel-zu-Sink-Factory). Komponenten ziehen ihren Sink ueber den Channel-Namen, kennen das Backend nicht. Heute: `JsonlPersistenceProvider` als Builder-Helper. Sobald ein Backend mit geteilter Ressource dazukommt (SQLite-Pool, Supabase-Client), wird der Provider zur Komponente (`category=PERSISTENCE`, `BOOT_PRIORITY=3`) -- die Komponenten-Schnittstelle bleibt unveraendert. |
 | Governance-Platzierung | Hybrid. Harte Policy als Bus-Middleware, inhaltliche Filter als expliziter Teilnehmer per `ComponentRequest`/`ComponentResponse`. |
 | Run-Identitaet | Flache `run_id` pro Vorgang. Optionale `parent_run_id` fuer SOP-in-SOP, Skill-in-Skill und Approval-Continuation wird in der Implementierung entschieden, nicht jetzt im Bus-Vertrag fixiert. |
-| Fehler-Modellierung | `ComponentResponse` traegt Erfolg- oder Fehler-Variante. Katastrophale Vorfaelle erzeugen zusaetzlich eine `RobotAuditNote`. |
+| Fehler-Modellierung | Einheitlich ueber das `Failable`-Mixin (`status: ResultStatus`, `error: ErrorInfo \| None`) auf `RobotOutput`, `ComponentResponse` und `KernelPhase`. Strukturierter Fehler statt String: `ErrorInfo.code` aus dem kanonischen Vokabular (`timeout`, `unavailable`, `not_found`, `invalid_argument`, `unauthorized`, `internal`, `cancelled` plus namespaced Komponenten-Codes), `message` als Klartext, `details` als Wide-Event-Slot. Phase-Fehler mit `KernelPhase(status="error")` sind reine Telemetrie; ob sie als `RobotOutput(status="error")` zum User durchgeschlagen werden, entscheidet der Kernel selbst (kein Auto-Surfacing im `BaseKernel`). Katastrophale Vorfaelle erzeugen zusaetzlich eine `RobotAuditNote`. |
 | Versionsbindung | Beim Start eines SOP-Runs werden alle benoetigten Skills und Tools mit Version eingefroren. Hotfixes betreffen nur neue Runs. |
 | MCS-Reichweite | MCS ist Driver-Standard im Tool Execution Layer. MCS-Toolbeschreibungen koennen zusaetzlich als Quelle fuer Tool-Schemas im Actor Context dienen. SOPs und Skills bleiben eigenes Format. |
 | Actor-Modell | Ein Kernel, mehrere austauschbare Actors (`EchoActor` als Default, `LLMActor`/`MockActor`/`ProgramActor`/`HumanActor` zukuenftig) auf einem Actor-Topic. Modus-Wechsel pro `ComponentRequest` moeglich. Eigene `category=ACTOR` mit `BOOT_PRIORITY=8` -- Actor startet vor dem Kernel, sonst laeuft jeder erste Request ins Timeout. |
@@ -1039,6 +1107,31 @@ Bewusst noch nicht entschieden:
   (Hook-Pipeline, ACL-Engine oder Middleware-Chain), dessen genaue
   Form heute offen bleibt, weil noch keine konkrete Regel das
   Pflichtenheft schreibt.
+- **Programmierbares Bus-Routing.** Heute liegt die Routing-
+  Konvention statisch in den Topic-Konstanten: ein Kernel publiziert
+  auf `OUTPUT_TOPIC`, der Channel hoert dort. Fuer Szenarien wie
+  einen E-Mail-Sortierer, in dem ein Rule-based-Kernel "billige"
+  Faelle abfaengt und nur Unbekanntes an einen LLM-Kernel weiterreicht
+  (Selbstoptimierung, Tokenkostenreduktion), oder fuer einen
+  Tool-Execution-Layer, der entscheidet ob das Ergebnis zurueck in
+  den Kernel oder nach aussen geht, braucht es eine ausdrueckliche
+  Routing-Schicht. Heute ueber Konvention loesbar (Kernel publishes
+  auf `tool.in`, Tool-Layer entscheidet), aber sobald Routen sich
+  *zur Laufzeit* je nach Nachrichtentyp neu organisieren sollen,
+  hebt das die Bus-Convention nicht mehr und ein deklaratives
+  Routing-Layer (oder eine programmierbare Pipeline pro Topic) wird
+  zum eigenen Design-Item.
+- **Event-Korrelation per `parent_id` / Kausalkette.** Heute reicht
+  `correlation_id` fuer Request/Response, `run_id` fuer einen
+  Kernel-Lauf. Sobald ein einzelnes Bus-Event eine *Kausalkette* aus
+  mehreren Events erzeugt (z. B. Streaming-Output: erst
+  `RobotOutput(status="ok", message="Hier ist der Plan...")`, dann
+  spaeter `RobotOutput(status="error", message="...")` zum gleichen
+  logischen Turn), braucht es ein `parent_id`-Feld auf `RobotEvent`,
+  das auf den auslosenden Event zeigt. Heute nicht eingebaut, weil
+  das aktuelle Synchron-Modell (ein Input -> ein Output pro Run) den
+  Bedarf nicht hat; sobald LLM-Streaming oder verteilte Bus-Brueckung
+  einsteigt, wird das ein eigenes Iteration-Item.
 
 ## Verhaeltnis zum Ist-Code unter `_reference/`
 

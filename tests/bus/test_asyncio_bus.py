@@ -8,10 +8,11 @@ import pytest
 
 from src.bus import (
     AsyncioBus,
-    RobotInput,
-    RobotOutput,
     ComponentRequest,
     ComponentResponse,
+    ErrorInfo,
+    RobotInput,
+    RobotOutput,
 )
 
 
@@ -21,7 +22,7 @@ def _input(text: str, *, topic: str = "input.demo", run_id: str = "run-1") -> Ro
         principal="user-1",
         source="test",
         run_id=run_id,
-        text=text,
+        message=text,
     )
 
 
@@ -42,7 +43,7 @@ async def test_publish_delivers_to_matching_subscriber() -> None:
         await bus.stop()
 
     assert len(received) == 1
-    assert received[0].text == "hi"
+    assert received[0].message == "hi"
 
 
 async def test_publish_ignores_other_topics() -> None:
@@ -70,10 +71,10 @@ async def test_two_subscribers_each_get_their_own_copy() -> None:
     b: list[str] = []
 
     async def handler_a(event: RobotInput) -> None:  # type: ignore[arg-type]
-        a.append(event.text or "")
+        a.append(event.message or "")
 
     async def handler_b(event: RobotInput) -> None:  # type: ignore[arg-type]
-        b.append(event.text or "")
+        b.append(event.message or "")
 
     bus.subscribe("input.demo", handler_a)  # type: ignore[arg-type]
     bus.subscribe("input.demo", handler_b)  # type: ignore[arg-type]
@@ -96,10 +97,10 @@ async def test_per_subscriber_fifo_isolated_from_slow_consumer() -> None:
     slow_started: list[str] = []
 
     async def fast_handler(event: RobotInput) -> None:  # type: ignore[arg-type]
-        fast.append(event.text or "")
+        fast.append(event.message or "")
 
     async def slow_handler(event: RobotInput) -> None:  # type: ignore[arg-type]
-        slow_started.append(event.text or "")
+        slow_started.append(event.message or "")
         await asyncio.sleep(0.05)
 
     bus.subscribe("input.demo", fast_handler)  # type: ignore[arg-type]
@@ -130,7 +131,6 @@ async def test_request_response_correlation() -> None:
                 source="echo",
                 run_id=event.run_id,
                 correlation_id=event.correlation_id,
-                ok=True,
                 payload={"echo": event.payload},
             )
         )
@@ -152,7 +152,7 @@ async def test_request_response_correlation() -> None:
     finally:
         await bus.stop()
 
-    assert response.ok
+    assert response.status == "ok"
     assert response.correlation_id == "corr-1"
     assert response.payload == {"echo": {"text": "ping"}}
 
@@ -174,9 +174,12 @@ async def test_request_times_out_into_failed_response() -> None:
     finally:
         await bus.stop()
 
-    assert not response.ok
+    assert response.status == "error"
     assert response.correlation_id == "corr-x"
-    assert response.error is not None and "timeout" in response.error
+    assert isinstance(response.error, ErrorInfo)
+    assert response.error.code == "timeout"
+    assert "timeout" in response.error.message
+    assert response.error.details["action"] == "nobody.home"
 
 
 async def test_handler_exception_does_not_break_consumer() -> None:
@@ -184,9 +187,9 @@ async def test_handler_exception_does_not_break_consumer() -> None:
     seen: list[str] = []
 
     async def boom_then_continue(event: RobotInput) -> None:  # type: ignore[arg-type]
-        if event.text == "boom":
+        if event.message == "boom":
             raise RuntimeError("intentional")
-        seen.append(event.text or "")
+        seen.append(event.message or "")
 
     bus.subscribe("input.demo", boom_then_continue)  # type: ignore[arg-type]
 
@@ -206,7 +209,7 @@ async def test_unsubscribe_stops_delivery() -> None:
     received: list[str] = []
 
     async def handler(event: RobotInput) -> None:  # type: ignore[arg-type]
-        received.append(event.text or "")
+        received.append(event.message or "")
 
     sub = bus.subscribe("input.demo", handler)  # type: ignore[arg-type]
 
@@ -245,7 +248,7 @@ def _audit_event(text: str = "boot") -> RobotInput:
         principal="robot:test",
         source="robot.system",
         run_id="boot-aaaa",
-        text=text,
+        message=text,
     )
 
 
@@ -255,10 +258,10 @@ async def test_publish_broadcast_delivers_to_all_broadcast_subscribers() -> None
     seen_b: list[str] = []
 
     async def handler_a(event: RobotInput) -> None:  # type: ignore[arg-type]
-        seen_a.append(event.text or "")
+        seen_a.append(event.message or "")
 
     async def handler_b(event: RobotInput) -> None:  # type: ignore[arg-type]
-        seen_b.append(event.text or "")
+        seen_b.append(event.message or "")
 
     bus.subscribe_broadcast("robot.lifecycle", handler_a)  # type: ignore[arg-type]
     bus.subscribe_broadcast("robot.lifecycle", handler_b)  # type: ignore[arg-type]
@@ -281,10 +284,10 @@ async def test_publish_broadcast_does_not_reach_routable_subscribers() -> None:
     broadcast: list[str] = []
 
     async def routable_handler(event: RobotInput) -> None:  # type: ignore[arg-type]
-        routable.append(event.text or "")
+        routable.append(event.message or "")
 
     async def broadcast_handler(event: RobotInput) -> None:  # type: ignore[arg-type]
-        broadcast.append(event.text or "")
+        broadcast.append(event.message or "")
 
     bus.subscribe("robot.lifecycle", routable_handler)  # type: ignore[arg-type]
     bus.subscribe_broadcast("robot.lifecycle", broadcast_handler)  # type: ignore[arg-type]
@@ -307,10 +310,10 @@ async def test_retained_broadcast_delivered_to_late_subscriber() -> None:
     late: list[str] = []
 
     async def early_handler(event: RobotInput) -> None:  # type: ignore[arg-type]
-        early.append(event.text or "")
+        early.append(event.message or "")
 
     async def late_handler(event: RobotInput) -> None:  # type: ignore[arg-type]
-        late.append(event.text or "")
+        late.append(event.message or "")
 
     bus.subscribe_broadcast("robot.lifecycle", early_handler)  # type: ignore[arg-type]
 
@@ -350,7 +353,7 @@ async def test_broadcast_publish_without_retain_is_not_remembered() -> None:
     received: list[str] = []
 
     async def handler(event: RobotInput) -> None:  # type: ignore[arg-type]
-        received.append(event.text or "")
+        received.append(event.message or "")
 
     await bus.start()
     try:

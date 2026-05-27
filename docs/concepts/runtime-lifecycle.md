@@ -51,7 +51,7 @@ What happens:
 
 - `LLMPlanner.create_initial_plan` assembles the system prompt from firmware,
   memory, active SOPs, skills, notebooks, and a governance block.
-- The user turn comes from `event.text` plus `recent_interactions`.
+- The user turn comes from `event.message` plus `recent_interactions`.
 - The LLM is invoked (Anthropic or OpenAI) with streaming.
 - The response is parsed into a `Plan` of `PlanStep`s. Each step is either a
   `tool_call` (tool name + arguments) or a `finalize` (response text).

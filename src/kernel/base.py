@@ -10,7 +10,7 @@ What the base kernel does out of the box:
 1. **Observe** -- store the incoming :class:`RobotInput` on the run
    context. No history, no memory.
 2. **Plan** -- assemble a minimal, neutral *actor context* the actor
-   can consume: the input text, principal, run id and the raw input
+   can consume: the input message, principal, run id and the raw input
    payload. No history, no memory, no tool schemas. A
    ``ChatKernel`` is expected to override this and populate the
    context with a session history; an ``LLMKernel`` extends it with
@@ -21,19 +21,33 @@ What the base kernel does out of the box:
    kernel during construction; subprocess actors, HTTP-driven
    actors, scripted actors and human-in-the-loop actors all look
    the same from here.
-4. **Finalize** -- pull the response text from
-   ``actor_response.text`` into ``ctx.output_text`` and copy the
-   structured ``payload`` into ``ctx.output_payload``. Failure
-   responses (``ok=False``) propagate as :class:`RuntimeError`.
+4. **Finalize** -- pull the response message from
+   ``actor_response.message`` into ``ctx.output_message`` and copy
+   the structured ``payload`` into ``ctx.output_payload``. Failure
+   responses (``status="error"``) propagate as :class:`RuntimeError`
+   carrying the actor's :class:`ErrorInfo`.
 5. **Respond** -- publish a :class:`RobotOutput` on the configured
-   output topic with the reply text. A future tool-execution layer
-   would override this to publish a :class:`ComponentRequest` instead
-   when the actor returned a tool intent.
+   output topic with the reply message. A future tool-execution
+   layer would override this to publish a :class:`ComponentRequest`
+   instead when the actor returned a tool intent.
 
-Telemetry: on every phase entry (and on ``done`` / ``error``) the
+Telemetry: on every phase completion (and on the final ``done``) the
 kernel publishes a :class:`KernelPhase` event on
 :data:`KERNEL_PHASE_TOPIC`. Telemetry sinks pick these up alongside
-the rest of the bus traffic.
+the rest of the bus traffic. The event carries the inherited
+:class:`Failable` ``status`` plus, on failure, a structured
+:class:`ErrorInfo` -- queryable via ``rg '"status":"error"'`` across
+every kernel without per-kernel knowledge.
+
+User-facing error reporting: the base kernel does **not**
+automatically publish a :class:`RobotOutput` (``status="error"``) for
+the user when a run fails. Whether and how the failure surfaces to
+the outside world is a kernel-design decision; a recovery path may
+exist, the failure may be silently retried, or the kernel may publish
+multiple structured outputs. Specializing kernels that want a default
+"sorry, that did not work" message must publish a :class:`RobotOutput`
+themselves, typically inside an overridden phase method or a
+``__init__``-time decision tree.
 
 Audit: deliberately *not* used per phase -- audit is for curated
 notes about consequential actions (LLM calls, external requests),
@@ -61,6 +75,7 @@ from src.bus.messages import (
     INPUT_TOPIC,
     KERNEL_PHASE_TOPIC,
     OUTPUT_TOPIC,
+    ErrorInfo,
     KernelPhase,
     RobotEvent,
     RobotInput,
@@ -80,6 +95,29 @@ def _new_correlation_id() -> str:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _classify_exception(exc: BaseException) -> str:
+    """Map a Python exception to a canonical :attr:`ErrorInfo.code`.
+
+    Walks ``__cause__`` so wrappers like
+    ``raise RuntimeError("actor X timed out") from asyncio.TimeoutError(...)``
+    are still classified as ``"timeout"`` and not as a generic
+    internal error.
+
+    Conservative defaults; subclasses can override
+    :meth:`BaseKernel._classify_phase_error` if they need richer
+    mappings (e.g., distinguishing rate-limit errors from generic
+    LLM-side internals).
+    """
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, asyncio.TimeoutError):
+            return "timeout"
+        if isinstance(current, asyncio.CancelledError):
+            return "cancelled"
+        current = current.__cause__
+    return "internal"
 
 
 class BaseKernel(KernelPort):
@@ -169,32 +207,43 @@ class BaseKernel(KernelPort):
         purely about their own work and may write analytics into
         ``ctx.phase_details``; the loop emits one wide-event per
         phase using whatever the phase wrote there, then clears it.
+
+        Failure path: a phase that raises produces its own phase
+        event with ``status="error"`` (carried in
+        ``ctx.phase_error``) and the loop terminates the run with a
+        ``done`` event likewise carrying ``status="error"``. Two
+        events per failure: one says "this phase broke", the
+        trailing ``done`` says "the run as a whole ended in error".
         """
         ctx = RunContext(run_id=event.run_id or _new_correlation_id())
         ctx.input = event
 
+        run_failure: ErrorInfo | None = None
         try:
             await self._do_phase(ctx, RunPhase.OBSERVING, self.observe, event)
             await self._do_phase(ctx, RunPhase.PLANNING, self.plan)
             await self._do_phase(ctx, RunPhase.ACTING, self.act)
             await self._do_phase(ctx, RunPhase.FINALIZING, self.finalize)
             await self._do_phase(ctx, RunPhase.RESPONDING, self.respond)
-
-            ctx.phase = RunPhase.DONE
-            ctx.ended_at = _utcnow()
-            self._populate_done_details(ctx)
-            await self._emit_phase(ctx)
-        except Exception as exc:
-            ctx.phase = RunPhase.ERROR
-            ctx.error = f"{type(exc).__name__}: {exc}"
-            ctx.ended_at = _utcnow()
-            ctx.phase_details["error_type"] = type(exc).__name__
-            await self._emit_phase(ctx)
+        except Exception:
+            # ``_do_phase`` already emitted the failing-phase event
+            # and stashed the :class:`ErrorInfo` on the sticky
+            # ``run_error`` slot before clearing per-phase scratch.
+            run_failure = ctx.run_error
             logger.exception(
-                "%s: run %s failed",
-                type(self).__name__,
-                ctx.run_id,
+                "%s: run %s failed", type(self).__name__, ctx.run_id
             )
+
+        ctx.phase = RunPhase.DONE
+        ctx.ended_at = _utcnow()
+        if run_failure is not None:
+            ctx.phase_status = "error"
+            ctx.phase_error = run_failure
+        else:
+            ctx.phase_status = "ok"
+            ctx.phase_error = None
+        self._populate_done_details(ctx, failed=run_failure is not None)
+        await self._emit_phase(ctx)
 
     async def _do_phase(
         self,
@@ -211,33 +260,88 @@ class BaseKernel(KernelPort):
         into ``ctx.phase_details`` while it runs; the loop adds
         ``phase_duration_ms`` automatically and emits a
         :class:`KernelPhase` event after the work returns. Phase
-        details are cleared between phases so each event reflects
-        exactly its own phase.
+        details / status / error / message are cleared between
+        phases so each event reflects exactly its own phase.
 
         Phase-event semantics: post-completion. A ``KernelPhase``
         event is the *report* of a finished phase, not an entry
         marker -- analogous to an OpenTelemetry span emitted at
-        completion. This is intentional: the wide-event analytics
-        (``phase_duration_ms``, ``actor_duration_ms``,
-        ``output_text_len``, ...) only exist *after* the work ran.
-        Practical consequence to remember: in a run where ``respond``
+        completion. Practical consequence: in a run where ``respond``
         publishes a :class:`RobotOutput`, the output appears on the
         bus *before* the corresponding ``responding`` phase event
         that documents it. The phase event is the closing report,
-        not the announcement. A hung phase produces no event for
-        itself; the previous phase's event is the last one in the
-        log, and the absence of the next is the hang signal.
+        not the announcement.
+
+        On exception: the phase event is still emitted, with
+        ``status="error"`` and the structured :class:`ErrorInfo`
+        attached, before the exception is re-raised. This keeps the
+        wide-event log honest -- every started phase produces a
+        single event that says how it ended.
         """
         ctx.phase = phase
         ctx.phase_started_at = _utcnow()
-        await work(ctx, *args)
+        try:
+            await work(ctx, *args)
+        except Exception as exc:
+            self._record_phase_failure(ctx, exc)
+            await self._emit_phase(ctx)
+            # Promote phase_error to the sticky run-level slot so
+            # the trailing ``done`` event in ``_run`` can mirror it,
+            # then clear the per-phase scratch.
+            ctx.run_error = ctx.phase_error
+            self._reset_phase_slots(ctx)
+            raise
         if ctx.phase_started_at is not None:
             duration_ms = (
                 _utcnow() - ctx.phase_started_at
             ).total_seconds() * 1000.0
             ctx.phase_details["phase_duration_ms"] = round(duration_ms, 3)
         await self._emit_phase(ctx)
+        self._reset_phase_slots(ctx)
+
+    def _record_phase_failure(
+        self, ctx: "RunContext", exc: BaseException
+    ) -> None:
+        """Populate ``ctx`` with status / error info for a failed phase.
+
+        Captures the duration so the phase event still reports how
+        long the failing work ran, classifies the exception into a
+        canonical error code, and stashes a structured
+        :class:`ErrorInfo` on ``ctx.phase_error``. Subsequent
+        ``_emit_phase`` reads these slots.
+        """
+        if ctx.phase_started_at is not None:
+            duration_ms = (
+                _utcnow() - ctx.phase_started_at
+            ).total_seconds() * 1000.0
+            ctx.phase_details["phase_duration_ms"] = round(duration_ms, 3)
+        code = self._classify_phase_error(exc)
+        ctx.phase_status = "error"
+        ctx.phase_error = ErrorInfo(
+            code=code,
+            message=f"{type(exc).__name__}: {exc}",
+            details={
+                "failed_phase": ctx.phase.value,
+                "exception_type": type(exc).__name__,
+            },
+        )
+
+    def _classify_phase_error(self, exc: BaseException) -> str:
+        """Hook for subclasses to map exceptions to canonical codes.
+
+        Default delegates to :func:`_classify_exception`. Override to
+        recognize provider-specific failure modes (rate limits,
+        moderation rejections, ...) and emit them as namespaced
+        codes (``actor.openai.rate_limited``, ...).
+        """
+        return _classify_exception(exc)
+
+    @staticmethod
+    def _reset_phase_slots(ctx: "RunContext") -> None:
         ctx.phase_details = {}
+        ctx.phase_message = ""
+        ctx.phase_status = "ok"
+        ctx.phase_error = None
 
     # ---- phase methods ----------------------------------------------------
 
@@ -253,13 +357,13 @@ class BaseKernel(KernelPort):
         del event  # already on ctx.input
         assert ctx.input is not None
         ctx.phase_details["input_event_id"] = ctx.input.event_id
-        ctx.phase_details["input_text_len"] = len(ctx.input.text or "")
+        ctx.phase_details["input_message_len"] = len(ctx.input.message or "")
         ctx.phase_details["input_payload_keys"] = sorted(ctx.input.payload)
 
     async def plan(self, ctx: RunContext) -> None:
         """Build the neutral actor context the actor will consume.
 
-        Default: a minimal envelope with the input text, principal,
+        Default: a minimal envelope with the input message, principal,
         run id and the raw payload. No history, no memory, no tool
         schemas -- those are the responsibility of specializing
         kernels (a ``ChatKernel`` adds session history, an
@@ -272,7 +376,7 @@ class BaseKernel(KernelPort):
         assert ctx.input is not None  # set by _run
         ctx.actor_context = {
             "input": {
-                "text": ctx.input.text,
+                "message": ctx.input.message,
                 "principal": ctx.input.principal,
                 "run_id": ctx.input.run_id,
                 "payload": dict(ctx.input.payload),
@@ -293,15 +397,16 @@ class BaseKernel(KernelPort):
 
         - ``actor_name`` -- the actor's ``component_name``.
         - ``actor_duration_ms`` -- wall-clock latency of the call.
-        - ``actor_ok`` -- ``True`` for a successful response.
-        - ``actor_error_type`` -- present only on failure.
+        - ``actor_status`` -- ``"ok"`` / ``"error"`` from the
+          actor response.
         - any keys the actor placed into ``response.metadata`` are
           merged in too (LLM actors are expected to surface
           ``model``, ``tokens_in``, ``tokens_out``, ``cost_usd``).
 
-        Failure responses (``ok=False``) and timeouts surface as
-        :class:`RuntimeError` so the loop's error path emits an
-        ``error`` phase event with a useful label.
+        Failure responses (``status="error"``) and timeouts surface
+        as :class:`RuntimeError` so the loop's error path emits an
+        ``acting`` phase event with ``status="error"`` and a
+        canonical :class:`ErrorInfo`.
         """
         assert ctx.input is not None
         actor_name = getattr(self._actor, "component_name", type(self._actor).__name__)
@@ -313,10 +418,9 @@ class BaseKernel(KernelPort):
                 timeout=self._actor_timeout,
             )
         except asyncio.TimeoutError as exc:
-            ctx.phase_details["actor_ok"] = False
-            ctx.phase_details["actor_error_type"] = "TimeoutError"
             actor_ms = (_utcnow() - started).total_seconds() * 1000.0
             ctx.phase_details["actor_duration_ms"] = round(actor_ms, 3)
+            ctx.phase_details["actor_status"] = "error"
             ctx.total_actor_ms += actor_ms
             raise RuntimeError(
                 f"actor {actor_name} timed out after "
@@ -324,23 +428,23 @@ class BaseKernel(KernelPort):
             ) from exc
         actor_ms = (_utcnow() - started).total_seconds() * 1000.0
         ctx.phase_details["actor_duration_ms"] = round(actor_ms, 3)
-        ctx.phase_details["actor_ok"] = response.ok
+        ctx.phase_details["actor_status"] = response.status
         if response.metadata:
             ctx.phase_details.update(dict(response.metadata))
         ctx.actor_response = response
         ctx.total_actor_ms += actor_ms
-        if not response.ok:
-            ctx.phase_details["actor_error_type"] = "ActorError"
+        if response.status == "error":
+            err = response.error
+            label = err.message if err is not None else "<no message>"
             raise RuntimeError(
-                f"actor {actor_name} returned an error: "
-                f"{response.error or '<no message>'}"
+                f"actor {actor_name} returned an error: {label}"
             )
 
     async def finalize(self, ctx: RunContext) -> None:
         """Translate the actor response into output fields.
 
-        Default: pull ``response.text`` into ``ctx.output_text`` and
-        copy ``response.payload`` into ``ctx.output_payload``. A
+        Default: pull ``response.message`` into ``ctx.output_message``
+        and copy ``response.payload`` into ``ctx.output_payload``. A
         specializing kernel would inspect the payload here for tool
         intents and route accordingly; the wide-event ``path`` field
         documents which branch was taken (``"output"`` /
@@ -349,10 +453,10 @@ class BaseKernel(KernelPort):
         """
         if ctx.actor_response is None:
             raise RuntimeError("finalize called without an actor response")
-        ctx.output_text = ctx.actor_response.text
+        ctx.output_message = ctx.actor_response.message
         ctx.output_payload = dict(ctx.actor_response.payload)
         ctx.phase_details["path"] = (
-            "output" if (ctx.output_text or ctx.output_payload) else "empty"
+            "output" if (ctx.output_message or ctx.output_payload) else "empty"
         )
         ctx.phase_details["is_tool_call"] = False
 
@@ -360,9 +464,11 @@ class BaseKernel(KernelPort):
         """Publish whatever the run produced onto the bus.
 
         Default: a single :class:`RobotOutput` on
-        ``output_topic``. Specializing kernels can publish
-        :class:`ComponentRequest` instead (or in addition) when the
-        run produced a tool intent.
+        ``output_topic`` with ``status="ok"``. Specializing kernels
+        can publish :class:`ComponentRequest` instead (or in
+        addition) when the run produced a tool intent, or set
+        ``status="error"`` on the :class:`RobotOutput` if they want
+        the channel to render the message as a failure.
         """
         bus = self._require_bus()
         assert ctx.input is not None
@@ -371,12 +477,12 @@ class BaseKernel(KernelPort):
             principal=ctx.input.principal,
             source=f"kernel.{self.component_name}",
             run_id=ctx.run_id,
-            text=ctx.output_text,
+            message=ctx.output_message,
             payload=dict(ctx.output_payload),
         )
         await bus.publish(output)
         ctx.phase_details["output_event_id"] = output.event_id
-        ctx.phase_details["output_text_len"] = len(ctx.output_text or "")
+        ctx.phase_details["output_message_len"] = len(ctx.output_message or "")
 
     # ---- helpers ----------------------------------------------------------
 
@@ -387,7 +493,9 @@ class BaseKernel(KernelPort):
             )
         return self._bus
 
-    def _populate_done_details(self, ctx: RunContext) -> None:
+    def _populate_done_details(
+        self, ctx: RunContext, *, failed: bool
+    ) -> None:
         """Aggregate the run's wide-event fields onto the ``done`` phase.
 
         The ``done`` event is the canonical wide-event row for the
@@ -400,9 +508,12 @@ class BaseKernel(KernelPort):
             if ctx.ended_at is not None
             else 0.0
         )
-        outcome = "ok"
-        if ctx.output_text is None and not ctx.output_payload:
+        if failed:
+            outcome = "error"
+        elif ctx.output_message is None and not ctx.output_payload:
             outcome = "empty"
+        else:
+            outcome = "ok"
         ctx.phase_details["run_duration_ms"] = round(run_ms, 3)
         ctx.phase_details["iterations"] = ctx.iteration + 1
         ctx.phase_details["total_actor_ms"] = round(ctx.total_actor_ms, 3)
@@ -414,9 +525,9 @@ class BaseKernel(KernelPort):
         Best-effort: failures to publish phase telemetry never abort
         the run -- they only log so the operator notices.
 
-        ``ctx.phase_details`` is consumed as the event's wide-event
-        ``details`` dict. The loop clears it between phases so each
-        event reflects exactly the phase that just finished.
+        Reads ``ctx.phase_status`` / ``ctx.phase_error`` /
+        ``ctx.phase_message`` / ``ctx.phase_details`` for the
+        Failable-and-Wide-Event payload.
         """
         bus = self._bus
         if bus is None:
@@ -434,7 +545,9 @@ class BaseKernel(KernelPort):
                     phase=ctx.phase.value,
                     iteration=ctx.iteration,
                     kernel=self.component_name,
-                    error=ctx.error,
+                    status=ctx.phase_status,  # type: ignore[arg-type]
+                    error=ctx.phase_error,
+                    message=ctx.phase_message,
                     details=dict(ctx.phase_details),
                 )
             )

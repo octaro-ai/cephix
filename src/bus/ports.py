@@ -144,6 +144,7 @@ class BusPort(Protocol):
         """Send a ``ComponentRequest`` and await the matching ``ComponentResponse``.
 
         ``timeout`` is in seconds; ``None`` waits indefinitely. On
-        timeout, a ``ComponentResponse`` with ``ok=False`` and a timeout
-        error message is returned instead of raising.
+        timeout, a ``ComponentResponse`` with ``status="error"`` and an
+        :class:`ErrorInfo` (``code="timeout"``) is returned instead of
+        raising.
         """

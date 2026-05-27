@@ -87,16 +87,36 @@ async def _print_loop(
                         )
                     response_done.set()
                 elif kind == "output":
-                    text = data.get("text", "") or ""
+                    # Accept ``message`` (canonical) and ``text``
+                    # (legacy) so the client tolerates older servers.
+                    text = data.get("message")
+                    if not isinstance(text, str):
+                        text = data.get("text", "") or ""
                     source = data.get("source") or ""
-                    title = f"[green]{identity.label}[/green]"
-                    subtitle = f"[dim]{source}[/dim]" if source else None
+                    status = data.get("status", "ok")
+                    error_block = data.get("error") if isinstance(data.get("error"), dict) else None
+                    is_error = status == "error" or error_block is not None
+                    border_style = "red" if is_error else "green"
+                    title_color = "red" if is_error else "green"
+                    title = f"[{title_color}]{identity.label}[/{title_color}]"
+                    subtitle_parts: list[str] = []
+                    if source:
+                        subtitle_parts.append(source)
+                    if error_block:
+                        code = error_block.get("code")
+                        if isinstance(code, str) and code:
+                            subtitle_parts.append(f"error:{code}")
+                    subtitle = (
+                        f"[dim]{' · '.join(subtitle_parts)}[/dim]"
+                        if subtitle_parts
+                        else None
+                    )
                     console.print(
                         Panel(
                             text,
                             title=title,
                             subtitle=subtitle,
-                            border_style="green",
+                            border_style=border_style,
                             padding=(0, 1),
                         )
                     )
@@ -141,7 +161,7 @@ async def _input_loop(
 
         response_done.clear()
         try:
-            await ws.send_json({"type": "input", "text": text})
+            await ws.send_json({"type": "input", "message": text})
         except (aiohttp.ClientConnectionError, ConnectionResetError) as exc:
             console.print(f"[red]connection lost:[/] {exc}")
             break

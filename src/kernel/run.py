@@ -58,9 +58,17 @@ class RunPhase(str, Enum):
     """States of a single kernel run.
 
     The order matches the canonical pipeline; transitions only ever
-    move forward, except into :attr:`ERROR` from any non-terminal
-    phase. ``IDLE`` and ``DONE`` bracket the run; the four phases in
-    between are the work.
+    move forward. ``IDLE`` and ``DONE`` bracket the run; the five
+    phases in between are the work.
+
+    Note: there is no ``ERROR`` state. Failure is orthogonal to the
+    run-state-machine position and lives on
+    :attr:`Failable.status` of the emitted :class:`KernelPhase`
+    event. A failing phase emits its own event with
+    ``status="error"`` and the run terminates with a ``done`` event,
+    likewise carrying ``status="error"``. ``phase`` answers "where
+    are we?", ``status`` answers "how is it going?" -- two
+    independent axes.
     """
 
     IDLE = "idle"
@@ -70,7 +78,6 @@ class RunPhase(str, Enum):
     FINALIZING = "finalizing"
     RESPONDING = "responding"
     DONE = "done"
-    ERROR = "error"
 
 
 def _utcnow() -> datetime:
@@ -112,7 +119,7 @@ class RunContext:
     actor_context: dict[str, Any] = field(default_factory=dict)
     actor_response: ActorResponse | None = None
 
-    output_text: str | None = None
+    output_message: str | None = None
     output_payload: dict[str, Any] = field(default_factory=dict)
 
     started_at: datetime = field(default_factory=_utcnow)
@@ -120,6 +127,20 @@ class RunContext:
     phase_started_at: datetime | None = None
     total_actor_ms: float = 0.0
 
-    error: str = ""
+    # Per-phase status / error slot. The base kernel populates these
+    # in ``_do_phase`` when a phase raises, so ``_emit_phase`` can
+    # construct a Failable :class:`KernelPhase` event with the right
+    # status. Cleared by ``_do_phase`` between phases (along with
+    # ``phase_details``) so each event reflects exactly its phase.
+    phase_status: str = "ok"
+    phase_error: Any = None  # ErrorInfo | None; Any to avoid import cycle
+
+    # Sticky run-level failure slot. ``_do_phase`` promotes
+    # ``phase_error`` to this slot before resetting the per-phase
+    # scratch so ``_run`` can construct the trailing ``done`` event
+    # with the same :class:`ErrorInfo`. Survives until the run ends.
+    run_error: Any = None  # ErrorInfo | None
+
     phase_details: dict[str, Any] = field(default_factory=dict)
+    phase_message: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)

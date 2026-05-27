@@ -73,7 +73,8 @@ class ActorPort(RobotComponent):
         Implementations must not raise except on programmer errors:
         recoverable failures (network, timeout, refusal) are
         signalled by returning :class:`ActorResponse` with
-        ``ok=False`` and a populated ``error`` field. The kernel
-        turns that into an ``error`` phase event.
+        ``status="error"`` and a populated :class:`ErrorInfo`. The
+        kernel surfaces that as a phase event with ``status="error"``
+        carrying the same :class:`ErrorInfo`.
         """
         raise NotImplementedError(f"{type(self).__name__}.run() not implemented")

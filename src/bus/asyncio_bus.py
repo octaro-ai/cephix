@@ -24,9 +24,10 @@ import logging
 from dataclasses import dataclass, field
 
 from src.bus.messages import (
-    RobotEvent,
     ComponentRequest,
     ComponentResponse,
+    ErrorInfo,
+    RobotEvent,
     _new_event_id,
     _now_iso,
 )
@@ -230,8 +231,15 @@ class AsyncioBus(BusPort, RobotComponent):
                 run_id=request.run_id,
                 correlation_id=correlation_id,
                 timestamp=_now_iso(),
-                ok=False,
-                error=f"timeout after {timeout}s for action {request.action!r}",
+                status="error",
+                error=ErrorInfo(
+                    code="timeout",
+                    message=(
+                        f"timeout after {timeout}s for action "
+                        f"{request.action!r}"
+                    ),
+                    details={"timeout_s": timeout, "action": request.action},
+                ),
             )
         except asyncio.CancelledError:
             self._pending.pop(correlation_id, None)

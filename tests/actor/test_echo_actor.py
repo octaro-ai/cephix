@@ -12,6 +12,7 @@ import pytest
 
 from src.actor.echo import EchoActor
 from src.actor.types import ActorResponse
+from src.bus.messages import ErrorInfo
 from src.components import ComponentCategory, RobotComponent
 
 
@@ -20,38 +21,40 @@ from src.components import ComponentCategory, RobotComponent
 # ---------------------------------------------------------------------------
 
 
-async def test_echo_actor_responds_with_prefixed_text_from_flat_context() -> None:
+async def test_echo_actor_responds_with_prefixed_message_from_flat_context() -> None:
     actor = EchoActor()
-    response = await actor.run({"text": "hello"})
+    response = await actor.run({"message": "hello"})
 
     assert isinstance(response, ActorResponse)
-    assert response.ok is True
-    assert response.text == "echo: hello"
+    assert response.status == "ok"
+    assert response.message == "echo: hello"
     assert response.error is None
 
 
-async def test_echo_actor_reads_text_from_nested_input_context() -> None:
-    """Mirrors the BaseKernel actor_context shape (``ctx['input']['text']``)."""
+async def test_echo_actor_reads_message_from_nested_input_context() -> None:
+    """Mirrors the BaseKernel actor_context shape (``ctx['input']['message']``)."""
     actor = EchoActor()
-    response = await actor.run({"input": {"text": "from-kernel", "principal": "user"}})
+    response = await actor.run(
+        {"input": {"message": "from-kernel", "principal": "user"}}
+    )
 
-    assert response.text == "echo: from-kernel"
-    assert response.ok is True
+    assert response.message == "echo: from-kernel"
+    assert response.status == "ok"
 
 
 async def test_echo_actor_returns_empty_echo_for_malformed_context() -> None:
     actor = EchoActor()
     response = await actor.run({"random": "garbage"})
 
-    assert response.text == "echo: "
-    assert response.ok is True
+    assert response.message == "echo: "
+    assert response.status == "ok"
 
 
 async def test_echo_actor_honours_custom_prefix() -> None:
     actor = EchoActor(prefix="yo: ")
-    response = await actor.run({"text": "ping"})
+    response = await actor.run({"message": "ping"})
 
-    assert response.text == "yo: ping"
+    assert response.message == "yo: ping"
 
 
 # ---------------------------------------------------------------------------
@@ -80,8 +83,8 @@ async def test_echo_actor_start_and_stop_are_noops() -> None:
     actor = EchoActor()
     await actor.start()
     await actor.stop()
-    response = await actor.run({"text": "still works"})
-    assert response.text == "echo: still works"
+    response = await actor.run({"message": "still works"})
+    assert response.message == "echo: still works"
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +92,22 @@ async def test_echo_actor_start_and_stop_are_noops() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_actor_response_failure_requires_error_label() -> None:
-    with pytest.raises(ValueError, match="error"):
-        ActorResponse(ok=False)
+def test_actor_response_error_status_requires_error_info() -> None:
+    """Failable invariant: status='error' must come with an ErrorInfo."""
+    with pytest.raises(ValueError, match="status='error' requires"):
+        ActorResponse(status="error")
+
+
+def test_actor_response_ok_status_must_not_carry_error_info() -> None:
+    with pytest.raises(ValueError, match="status='ok' must not carry"):
+        ActorResponse(status="ok", error=ErrorInfo(code="boom"))
+
+
+def test_actor_response_with_error_info_is_error_status() -> None:
+    response = ActorResponse(
+        status="error",
+        error=ErrorInfo(code="timeout", message="too slow"),
+    )
+    assert response.status == "error"
+    assert response.error is not None
+    assert response.error.code == "timeout"

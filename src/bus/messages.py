@@ -39,6 +39,21 @@ The current set of subtypes covers the bus contract from
 ``RobotTrigger`` is intentionally added later, once a concrete use
 case requires it.
 
+Result vocabulary
+-----------------
+
+Every event that can carry a success-or-failure outcome (``RobotOutput``,
+``ComponentResponse``, ``KernelPhase``) inherits from :class:`Failable`.
+That mixin pins the contract: a ``status`` discriminator
+(:data:`ResultStatus`) plus an optional :class:`ErrorInfo`. The
+invariant ``status == "ok"`` iff ``error is None`` is enforced in
+:meth:`Failable.__post_init__`.
+
+This unifies error-handling vocabulary across the bus: one place
+to add a new canonical error code, one place to adjust the
+invariant, one query (``"status":"error"``) to find every failure
+in the wide-event log regardless of which event class produced it.
+
 Topic constants
 ---------------
 
@@ -90,6 +105,101 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+ResultStatus = Literal["ok", "error"]
+"""Discriminator on every :class:`Failable` event.
+
+Two values, two cases:
+
+- ``"ok"`` -- the event reports a successful outcome. The companion
+  :attr:`Failable.error` field is ``None``.
+- ``"error"`` -- the event reports a failure. :attr:`Failable.error`
+  carries the structured :class:`ErrorInfo`.
+
+Stays a string (not an int / not an :class:`enum.Enum`) on purpose:
+we are in dynamic Python, the JSONL telemetry is human-read first,
+and ``"status":"error"`` filters cleanly with ``rg`` / ``jq`` /
+``grep``. HTTP-style numeric status codes carry web-protocol baggage
+that does not fit our domain; granular categorisation lives on
+:attr:`ErrorInfo.code` instead.
+"""
+
+
+@dataclass(frozen=True)
+class ErrorInfo:
+    """Structured failure descriptor carried by :class:`Failable` events.
+
+    Modelled on gRPC's ``google.rpc.Status`` and HTTP's RFC 9457
+    Problem Details, but trimmed to what an in-process Python bus
+    actually needs: a machine-readable code, a short human-readable
+    message, and a free-form details dict for structured context.
+
+    Fields:
+
+    - ``code`` -- short, machine-readable error label. Should be one
+      of the canonical platform codes documented in
+      ``docs/architecture/robot-os-target.md`` ("Error vocabulary"):
+      ``timeout``, ``unavailable``, ``not_found``, ``invalid_argument``,
+      ``unauthorized``, ``internal``, ``cancelled``. Components may
+      add namespaced codes (``tool.mail.quota_exceeded``,
+      ``actor.openai.rate_limited``, ...) following the topic
+      convention.
+    - ``message`` -- short, human-readable description of *this*
+      occurrence. Free text; not a category. Useful for log readers
+      and end-user messages, not for filtering.
+    - ``details`` -- arbitrary JSONable structured context. The
+      Wide-Event-log slot, same role as :attr:`KernelPhase.details`
+      and :attr:`RobotAuditNote.details`. Put attempted IDs, retry
+      counts, partial responses, anything queryable here. *Not* a
+      stack-trace dumping ground.
+
+    Following the wide-event design used elsewhere on the bus:
+    structured fields beat free-form blobs. The same query
+    (``"code":"timeout"``) finds every timeout across every event
+    class that ever rode the bus.
+    """
+
+    code: str
+    message: str = ""
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.code:
+            raise ValueError("ErrorInfo requires a non-empty code")
+
+
+@dataclass(frozen=True, kw_only=True)
+class Failable:
+    """Mixin contract for events that report a success-or-failure outcome.
+
+    Adds two fields to whichever class mixes it in: a
+    :data:`ResultStatus` discriminator and an optional
+    :class:`ErrorInfo`. Enforces a hard invariant in
+    :meth:`__post_init__`: ``status == "ok"`` iff ``error is None``.
+
+    Subclasses that override ``__post_init__`` *must* call
+    ``super().__post_init__()`` so the invariant runs.
+
+    Composes via cooperative multiple inheritance with
+    :class:`RobotEvent`. Both are
+    ``@dataclass(frozen=True, kw_only=True)`` so the field-ordering
+    pitfalls of dataclass inheritance do not apply -- every field is
+    keyword-only.
+    """
+
+    status: ResultStatus = "ok"
+    error: ErrorInfo | None = None
+
+    def __post_init__(self) -> None:
+        if self.status == "ok" and self.error is not None:
+            raise ValueError(
+                f"{type(self).__name__}: status='ok' must not carry an ErrorInfo"
+            )
+        if self.status == "error" and self.error is None:
+            raise ValueError(
+                f"{type(self).__name__}: status='error' requires an ErrorInfo"
+            )
+
+
 @dataclass(frozen=True, kw_only=True)
 class RobotEvent:
     """Base class for every bus message.
@@ -114,24 +224,37 @@ class RobotInput(RobotEvent):
 
     Published by a channel when the outside world hands something to the
     bus. Fire-and-forget: the sender does not wait for a specific reply.
+
+    ``message`` is the conversational payload (text the user sent);
+    ``payload`` is the structured side-channel for channel-specific
+    metadata (session id, attachments, ...).
     """
 
-    text: str | None = None
+    message: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, kw_only=True)
-class RobotOutput(RobotEvent):
+class RobotOutput(Failable, RobotEvent):
     """Message destined for the outside world.
 
     Published by the kernel or a privileged component and delivered to
     the outside world by a channel. Fire-and-forget; a ``RobotOutput``
     can also be unsolicited and is not necessarily a reply to a previous
     input.
+
+    Carries :class:`Failable`, so the channel knows whether to render
+    this as a normal output or as an error notification (sysout vs.
+    syserr semantics). On failure, ``status="error"`` and ``error``
+    carries the structured :class:`ErrorInfo`; ``message`` may still
+    contain a user-facing text the kernel chose to surface.
     """
 
-    text: str | None = None
+    message: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -153,23 +276,24 @@ class ComponentRequest(RobotEvent):
 
 
 @dataclass(frozen=True, kw_only=True)
-class ComponentResponse(RobotEvent):
+class ComponentResponse(Failable, RobotEvent):
     """Reply to a ``ComponentRequest``.
 
     ``correlation_id`` must exactly match the originating request. The
     bus uses this field to route the response back to the original
-    sender. ``ok`` distinguishes success from failure replies.
+    sender.
+
+    Inherits :class:`Failable` for the success/failure outcome:
+    ``status="ok"`` plus the result on ``payload``, or
+    ``status="error"`` plus a structured :class:`ErrorInfo`.
     """
 
-    ok: bool = True
     payload: dict[str, Any] = field(default_factory=dict)
-    error: str | None = None
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if not self.correlation_id:
             raise ValueError("ComponentResponse requires a correlation_id")
-        if not self.ok and not self.error:
-            raise ValueError("Failed ComponentResponse must carry an error message")
 
 
 @dataclass(frozen=True)
@@ -246,9 +370,9 @@ class RobotLifecycle(RobotEvent):
     justification given by some external party. ``message`` is
     short, human-readable text the robot supplies a default for and
     that operators can override (e.g. via ``Robot.stop(message=...)``).
-    Following :class:`KernelPhase.error`, this is a label, not a
-    free-form payload -- detailed context belongs in a
-    :class:`RobotAuditNote`.
+    Following the same convention as :attr:`KernelPhase.message`,
+    this is a short label, not a free-form payload -- detailed
+    context belongs in a :class:`RobotAuditNote`.
     """
 
     phase: Literal["boot", "ready", "shutdown"] = "boot"
@@ -316,13 +440,32 @@ class RobotAuditNote(RobotEvent):
 
 
 @dataclass(frozen=True, kw_only=True)
-class KernelPhase(RobotEvent):
+class KernelPhase(Failable, RobotEvent):
     """Phase transition emitted by a kernel as it processes one input.
 
     Every kernel run walks a deterministic state machine
     (``observing`` -> ``planning`` -> ``acting`` -> ``finalizing`` ->
     ``responding`` -> ``done``). On each transition the kernel
     publishes one of these events on :data:`KERNEL_PHASE_TOPIC`.
+
+    Two orthogonal axes
+    -------------------
+
+    A :class:`KernelPhase` event answers two independent questions:
+
+    - **Where are we?** -- the :attr:`phase` field (one of the six
+      run-state values). Pure run-state-machine position; never
+      includes ``"error"``.
+    - **How is it going?** -- the inherited :data:`Failable.status`
+      field plus :attr:`Failable.error`. Same vocabulary every other
+      :class:`Failable` event uses; ``rg '"status":"error"'`` finds
+      every failed phase across every kernel.
+
+    This split intentionally undoes the earlier overloading of
+    ``phase="error"``: an actor failing during the ``acting`` phase
+    used to clobber the phase to ``"error"``, mixing "where in the
+    run" with "did it work". They are different questions and now
+    travel on different fields.
 
     Wide-event design
     -----------------
@@ -337,9 +480,10 @@ class KernelPhase(RobotEvent):
     - ``acting`` events carry actor name, actor latency, success
       flag, and -- for LLM actors -- model name, token counts, cost.
     - ``done`` events aggregate the whole run: total duration, total
-      iterations, total actor time, outcome (``"ok"`` / ``"error"`` /
-      ``"empty"``).
-    - ``error`` events name the failed phase and a short error type.
+      iterations, total actor time, outcome.
+    - failed phases carry ``status="error"`` plus a structured
+      :class:`ErrorInfo` with a canonical ``code`` and a
+      ``failed_phase`` entry in ``details``.
 
     The ``done`` event is the canonical wide-event row for an entire
     run; phase-specific events are the span-level breakdown. The
@@ -365,16 +509,25 @@ class KernelPhase(RobotEvent):
 
     Fields:
 
-    - ``phase`` -- the phase being entered (mirrors :class:`RunPhase`).
+    - ``phase`` -- the phase being reported (mirrors :class:`RunPhase`,
+      minus the legacy ``error`` value).
     - ``iteration`` -- 0-based iteration counter; increments only when
       tool round-trips reopen the loop.
     - ``kernel`` -- ``component_name`` of the emitting kernel so
       observers can attribute traffic with multiple kernels on a bus.
-    - ``error`` -- non-empty only when ``phase == "error"``; carries
-      a short, human-readable error label. Detailed error context
-      goes into ``details``.
+    - ``message`` -- short, status-agnostic note about *this* phase
+      (``"used cached actor response"``, ``"thinking..."``, ``""``).
+      Always allowed; not tied to ``status``. Channels may forward
+      these as live progress indicators.
     - ``details`` -- arbitrary JSONable analytics fields. Empty by
       default; the kernel decides what to put in.
+
+    Plus the inherited :class:`Failable` fields: ``status`` and
+    ``error``. On failure the kernel populates ``error`` with an
+    :class:`ErrorInfo` whose ``details["failed_phase"]`` names the
+    phase that broke -- redundant with ``phase`` on the failing-phase
+    event, but useful on the trailing ``done`` event whose ``phase``
+    is by definition ``"done"``.
 
     Distinct from :class:`RobotAuditNote`: phase events are
     fine-grained operational telemetry that the kernel emits for
@@ -385,10 +538,11 @@ class KernelPhase(RobotEvent):
     phase: str = ""
     iteration: int = 0
     kernel: str = ""
-    error: str = ""
+    message: str = ""
     details: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if not self.phase:
             raise ValueError("KernelPhase requires a non-empty phase")
         if not self.kernel:

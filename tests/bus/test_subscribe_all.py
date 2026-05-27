@@ -24,7 +24,7 @@ def _input(text: str, *, topic: str = "input.demo") -> RobotInput:
         principal="user-1",
         source="test",
         run_id="run-1",
-        text=text,
+        message=text,
     )
 
 
@@ -34,7 +34,7 @@ def _output(text: str, *, topic: str = "output.demo") -> RobotOutput:
         principal="user-1",
         source="test",
         run_id="run-1",
-        text=text,
+        message=text,
     )
 
 
@@ -44,7 +44,7 @@ async def test_subscribe_all_receives_every_publish() -> None:
     seen: list[tuple[str, str]] = []
 
     async def handler(event: RobotEvent) -> None:
-        text = getattr(event, "text", "")
+        text = getattr(event, "message", "")
         seen.append((event.topic, text or ""))
 
     bus.subscribe_all(handler)

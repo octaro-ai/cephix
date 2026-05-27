@@ -20,6 +20,7 @@ from src.actor.types import ActorResponse
 from src.bus import (
     AsyncioBus,
     KERNEL_PHASE_TOPIC,
+    ErrorInfo,
     KernelPhase,
     RobotEvent,
     RobotInput,
@@ -35,13 +36,16 @@ from src.kernel.run import RunPhase
 
 
 class _FailingActor(ActorPort):
-    """Actor that always returns ok=False."""
+    """Actor that always returns status='error'."""
 
     component_name = "failing"
 
     async def run(self, actor_context: dict[str, Any]) -> ActorResponse:
         del actor_context
-        return ActorResponse(ok=False, error="actor blew up")
+        return ActorResponse(
+            status="error",
+            error=ErrorInfo(code="internal", message="actor blew up"),
+        )
 
 
 class _HangingActor(ActorPort):
@@ -65,7 +69,7 @@ class _RecordingActor(ActorPort):
 
     async def run(self, actor_context: dict[str, Any]) -> ActorResponse:
         self.calls.append(actor_context)
-        return ActorResponse(text="stub-response", ok=True)
+        return ActorResponse(message="stub-response", status="ok")
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +120,7 @@ async def test_base_kernel_with_echo_actor_produces_echoed_output() -> None:
                     principal="user-1",
                     source="channel.test",
                     run_id="run-1",
-                    text="hello",
+                    message="hello",
                     payload={"session_id": "abc"},
                 )
             )
@@ -129,7 +133,9 @@ async def test_base_kernel_with_echo_actor_produces_echoed_output() -> None:
 
     assert len(outputs) == 1
     out = outputs[0]
-    assert out.text == "echo: hello"
+    assert out.message == "echo: hello"
+    assert out.status == "ok"
+    assert out.error is None
     assert out.topic == "output.message"
     assert out.source == "kernel.base"
     assert out.run_id == "run-1"
@@ -157,7 +163,7 @@ async def test_base_kernel_emits_one_phase_event_per_phase() -> None:
                     principal="user",
                     source="channel.test",
                     run_id="run-phase",
-                    text="hi",
+                    message="hi",
                 )
             )
             await asyncio.sleep(0.05)
@@ -180,7 +186,8 @@ async def test_base_kernel_emits_one_phase_event_per_phase() -> None:
         assert p.kernel == "base"
         assert p.run_id == "run-phase"
         assert p.iteration == 0
-        assert p.error == ""
+        assert p.status == "ok"
+        assert p.error is None
 
 
 async def test_base_kernel_phase_events_carry_wide_event_details() -> None:
@@ -212,7 +219,7 @@ async def test_base_kernel_phase_events_carry_wide_event_details() -> None:
                     principal="user",
                     source="channel.test",
                     run_id="run-wide",
-                    text="hello",
+                    message="hello",
                 )
             )
             await asyncio.sleep(0.05)
@@ -225,7 +232,7 @@ async def test_base_kernel_phase_events_carry_wide_event_details() -> None:
     by_phase = {p.phase: p.details for p in phases}
 
     obs = by_phase[RunPhase.OBSERVING.value]
-    assert obs["input_text_len"] == len("hello")
+    assert obs["input_message_len"] == len("hello")
     assert "input_event_id" in obs
     assert "phase_duration_ms" in obs
 
@@ -234,7 +241,7 @@ async def test_base_kernel_phase_events_carry_wide_event_details() -> None:
 
     act = by_phase[RunPhase.ACTING.value]
     assert act["actor_name"] == "echo"
-    assert act["actor_ok"] is True
+    assert act["actor_status"] == "ok"
     assert isinstance(act["actor_duration_ms"], (int, float))
 
     fin = by_phase[RunPhase.FINALIZING.value]
@@ -242,7 +249,7 @@ async def test_base_kernel_phase_events_carry_wide_event_details() -> None:
     assert fin["is_tool_call"] is False
 
     resp = by_phase[RunPhase.RESPONDING.value]
-    assert resp["output_text_len"] == len("echo: hello")
+    assert resp["output_message_len"] == len("echo: hello")
     assert "output_event_id" in resp
 
     done = by_phase[RunPhase.DONE.value]
@@ -250,44 +257,6 @@ async def test_base_kernel_phase_events_carry_wide_event_details() -> None:
     assert done["iterations"] == 1
     assert isinstance(done["run_duration_ms"], (int, float))
     assert isinstance(done["total_actor_ms"], (int, float))
-
-
-async def test_base_kernel_error_phase_carries_failed_phase_details() -> None:
-    """When a phase raises, the error event names the failure type."""
-    bus = AsyncioBus()
-    phases: list[KernelPhase] = []
-
-    async def collect(event: RobotEvent) -> None:
-        if isinstance(event, KernelPhase):
-            phases.append(event)
-
-    bus.subscribe(KERNEL_PHASE_TOPIC, collect)
-
-    actor = _FailingActor()
-    await bus.start()
-    try:
-        kernel = await _start_kernel(bus, actor=actor)
-        try:
-            await bus.publish(
-                RobotInput(
-                    topic="input.message",
-                    principal="user",
-                    source="channel.test",
-                    run_id="run-err",
-                    text="boom",
-                )
-            )
-            await asyncio.sleep(0.05)
-        finally:
-            await kernel.stop()
-            await actor.stop()
-    finally:
-        await bus.stop()
-
-    by_phase = {p.phase: p for p in phases}
-    err = by_phase[RunPhase.ERROR.value]
-    assert err.error.startswith("RuntimeError")
-    assert err.details["error_type"] == "RuntimeError"
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +279,7 @@ async def test_base_kernel_hands_actor_the_curated_actor_context() -> None:
                     principal="user",
                     source="channel.test",
                     run_id="run-context",
-                    text="hello-context",
+                    message="hello-context",
                     payload={"k": "v"},
                 )
             )
@@ -323,7 +292,7 @@ async def test_base_kernel_hands_actor_the_curated_actor_context() -> None:
 
     assert len(actor.calls) == 1
     actor_ctx = actor.calls[0]
-    assert actor_ctx["input"]["text"] == "hello-context"
+    assert actor_ctx["input"]["message"] == "hello-context"
     assert actor_ctx["input"]["principal"] == "user"
     assert actor_ctx["input"]["run_id"] == "run-context"
     assert actor_ctx["input"]["payload"] == {"k": "v"}
@@ -334,7 +303,8 @@ async def test_base_kernel_hands_actor_the_curated_actor_context() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_base_kernel_emits_error_phase_when_actor_fails() -> None:
+async def test_base_kernel_emits_failed_phase_then_done_when_actor_fails() -> None:
+    """Failure surfaces as ``acting`` phase event with ``status='error'`` plus a trailing ``done``."""
     bus = AsyncioBus()
     phases: list[KernelPhase] = []
 
@@ -355,7 +325,7 @@ async def test_base_kernel_emits_error_phase_when_actor_fails() -> None:
                     principal="user",
                     source="channel.test",
                     run_id="run-fail",
-                    text="boom",
+                    message="boom",
                 )
             )
             await asyncio.sleep(0.05)
@@ -365,10 +335,25 @@ async def test_base_kernel_emits_error_phase_when_actor_fails() -> None:
     finally:
         await bus.stop()
 
-    error_phases = [p for p in phases if p.phase == RunPhase.ERROR.value]
-    assert len(error_phases) == 1
-    assert "actor blew up" in error_phases[0].error
-    assert not any(p.phase == RunPhase.DONE.value for p in phases)
+    seen = [(p.phase, p.status) for p in phases]
+    # observe / plan succeed, acting fails, then a closing done event.
+    assert seen == [
+        (RunPhase.OBSERVING.value, "ok"),
+        (RunPhase.PLANNING.value, "ok"),
+        (RunPhase.ACTING.value, "error"),
+        (RunPhase.DONE.value, "error"),
+    ]
+
+    failing = next(p for p in phases if p.phase == RunPhase.ACTING.value)
+    assert failing.error is not None
+    assert failing.error.code == "internal"
+    assert "actor blew up" in failing.error.message
+    assert failing.error.details["failed_phase"] == "acting"
+
+    done = next(p for p in phases if p.phase == RunPhase.DONE.value)
+    assert done.error is not None
+    assert done.error.code == "internal"
+    assert done.details["outcome"] == "error"
 
 
 async def test_base_kernel_times_out_when_actor_hangs() -> None:
@@ -396,7 +381,7 @@ async def test_base_kernel_times_out_when_actor_hangs() -> None:
                     principal="user",
                     source="channel.test",
                     run_id="run-timeout",
-                    text="hello",
+                    message="hello",
                 )
             )
             await asyncio.sleep(0.2)
@@ -406,9 +391,15 @@ async def test_base_kernel_times_out_when_actor_hangs() -> None:
     finally:
         await bus.stop()
 
-    error_phases = [p for p in phases if p.phase == RunPhase.ERROR.value]
-    assert len(error_phases) == 1
-    assert "timed out" in error_phases[0].error
+    failed = [p for p in phases if p.status == "error"]
+    # Both the failing phase and the trailing done event report status='error'.
+    assert len(failed) == 2
+    acting = next(p for p in failed if p.phase == RunPhase.ACTING.value)
+    assert acting.error is not None
+    assert acting.error.code == "timeout"
+    assert "timed out" in acting.error.message
+    # The base kernel does NOT auto-publish a user-facing error output
+    # -- that is the kernel author's choice. See module docstring.
     assert outputs == []
 
 
@@ -439,7 +430,7 @@ async def test_base_kernel_unsubscribes_on_stop() -> None:
                 principal="user",
                 source="channel.test",
                 run_id="run-1",
-                text="first",
+                message="first",
             )
         )
         await asyncio.sleep(0.1)
@@ -450,7 +441,7 @@ async def test_base_kernel_unsubscribes_on_stop() -> None:
                 principal="user",
                 source="channel.test",
                 run_id="run-2",
-                text="ignored",
+                message="ignored",
             )
         )
         await asyncio.sleep(0.1)
@@ -458,7 +449,7 @@ async def test_base_kernel_unsubscribes_on_stop() -> None:
     finally:
         await bus.stop()
 
-    texts = [out.text for out in outputs]
+    texts = [out.message for out in outputs]
     assert texts == ["echo: first"]
 
 
@@ -474,14 +465,14 @@ def test_base_kernel_requires_an_actor() -> None:
 
 
 class _UpperKernel(BaseKernel):
-    """Toy override: every reply text is upper-cased in finalize."""
+    """Toy override: every reply message is upper-cased in finalize."""
 
     component_name = "upper"
 
     async def finalize(self, ctx: Any) -> None:  # noqa: ANN401 -- test stub
         await super().finalize(ctx)
-        if ctx.output_text is not None:
-            ctx.output_text = ctx.output_text.upper()
+        if ctx.output_message is not None:
+            ctx.output_message = ctx.output_message.upper()
 
 
 async def test_subclass_can_override_a_single_phase() -> None:
@@ -507,7 +498,7 @@ async def test_subclass_can_override_a_single_phase() -> None:
                     principal="user",
                     source="channel.test",
                     run_id="run-upper",
-                    text="hello",
+                    message="hello",
                 )
             )
             await asyncio.sleep(0.1)
@@ -518,7 +509,7 @@ async def test_subclass_can_override_a_single_phase() -> None:
         await bus.stop()
 
     assert len(outputs) == 1
-    assert outputs[0].text == "ECHO: HELLO"
+    assert outputs[0].message == "ECHO: HELLO"
     assert outputs[0].source == "kernel.upper"
 
 
@@ -538,7 +529,7 @@ async def test_respond_raises_when_not_started() -> None:
         principal="user",
         source="t",
         run_id="r",
-        text="x",
+        message="x",
     )
     with pytest.raises(RuntimeError, match="not started"):
         await kernel.respond(ctx)

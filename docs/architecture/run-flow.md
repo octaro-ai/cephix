@@ -97,7 +97,7 @@ DigitalRobotKernel.handle_event(event)   [src/runtime/kernel.py]
         - Active skills
         - Notebook entries (user-task notes)
         - Governance block (AutonomyLevel, mounted tools)
-    - User turn from `event.text` + `recent_interactions`
+    - User turn from `event.message` + `recent_interactions`
     - Tool schemas from `planning_context.tool_schemas`
 3. LLM call (Anthropic / OpenAI) with streaming.
 4. Response is parsed into a `Plan` of `PlanStep`s:

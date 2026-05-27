@@ -52,16 +52,18 @@ async def test_round_trip_input_echo() -> None:
                 assert isinstance(welcome["session_id"], str)
                 assert "robot" not in welcome  # anonymous robot omits the block
 
-                await ws.send_json({"type": "input", "text": "hello"})
+                await ws.send_json({"type": "input", "message": "hello"})
 
                 response_msg = await asyncio.wait_for(ws.receive(), timeout=2.0)
                 assert response_msg.type == aiohttp.WSMsgType.TEXT
                 data = json.loads(response_msg.data)
 
                 assert data["type"] == "output"
-                assert data["text"] == "echo: hello"
+                assert data["status"] == "ok"
+                assert data["message"] == "echo: hello"
                 assert data["source"] == "kernel.base"
                 assert data["run_id"].startswith("run-ws-")
+                assert "error" not in data
 
 
 async def test_routes_outputs_only_to_originating_session() -> None:
@@ -76,11 +78,11 @@ async def test_routes_outputs_only_to_originating_session() -> None:
                 await asyncio.wait_for(ws_a.receive(), timeout=2.0)
                 await asyncio.wait_for(ws_b.receive(), timeout=2.0)
 
-                await ws_a.send_json({"type": "input", "text": "from-a"})
+                await ws_a.send_json({"type": "input", "message": "from-a"})
 
                 msg = await asyncio.wait_for(ws_a.receive(), timeout=2.0)
                 payload = json.loads(msg.data)
-                assert payload["text"] == "echo: from-a"
+                assert payload["message"] == "echo: from-a"
 
                 with pytest.raises(asyncio.TimeoutError):
                     await asyncio.wait_for(ws_b.receive(), timeout=0.3)
@@ -108,7 +110,7 @@ async def test_publishes_robot_input_with_session_payload() -> None:
                         (await asyncio.wait_for(ws.receive(), timeout=2.0)).data
                     )
                     session_id = welcome["session_id"]
-                    await ws.send_json({"type": "input", "text": "hi"})
+                    await ws.send_json({"type": "input", "message": "hi"})
                     await asyncio.sleep(0.05)
         finally:
             await channel.stop()
@@ -117,7 +119,7 @@ async def test_publishes_robot_input_with_session_payload() -> None:
 
     assert len(inputs) == 1
     event = inputs[0]
-    assert event.text == "hi"
+    assert event.message == "hi"
     assert event.source == "channel.websocket"
     assert event.principal.endswith(session_id)
     assert event.payload.get("session_id") == session_id
@@ -143,14 +145,14 @@ async def test_ignores_non_json_frames() -> None:
                 async with session.ws_connect(url) as ws:
                     await asyncio.wait_for(ws.receive(), timeout=2.0)
                     await ws.send_str("not json")
-                    await ws.send_json({"type": "input", "text": "real"})
+                    await ws.send_json({"type": "input", "message": "real"})
                     await asyncio.sleep(0.05)
         finally:
             await channel.stop()
     finally:
         await bus.stop()
 
-    assert [event.text for event in inputs] == ["real"]
+    assert [event.message for event in inputs] == ["real"]
 
 
 async def test_stop_closes_open_sessions() -> None:
@@ -234,7 +236,7 @@ async def test_drops_outputs_for_unknown_run() -> None:
                             principal="user",
                             source="kernel.base",
                             run_id="run-not-known",
-                            text="nope",
+                            message="nope",
                         )
                     )
                     with pytest.raises(asyncio.TimeoutError):

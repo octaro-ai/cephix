@@ -9,7 +9,7 @@ Wire protocol (JSON, one message per WebSocket frame):
 
 Client -> Server::
 
-    {"type": "input", "text": "hello"}
+    {"type": "input", "message": "hello"}
 
 Server -> Client (on connect)::
 
@@ -25,16 +25,37 @@ on the ``robot.lifecycle`` topic which the channel subscribes to
 during :meth:`start`. If the owning robot runs without identity,
 the block is omitted.
 
-Server -> Client (kernel response)::
+Server -> Client (kernel response, success)::
 
     {
         "type": "output",
-        "text": "echo: hello",
+        "status": "ok",
+        "message": "echo: hello",
         "run_id": "run-...",
         "source": "kernel.base",
         "payload": {...},
         "timestamp": "2026-..."
     }
+
+Server -> Client (kernel response, failure)::
+
+    {
+        "type": "output",
+        "status": "error",
+        "message": "Sorry, the actor timed out.",
+        "error": {"code": "timeout",
+                  "message": "actor base timed out after 30s",
+                  "details": {...}},
+        "run_id": "run-...",
+        "source": "kernel.base",
+        "payload": {},
+        "timestamp": "2026-..."
+    }
+
+The ``status`` field discriminates between sysout-like and
+syserr-like deliveries: clients should render ``status="error"``
+distinctly (red banner, retry affordance, ...). The optional
+``error`` block mirrors the bus-side :class:`ErrorInfo`.
 
 Routing semantics: each connection is a session with its own
 ``session_id``. Every incoming text creates a new ``run_id`` that the
@@ -320,8 +341,11 @@ class WebsocketChannel(ChannelPort):
             logger.debug("ignoring unsupported message type %r on session %s", msg_type, session_id)
             return
 
-        text = data.get("text")
-        if not isinstance(text, str) or not text.strip():
+        # Accept ``message`` (canonical) and ``text`` (legacy).
+        message = data.get("message")
+        if not isinstance(message, str):
+            message = data.get("text")
+        if not isinstance(message, str) or not message.strip():
             return
 
         run_id = _new_run_id()
@@ -338,7 +362,7 @@ class WebsocketChannel(ChannelPort):
                 principal=principal,
                 source="channel.websocket",
                 run_id=run_id,
-                text=text.strip(),
+                message=message.strip(),
                 payload=payload,
             )
         )
@@ -360,17 +384,24 @@ class WebsocketChannel(ChannelPort):
         if ws is None or ws.closed:
             return
 
+        frame: dict[str, Any] = {
+            "type": "output",
+            "status": event.status,
+            "message": event.message,
+            "run_id": event.run_id,
+            "source": event.source,
+            "payload": dict(event.payload) if isinstance(event.payload, dict) else {},
+            "timestamp": event.timestamp,
+        }
+        if event.error is not None:
+            frame["error"] = {
+                "code": event.error.code,
+                "message": event.error.message,
+                "details": dict(event.error.details),
+            }
+
         try:
-            await ws.send_json(
-                {
-                    "type": "output",
-                    "text": event.text,
-                    "run_id": event.run_id,
-                    "source": event.source,
-                    "payload": dict(event.payload) if isinstance(event.payload, dict) else {},
-                    "timestamp": event.timestamp,
-                }
-            )
+            await ws.send_json(frame)
         except (ConnectionResetError, asyncio.CancelledError):
             raise
         except Exception:

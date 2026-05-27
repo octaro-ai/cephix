@@ -40,7 +40,7 @@ def _input(text: str, *, topic: str = "input.demo") -> RobotInput:
         principal="user-1",
         source="test",
         run_id="run-1",
-        text=text,
+        message=text,
     )
 
 
@@ -59,7 +59,7 @@ async def test_recorder_persists_every_routable_publish() -> None:
                 principal="user-1",
                 source="kernel",
                 run_id="run-1",
-                text="echo: first",
+                message="echo: first",
             )
         )
         await asyncio.sleep(0.02)

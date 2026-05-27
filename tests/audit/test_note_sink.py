@@ -83,7 +83,7 @@ async def test_sink_ignores_non_audit_events_on_audit_topic(
                     principal="user-1",
                     source="malicious",
                     run_id="run-1",
-                    text="not an audit note",
+                    message="not an audit note",
                 )
             )
             await asyncio.sleep(0.02)

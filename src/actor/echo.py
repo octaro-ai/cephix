@@ -2,7 +2,7 @@
 
 The smallest actor that satisfies the kernel-actor contract. It owns
 no resources, never touches the bus, and answers any
-:meth:`run` call with an :class:`ActorResponse` whose ``text`` is
+:meth:`run` call with an :class:`ActorResponse` whose ``message`` is
 the input text prefixed by ``prefix``.
 
 Its job is to make :class:`BaseKernel` end-to-end testable without
@@ -35,8 +35,9 @@ class EchoActor(ActorPort):
     The actor reads the input text from the curated actor context;
     two shapes are accepted:
 
-    1. ``actor_context["text"]`` -- a flat shape some actors / tests use.
-    2. ``actor_context["input"]["text"]`` -- the shape
+    1. ``actor_context["message"]`` -- a flat shape some actors /
+       tests use.
+    2. ``actor_context["input"]["message"]`` -- the shape
        :class:`BaseKernel` produces in its default ``plan``.
 
     Anything else returns an empty echo -- the actor never crashes
@@ -47,7 +48,7 @@ class EchoActor(ActorPort):
     component_category = ComponentCategory.ACTOR
     component_description = (
         "Trivial actor that mirrors the input text back as an "
-        "ActorResponse with an echoed text payload. Useful as a "
+        "ActorResponse with an echoed message payload. Useful as a "
         "debug lens and for end-to-end tests without an LLM."
     )
 
@@ -55,17 +56,17 @@ class EchoActor(ActorPort):
         self._prefix = prefix
 
     async def run(self, actor_context: dict[str, Any]) -> ActorResponse:
-        text = self._extract_text(actor_context)
-        return ActorResponse(text=f"{self._prefix}{text}", ok=True)
+        text = self._extract_message(actor_context)
+        return ActorResponse(message=f"{self._prefix}{text}", status="ok")
 
     @staticmethod
-    def _extract_text(actor_context: dict[str, Any]) -> str:
-        text = actor_context.get("text")
+    def _extract_message(actor_context: dict[str, Any]) -> str:
+        text = actor_context.get("message")
         if isinstance(text, str):
             return text
         nested = actor_context.get("input")
         if isinstance(nested, dict):
-            inner = nested.get("text")
+            inner = nested.get("message")
             if isinstance(inner, str):
                 return inner
         return ""
