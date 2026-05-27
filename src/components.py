@@ -5,10 +5,12 @@ the bus, kernels, channels, later audit/governance/tools, or local
 resource holders that do not attach to the bus. Every component
 carries:
 
-- self-description (``component_type``, ``component_category``,
-  ``component_description``, ``component_wizard_fields``) so the
-  registry can index it, the wizard can offer it, and the manifest in
-  ``RobotBoot`` / ``RobotReady`` can describe it;
+- self-description (``component_name``, ``component_category``,
+  ``component_description``) so the registry can index it and the
+  manifest in ``RobotBoot`` / ``RobotReady`` can describe it. UI
+  concerns (which fields the onboarding wizard prompts for) are not
+  on the component anymore: that lives in :mod:`src.onboarding` so
+  the component contract stays runtime-only;
 - lifecycle hooks (``start``/``stop`` plus optional ``drain``). Plain
   robot components start without a bus; :class:`BusComponent` is the
   specialization for components that attach to the running bus;
@@ -41,8 +43,7 @@ class ComponentCategory(str, Enum):
     """Coarse role buckets used by the registry, the wizard and the
     robot's lifecycle ordering.
 
-    Two cross-cutting categories are distinguished from regular
-    userspace:
+    Three cross-cutting roles are distinguished from regular userspace:
 
     - :attr:`TELEMETRY`: read-only observers that watch *everything*
       that flows over the bus. The reference implementation is the
@@ -51,18 +52,29 @@ class ComponentCategory(str, Enum):
     - :attr:`AUDIT`: subscribers that record curated, semantic notes
       published via :meth:`RobotComponent.publish_audit`. The reference
       implementation is the ``AuditNoteSink``.
+    - :attr:`ACTOR`: the entity the kernel consults to turn a curated
+      context into a reply. *Not* a bus participant: the kernel
+      holds the actor as a direct in-process collaborator and calls
+      its :meth:`ActorPort.run` method. Actors are still
+      :class:`RobotComponent`s so the robot owns their lifecycle
+      (handy for subprocess actors, HTTP clients, ...). The
+      reference implementation is the ``EchoActor``; later iterations
+      add ``LLMActor``, ``HumanActor``, scripted ``MockActor``,
+      ``PlaywrightActor``.
 
-    Both boot right after the bus so they capture the full lifetime
-    of every userspace component, and both shut down right before the
-    bus so they see every farewell event.
+    Telemetry and audit boot right after the bus so they capture the
+    full lifetime of every userspace component. Actors boot before
+    the kernel because the kernel constructor is handed an
+    already-running actor.
     """
 
     BUS = "bus"
     TELEMETRY = "telemetry"
     AUDIT = "audit"
+    ACTOR = "actor"
     KERNEL = "kernel"
     CHANNEL = "channel"
-    # Future categories: GOVERNANCE, ACTOR, TOOL, ...
+    # Future categories: GOVERNANCE, TOOL, ...
 
 
 # Boot order, lower number = earlier. The robot uses this to sort its
@@ -78,6 +90,7 @@ BOOT_PRIORITY: dict[ComponentCategory, int] = {
     ComponentCategory.BUS: 0,
     ComponentCategory.TELEMETRY: 5,
     ComponentCategory.AUDIT: 6,
+    ComponentCategory.ACTOR: 8,
     ComponentCategory.KERNEL: 10,
     # ComponentCategory.GOVERNANCE: 15,  # policy layer between kernel and channels
     ComponentCategory.CHANNEL: 20,
@@ -111,18 +124,16 @@ SKELETON_CATEGORIES: frozenset[ComponentCategory] = frozenset({
 class RobotComponent:
     """A configurable, lifecycle-aware part of a robot.
 
-    Subclasses must define :attr:`component_type` and
+    Subclasses must define :attr:`component_name` and
     :attr:`component_category` as class-level attributes.
 
-    :attr:`component_description` is the one-liner shown by the
-    onboarding wizard.
+    :attr:`component_name` is the short identifier under which the
+    registry references this implementation (``"echo"``,
+    ``"asyncio"``, ``"base"``, ...). The class itself is the *type*;
+    the name is what users put in YAML and what the manifest reports.
 
-    :attr:`component_wizard_fields` is the *allow-list* of constructor
-    parameters the wizard prompts the user for. Any other constructor
-    parameter is treated as plumbing/wiring and uses its default.
-    ``None`` means "ask for every parameter" (safe default for external
-    classes that don't opt in). An empty tuple means "ask nothing"
-    (all defaults).
+    :attr:`component_description` is the one-liner shown by tooling
+    (onboarding wizard, manifest dumps, control-plane introspection).
 
     Lifecycle hooks:
 
@@ -152,10 +163,9 @@ class RobotComponent:
       effect; otherwise the audit log is silently incomplete.
     """
 
-    component_type: ClassVar[str]
+    component_name: ClassVar[str]
     component_category: ClassVar[ComponentCategory]
     component_description: ClassVar[str] = ""
-    component_wizard_fields: ClassVar[tuple[str, ...] | None] = None
 
     async def start(self) -> None:
         """Bring the component online.
@@ -193,6 +203,7 @@ class RobotComponent:
         principal: str = "system",
         run_id: str = "",
         correlation_id: str | None = None,
+        on_behalf_of: str | None = None,
     ) -> None:
         """Publish a curated :class:`RobotAuditNote` for this component.
 
@@ -203,7 +214,12 @@ class RobotComponent:
 
         The note is published on ``AUDIT_TOPIC`` and carries:
 
-        - ``actor`` -- the component's ``component_type``;
+        - ``source`` -- the publisher of the bus event (this
+          component's ``component_name``);
+        - ``component`` -- the component the note is *about*. Defaults
+          to ``source``; pass ``on_behalf_of`` to record an action
+          this component is logging on someone else's behalf (e.g.
+          a kernel auditing its in-process actor).
         - ``action`` -- a short, machine-readable label (e.g.
           ``"tool.invoke"``, ``"approval.deny"``);
         - ``details`` -- arbitrary serializable payload. Implementers
@@ -223,10 +239,10 @@ class RobotComponent:
         note = RobotAuditNote(
             topic=AUDIT_TOPIC,
             principal=principal,
-            source=self.component_type,
+            source=self.component_name,
             run_id=run_id,
             correlation_id=correlation_id,
-            actor=self.component_type,
+            component=on_behalf_of or "",
             action=action,
             details=dict(details or {}),
         )

@@ -7,11 +7,12 @@ from typing import Any
 
 import pytest
 
+from src.actor.echo import EchoActor
 from src.audit.note_sink import AuditNoteSink
 from src.builder import build_robot_from_config
 from src.bus.asyncio_bus import AsyncioBus
 from src.channels.websocket import WebsocketChannel
-from src.kernel.echo import EchoKernel
+from src.kernel.base import BaseKernel
 from src.registry import ConfigError
 from src.robot import Robot
 from src.telemetry.bus_recorder import BusRecorder
@@ -21,9 +22,14 @@ from src.telemetry.bus_recorder import BusRecorder
 # actually starts it.
 _CP_OFF: dict[str, Any] = {"control_plane": {"enabled": False}}
 
+# An actor is now mandatory: the kernel always has someone to consult.
+# Tests that don't care which actor get a default echo.
+_DEFAULT_ACTOR: dict[str, Any] = {"actor": {"name": "echo"}}
+
 
 def _cfg(extra: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(_CP_OFF)
+    merged: dict[str, Any] = dict(_CP_OFF)
+    merged.update(_DEFAULT_ACTOR)
     merged.update(extra)
     return merged
 
@@ -41,11 +47,18 @@ def _bus_of(robot: Robot) -> AsyncioBus:
     return bus
 
 
-def _kernel_of(robot: Robot) -> EchoKernel:
+def _kernel_of(robot: Robot) -> BaseKernel:
     for c in robot.components:
-        if isinstance(c, EchoKernel):
+        if isinstance(c, BaseKernel):
             return c
-    raise AssertionError("no EchoKernel in robot.components")
+    raise AssertionError("no BaseKernel in robot.components")
+
+
+def _actor_of(robot: Robot) -> EchoActor | None:
+    for c in robot.components:
+        if isinstance(c, EchoActor):
+            return c
+    return None
 
 
 def test_builder_assembles_minimum_robot() -> None:
@@ -55,18 +68,19 @@ def test_builder_assembles_minimum_robot() -> None:
                 "id": "x",
                 "name": "X",
                 "enabled": True,
-                "kernel": {"type": "echo"},
+                "kernel": {"name": "base"},
             }
         )
     )
     assert isinstance(robot, Robot)
     assert isinstance(_bus_of(robot), AsyncioBus)
-    assert isinstance(_kernel_of(robot), EchoKernel)
+    assert isinstance(_kernel_of(robot), BaseKernel)
+    assert isinstance(_actor_of(robot), EchoActor)
     assert _channels_of(robot) == ()
 
 
 def test_builder_uses_default_bus_when_missing() -> None:
-    robot = build_robot_from_config(_cfg({"kernel": {"type": "echo"}}))
+    robot = build_robot_from_config(_cfg({"kernel": {"name": "base"}}))
     assert isinstance(_bus_of(robot), AsyncioBus)
 
 
@@ -74,8 +88,8 @@ def test_builder_assembles_channels() -> None:
     robot = build_robot_from_config(
         _cfg(
             {
-                "kernel": {"type": "echo"},
-                "channels": [{"type": "websocket", "port": 0}],
+                "kernel": {"name": "base"},
+                "channels": [{"name": "websocket", "port": 0}],
             }
         )
     )
@@ -84,38 +98,72 @@ def test_builder_assembles_channels() -> None:
     assert isinstance(channels[0], WebsocketChannel)
 
 
-def test_builder_passes_kernel_kwargs() -> None:
+def test_builder_passes_actor_kwargs() -> None:
     robot = build_robot_from_config(
-        _cfg({"kernel": {"type": "echo", "prefix": "yo: "}})
+        _cfg(
+            {
+                "kernel": {"name": "base"},
+                "actor": {"name": "echo", "prefix": "yo: "},
+            }
+        )
+    )
+    actor = _actor_of(robot)
+    assert isinstance(actor, EchoActor)
+    assert actor._prefix == "yo: "  # type: ignore[attr-defined]
+
+
+def test_builder_injects_actor_into_kernel() -> None:
+    robot = build_robot_from_config(
+        _cfg(
+            {
+                "kernel": {"name": "base"},
+                "actor": {"name": "echo", "prefix": "yo: "},
+            }
+        )
     )
     kernel = _kernel_of(robot)
-    assert kernel._prefix == "yo: "  # type: ignore[attr-defined]
+    actor = _actor_of(robot)
+    assert actor is not None
+    assert kernel._actor is actor  # type: ignore[attr-defined]
+
+
+def test_builder_passes_kernel_kwargs() -> None:
+    robot = build_robot_from_config(
+        _cfg({"kernel": {"name": "base", "actor_timeout": 12.5}})
+    )
+    kernel = _kernel_of(robot)
+    assert kernel._actor_timeout == 12.5  # type: ignore[attr-defined]
 
 
 def test_builder_merges_defaults_with_robot_yaml() -> None:
     defaults = {
-        "kernel": {"type": "echo", "prefix": "default: "},
-        "channels": [{"type": "websocket", "port": 9999}],
+        "kernel": {"name": "base", "actor_timeout": 60.0},
+        "actor": {"name": "echo", "prefix": "default: "},
+        "channels": [{"name": "websocket", "port": 9999}],
         "control_plane": {"enabled": False},
     }
     robot_yaml = {
-        "kernel": {"prefix": "override: "},
+        "actor": {"prefix": "override: "},
     }
     robot = build_robot_from_config(robot_yaml, defaults=defaults)
     kernel = _kernel_of(robot)
+    actor = _actor_of(robot)
     channels = _channels_of(robot)
-    assert kernel._prefix == "override: "  # type: ignore[attr-defined]
+    assert kernel._actor_timeout == 60.0  # type: ignore[attr-defined]
+    assert actor is not None
+    assert actor._prefix == "override: "  # type: ignore[attr-defined]
     assert channels[0]._port == 9999  # type: ignore[attr-defined]
 
 
 def test_builder_robot_yaml_replaces_default_channels() -> None:
     defaults = {
-        "channels": [{"type": "websocket", "port": 1111}],
+        "channels": [{"name": "websocket", "port": 1111}],
         "control_plane": {"enabled": False},
+        "actor": {"name": "echo"},
     }
     robot_yaml = {
-        "kernel": {"type": "echo"},
-        "channels": [{"type": "websocket", "port": 2222}],
+        "kernel": {"name": "base"},
+        "channels": [{"name": "websocket", "port": 2222}],
     }
     robot = build_robot_from_config(robot_yaml, defaults=defaults)
     channels = _channels_of(robot)
@@ -128,6 +176,14 @@ def test_builder_rejects_missing_kernel() -> None:
         build_robot_from_config(_cfg({"id": "x"}))
 
 
+def test_builder_rejects_missing_actor() -> None:
+    """The actor section is mandatory: the kernel always needs one."""
+    cfg = dict(_CP_OFF)
+    cfg["kernel"] = {"name": "base"}
+    with pytest.raises(ConfigError, match="actor"):
+        build_robot_from_config(cfg)
+
+
 def test_builder_rejects_non_dict_top_level() -> None:
     with pytest.raises(ConfigError, match="mapping"):
         build_robot_from_config([])  # type: ignore[arg-type]
@@ -136,8 +192,17 @@ def test_builder_rejects_non_dict_top_level() -> None:
 def test_builder_rejects_non_list_channels() -> None:
     with pytest.raises(ConfigError, match="channels"):
         build_robot_from_config(
-            _cfg({"kernel": {"type": "echo"}, "channels": {"type": "websocket"}})
+            _cfg({"kernel": {"name": "base"}, "channels": {"name": "websocket"}})
         )
+
+
+def test_builder_rejects_actor_that_is_not_an_actor_port() -> None:
+    """If the actor: spec resolves to a non-ActorPort, fail loudly."""
+    cfg = dict(_CP_OFF)
+    cfg["kernel"] = {"name": "base"}
+    cfg["actor"] = {"name": "asyncio"}  # AsyncioBus is not an ActorPort
+    with pytest.raises(ConfigError, match="ActorPort"):
+        build_robot_from_config(cfg)
 
 
 def test_builder_propagates_identity_to_robot() -> None:
@@ -147,7 +212,7 @@ def test_builder_propagates_identity_to_robot() -> None:
                 "id": "alpha",
                 "name": "Alpha",
                 "enabled": False,
-                "kernel": {"type": "echo"},
+                "kernel": {"name": "base"},
             }
         )
     )
@@ -157,7 +222,7 @@ def test_builder_propagates_identity_to_robot() -> None:
 
 
 def test_builder_handles_missing_identity() -> None:
-    robot = build_robot_from_config(_cfg({"kernel": {"type": "echo"}}))
+    robot = build_robot_from_config(_cfg({"kernel": {"name": "base"}}))
     assert robot.identity.id is None
     assert robot.identity.name is None
 
@@ -171,7 +236,7 @@ def test_builder_loads_control_plane_token_from_workspace_env(
         encoding="utf-8",
     )
     robot = build_robot_from_config(
-        _cfg({"id": "x", "kernel": {"type": "echo"}}),
+        _cfg({"id": "x", "kernel": {"name": "base"}}),
         workspace=tmp_path,
     )
     assert robot._control_plane_token == "secret-token-xyz"  # type: ignore[attr-defined]
@@ -180,7 +245,7 @@ def test_builder_loads_control_plane_token_from_workspace_env(
 def test_builder_skips_observers_without_workspace() -> None:
     """Without a workspace the JSONL provider has nowhere to anchor;
     telemetry and audit are silently skipped."""
-    robot = build_robot_from_config(_cfg({"kernel": {"type": "echo"}}))
+    robot = build_robot_from_config(_cfg({"kernel": {"name": "base"}}))
     assert not any(isinstance(c, BusRecorder) for c in robot.components)
     assert not any(isinstance(c, AuditNoteSink) for c in robot.components)
 
@@ -193,14 +258,13 @@ def test_builder_wires_telemetry_and_audit_via_persistence(
     ``<workspace>/logs/telemetry.jsonl`` and
     ``<workspace>/logs/audit.jsonl``."""
     robot = build_robot_from_config(
-        _cfg({"kernel": {"type": "echo"}}),
+        _cfg({"kernel": {"name": "base"}}),
         workspace=tmp_path,
     )
     recorders = [c for c in robot.components if isinstance(c, BusRecorder)]
     sinks = [c for c in robot.components if isinstance(c, AuditNoteSink)]
     assert len(recorders) == 1
     assert len(sinks) == 1
-    # The sink the recorder owns is the one the provider gave it.
     recorder_sink_path = recorders[0]._sink._path  # type: ignore[attr-defined]
     audit_sink_path = sinks[0]._sink._path  # type: ignore[attr-defined]
     assert recorder_sink_path == tmp_path / "logs" / "telemetry.jsonl"
@@ -213,7 +277,7 @@ def test_builder_persistence_disabled_skips_all_observers(
     robot = build_robot_from_config(
         _cfg(
             {
-                "kernel": {"type": "echo"},
+                "kernel": {"name": "base"},
                 "persistence": {"enabled": False},
             }
         ),
@@ -229,7 +293,7 @@ def test_builder_observer_disabled_keeps_other_observer(
     robot = build_robot_from_config(
         _cfg(
             {
-                "kernel": {"type": "echo"},
+                "kernel": {"name": "base"},
                 "telemetry": {"enabled": False},
             }
         ),
@@ -244,7 +308,7 @@ def test_builder_uses_explicit_channel_names(tmp_path: Path) -> None:
     robot = build_robot_from_config(
         _cfg(
             {
-                "kernel": {"type": "echo"},
+                "kernel": {"name": "base"},
                 "telemetry": {"channel": "raw-events"},
                 "audit": {"channel": "narrative"},
             }
@@ -263,7 +327,7 @@ def test_builder_persistence_absolute_path_wins(tmp_path: Path) -> None:
     robot = build_robot_from_config(
         _cfg(
             {
-                "kernel": {"type": "echo"},
+                "kernel": {"name": "base"},
                 "persistence": {"path": str(abs_root)},
             }
         ),
@@ -274,12 +338,12 @@ def test_builder_persistence_absolute_path_wins(tmp_path: Path) -> None:
 
 
 def test_builder_rejects_unknown_persistence_type(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="persistence type"):
+    with pytest.raises(ConfigError, match="persistence backend"):
         build_robot_from_config(
             _cfg(
                 {
-                    "kernel": {"type": "echo"},
-                    "persistence": {"type": "redis"},
+                    "kernel": {"name": "base"},
+                    "persistence": {"name": "redis"},
                 }
             ),
             workspace=tmp_path,
@@ -289,7 +353,8 @@ def test_builder_rejects_unknown_persistence_type(tmp_path: Path) -> None:
 def test_builder_control_plane_config_overrides() -> None:
     robot = build_robot_from_config(
         {
-            "kernel": {"type": "echo"},
+            "kernel": {"name": "base"},
+            "actor": {"name": "echo"},
             "control_plane": {
                 "enabled": False,
                 "host": "127.0.0.1",
@@ -310,7 +375,8 @@ def test_builder_rejects_bad_port_range() -> None:
     with pytest.raises(ConfigError, match="port_range"):
         build_robot_from_config(
             {
-                "kernel": {"type": "echo"},
+                "kernel": {"name": "base"},
+                "actor": {"name": "echo"},
                 "control_plane": {"port_range": [9999, 1000]},
             }
         )

@@ -109,7 +109,7 @@ async def test_recorder_picks_up_audit_notes() -> None:
                 principal="system",
                 source="kernel",
                 run_id="run-1",
-                actor="kernel",
+                component="kernel",
                 action="approval.deny",
                 details={"reason": "policy"},
             )

@@ -7,10 +7,16 @@
 # re-roll it.
 #
 # Per-bot overrides live in ~/.cephix/robots/<id>/robot.yaml.
+#
+# Vocabulary: every component block carries a `name:` discriminator that
+# selects the registered implementation in that block's role/category
+# (the *type* in the OO sense is the class itself; `name:` says *which*
+# implementation by short identifier). Builder/registry resolve the name
+# to a class and pass the remaining fields as constructor kwargs.
 
 defaults:
   bus:
-    type: asyncio
+    name: asyncio
   # Out-of-band maintenance hatch. Not connected to the bus -- if the
   # bus wedges, the control plane is still reachable so an operator
   # can inspect and stop the robot. Token is taken from the bot-local
@@ -23,13 +29,26 @@ defaults:
     # (let the OS pick) so multiple bots co-exist by default.
     port_range: [9876, 9999]
     path: /control
+  # Default kernel: the actor-driven five-phase BaseKernel. The
+  # builder injects the configured actor (see `actor:` below) into
+  # the kernel at construction; the kernel then calls
+  # `actor.run(actor_context)` directly during its act phase --
+  # actors are not on the bus. Specializing kernels (ChatKernel,
+  # LLMKernel, ...) inherit from BaseKernel and override the phases
+  # they care about.
   kernel:
-    type: echo
+    name: base
     input_topic: input.message
     output_topic: output.message
+    actor_timeout: 30.0
+  # Default actor: a trivial echo actor that mirrors the input text
+  # back. Replace with `name: llm` once that exists; the actor block
+  # is required (the kernel always runs *some* actor).
+  actor:
+    name: echo
     prefix: "echo: "
   channels:
-    - type: websocket
+    - name: websocket
       host: 127.0.0.1
       port: 8765
       path: /ws
@@ -38,24 +57,24 @@ defaults:
   # decides how each channel lands. Default: one .jsonl file per
   # channel inside the bot's `logs/` directory, alongside the
   # operational console log (`logs/cephix.log`). Set `enabled: false`
-  # to turn the whole layer off; replace `type:` with another backend
+  # to turn the whole layer off; replace `name:` with another backend
   # (sqlite, supabase, ...) once those exist. Channel names with a
   # slash become subdirectories on disk -- handy once rotation or
   # per-run sharding lands (e.g. `telemetry/2026-05-26`).
   persistence:
     enabled: true
-    type: jsonl
+    name: jsonl
     path: logs      # relative paths anchor on the workspace; absolute paths win.
   # Cross-cutting observers. Both default to on; the channel name
   # selects which file/table/row inside the persistence layer is
   # written.
   telemetry:
     enabled: true
-    type: bus_recorder
+    name: bus_recorder
     channel: telemetry
   audit:
     enabled: true
-    type: audit_note_sink
+    name: audit_note_sink
     channel: audit
 
 # Optional list of bots whose workspace lives outside the convention

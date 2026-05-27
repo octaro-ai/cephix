@@ -2,11 +2,11 @@
 
 Two ways to specify a component in a YAML config:
 
-1. By registry key::
+1. By registered name::
 
        kernel:
-         type: echo
-         prefix: "echo: "
+         name: base
+         actor_timeout: 30.0
 
 2. By dotted Python path (for plugins outside ``src``)::
 
@@ -17,6 +17,17 @@ Two ways to specify a component in a YAML config:
 Either way, all remaining fields are passed as keyword arguments to the
 constructor. Unknown kwargs raise :class:`ConfigError` with a helpful
 message before the component is constructed.
+
+Vocabulary: the *category* (BUS, ACTOR, KERNEL, CHANNEL, ...) is what
+the role is. The *name* is which concrete implementation in that role
+the user picked. ``EchoActor.component_name == "echo"`` means: in the
+ACTOR category, "echo" is the registry key for this class.
+
+The builder may inject *runtime dependencies* on top of the YAML
+fields via :func:`build`'s ``**extra_kwargs`` (e.g. the actor that
+the kernel should drive). These are not part of the user-visible
+configuration surface; they live in code where references between
+components are resolved.
 
 Built-in components register themselves at import time of this module.
 """
@@ -38,38 +49,38 @@ _REGISTRY: dict[str, type[RobotComponent]] = {}
 
 
 def register(cls: type[RobotComponent]) -> type[RobotComponent]:
-    """Register ``cls`` under its declared :attr:`component_type`.
+    """Register ``cls`` under its declared :attr:`component_name`.
 
-    The registry indexes by ``cls.component_type``. Re-registering the
-    same key with a different class raises :class:`ConfigError`.
+    The registry indexes by ``cls.component_name``. Re-registering the
+    same name with a different class raises :class:`ConfigError`.
     """
     if not isinstance(cls, type) or not issubclass(cls, RobotComponent):
         raise ConfigError(
             f"register() expects a RobotComponent subclass, got {cls!r}"
         )
-    type_key = getattr(cls, "component_type", None)
-    if not isinstance(type_key, str) or not type_key:
+    name = getattr(cls, "component_name", None)
+    if not isinstance(name, str) or not name:
         raise ConfigError(
-            f"{cls.__name__} is missing a non-empty component_type"
+            f"{cls.__name__} is missing a non-empty component_name"
         )
-    existing = _REGISTRY.get(type_key)
+    existing = _REGISTRY.get(name)
     if existing is not None and existing is not cls:
         raise ConfigError(
-            f"component_type {type_key!r} is already registered to "
+            f"component_name {name!r} is already registered to "
             f"{existing.__name__}; refusing to override with {cls.__name__}"
         )
-    _REGISTRY[type_key] = cls
+    _REGISTRY[name] = cls
     return cls
 
 
-def get(type_key: str) -> type[RobotComponent]:
-    """Look up a registered component by type key."""
+def get(name: str) -> type[RobotComponent]:
+    """Look up a registered component by name."""
     try:
-        return _REGISTRY[type_key]
+        return _REGISTRY[name]
     except KeyError as exc:
         known = ", ".join(sorted(_REGISTRY)) or "(none)"
         raise ConfigError(
-            f"unknown component type {type_key!r}; known types: {known}"
+            f"unknown component name {name!r}; known names: {known}"
         ) from exc
 
 
@@ -79,20 +90,27 @@ def list_by_category(category: ComponentCategory) -> list[type[RobotComponent]]:
 
 
 def all_registered() -> dict[str, type[RobotComponent]]:
-    """Return a copy of the full registry, keyed by ``component_type``."""
+    """Return a copy of the full registry, keyed by ``component_name``."""
     return dict(_REGISTRY)
 
 
-def build(spec: dict[str, Any]) -> RobotComponent:
+def build(spec: dict[str, Any], **extra_kwargs: Any) -> RobotComponent:
     """Build a component instance from a config dictionary.
 
     Resolution order:
 
     1. If ``spec`` carries a ``class`` key, import that dotted path.
-    2. Otherwise, look up ``spec["type"]`` in the registry.
+    2. Otherwise, look up ``spec["name"]`` in the registry.
 
     All remaining fields become constructor kwargs after they are
     validated against the constructor signature.
+
+    ``extra_kwargs`` are merged on top of the spec fields and passed
+    to the constructor. Use this for runtime dependencies that are
+    resolved in code, not in YAML (e.g. injecting an :class:`ActorPort`
+    instance into a kernel). Extra kwargs override spec fields on
+    name collision -- callers are expected to use this only for
+    keys the YAML schema does not expose.
     """
     if not isinstance(spec, dict):
         raise ConfigError(f"component spec must be a dict, got {type(spec).__name__}")
@@ -108,14 +126,16 @@ def build(spec: dict[str, Any]) -> RobotComponent:
                 f"got {cls_path!r}"
             )
         cls = _import_class(cls_path)
-    elif "type" in spec:
-        type_key = spec.pop("type")
-        if not isinstance(type_key, str):
-            raise ConfigError(f"'type' must be a string, got {type_key!r}")
-        cls = get(type_key)
+    elif "name" in spec:
+        name = spec.pop("name")
+        if not isinstance(name, str):
+            raise ConfigError(f"'name' must be a string, got {name!r}")
+        cls = get(name)
     else:
-        raise ConfigError("component spec needs either a 'type' or a 'class' key")
+        raise ConfigError("component spec needs either a 'name' or a 'class' key")
 
+    if extra_kwargs:
+        spec.update(extra_kwargs)
     return _instantiate(cls, spec)
 
 
@@ -172,12 +192,14 @@ def _instantiate(cls: type, kwargs: dict[str, Any]) -> Any:
 
 def _register_builtins() -> None:
     """Register the components that ship with cephix."""
+    from src.actor.echo import EchoActor
     from src.bus.asyncio_bus import AsyncioBus
     from src.channels.websocket import WebsocketChannel
-    from src.kernel.echo import EchoKernel
+    from src.kernel.base import BaseKernel
 
     register(AsyncioBus)
-    register(EchoKernel)
+    register(BaseKernel)
+    register(EchoActor)
     register(WebsocketChannel)
 
 

@@ -4,10 +4,10 @@ The builder is the bridge between configuration and runtime:
 
 - It deep-merges global defaults from ``cephix.yaml#defaults`` with the
   bot-specific ``robot.yaml`` (bot wins).
-- It resolves the ``bus``, ``kernel`` and ``channels`` blocks via the
-  component registry. The cross-cutting persistence layer is built
-  *once* from the top-level ``persistence:`` block and shared by every
-  component that needs an :class:`EventSink`; observer components
+- It resolves the ``bus``, ``kernel``, ``actor`` and ``channels`` blocks
+  via the component registry. The cross-cutting persistence layer is
+  built *once* from the top-level ``persistence:`` block and shared by
+  every component that needs an :class:`EventSink`; observer components
   (``telemetry:``, ``audit:``) only declare ``enabled`` and an
   optional ``channel`` name.
 - It hands identity, the control-plane configuration and the
@@ -26,6 +26,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from src.actor.ports import ActorPort
 from src.audit.note_sink import AuditNoteSink
 from src.bus.ports import BusPort
 from src.channels.ports import ChannelPort
@@ -43,7 +44,7 @@ from src.telemetry.bus_recorder import BusRecorder
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_BUS_SPEC: dict[str, Any] = {"type": "asyncio"}
+_DEFAULT_BUS_SPEC: dict[str, Any] = {"name": "asyncio"}
 _DEFAULT_TELEMETRY_CHANNEL = "telemetry"
 _DEFAULT_AUDIT_CHANNEL = "audit"
 
@@ -85,10 +86,29 @@ def build_robot_from_config(
             "RobotComponent"
         )
 
+    # Order matters: the actor is a runtime dependency the kernel
+    # holds a direct reference to, so it must exist before the kernel
+    # is constructed. The robot's lifecycle still treats both as
+    # peers; the kernel just receives the already-built actor through
+    # constructor injection.
+    actor_spec = cfg.get("actor")
+    if not actor_spec:
+        raise ConfigError(
+            "robot.yaml must declare an actor section; the kernel "
+            "needs an actor to consult during its act phase"
+        )
+    actor_built = build(actor_spec)
+    if not isinstance(actor_built, ActorPort):
+        raise ConfigError(
+            f"actor component {type(actor_built).__name__} does not "
+            "implement ActorPort"
+        )
+    actor = actor_built
+
     kernel_spec = cfg.get("kernel")
     if not kernel_spec:
         raise ConfigError("robot.yaml must declare a kernel section")
-    kernel = build(kernel_spec)
+    kernel = build(kernel_spec, actor=actor)
     if not isinstance(kernel, KernelPort):
         raise ConfigError(
             f"kernel component {type(kernel).__name__} does not implement KernelPort"
@@ -133,7 +153,7 @@ def build_robot_from_config(
         env = load_robot_env(workspace)
         control_plane_token = env.get(CONTROL_PLANE_TOKEN_ENV) or None
 
-    components: list[RobotComponent] = [bus, kernel, *channels]
+    components: list[RobotComponent] = [bus, actor, kernel, *channels]
     if telemetry is not None:
         components.append(telemetry)
     if audit is not None:
@@ -166,10 +186,10 @@ def _build_persistence_provider(
     if not bool(spec.get("enabled", True)):
         return None
 
-    type_key = str(spec.get("type", "jsonl"))
-    if type_key != "jsonl":
+    name = str(spec.get("name", "jsonl"))
+    if name != "jsonl":
         raise ConfigError(
-            f"unknown persistence type {type_key!r}; "
+            f"unknown persistence backend {name!r}; "
             "the only built-in persistence backend is 'jsonl'"
         )
 
@@ -201,10 +221,10 @@ def _build_telemetry(
     if not bool(spec.get("enabled", True)):
         return None
 
-    type_key = str(spec.get("type", "bus_recorder"))
-    if type_key != "bus_recorder":
+    name = str(spec.get("name", "bus_recorder"))
+    if name != "bus_recorder":
         raise ConfigError(
-            f"unknown telemetry type {type_key!r}; "
+            f"unknown telemetry component {name!r}; "
             "the only built-in telemetry component is 'bus_recorder'"
         )
 
@@ -231,10 +251,10 @@ def _build_audit(
     if not bool(spec.get("enabled", True)):
         return None
 
-    type_key = str(spec.get("type", "audit_note_sink"))
-    if type_key != "audit_note_sink":
+    name = str(spec.get("name", "audit_note_sink"))
+    if name != "audit_note_sink":
         raise ConfigError(
-            f"unknown audit type {type_key!r}; "
+            f"unknown audit component {name!r}; "
             "the only built-in audit component is 'audit_note_sink'"
         )
 

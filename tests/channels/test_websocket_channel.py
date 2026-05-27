@@ -13,9 +13,10 @@ import json
 import aiohttp
 import pytest
 
+from src.actor import EchoActor
 from src.bus import AsyncioBus, RobotEvent, RobotInput, RobotOutput
 from src.channels import WebsocketChannel
-from src.kernel import EchoKernel
+from src.kernel import BaseKernel
 from src.robot import ControlPlaneConfig, Robot, RobotIdentity
 
 
@@ -23,11 +24,12 @@ async def _build_robot(
     *, robot_id: str | None = None, robot_name: str | None = None
 ) -> tuple[Robot, WebsocketChannel]:
     bus = AsyncioBus()
-    kernel = EchoKernel()
+    actor = EchoActor()
+    kernel = BaseKernel(actor=actor)
     channel = WebsocketChannel(host="127.0.0.1", port=0)
     robot = Robot(
         identity=RobotIdentity(id=robot_id, name=robot_name),
-        components=[bus, kernel, channel],
+        components=[bus, actor, kernel, channel],
         control_plane_config=ControlPlaneConfig(enabled=False),
         shutdown_grace=0.0,
     )
@@ -58,7 +60,7 @@ async def test_round_trip_input_echo() -> None:
 
                 assert data["type"] == "output"
                 assert data["text"] == "echo: hello"
-                assert data["source"] == "kernel.echo"
+                assert data["source"] == "kernel.base"
                 assert data["run_id"].startswith("run-ws-")
 
 
@@ -230,7 +232,7 @@ async def test_drops_outputs_for_unknown_run() -> None:
                         RobotOutput(
                             topic="output.message",
                             principal="user",
-                            source="kernel.echo",
+                            source="kernel.base",
                             run_id="run-not-known",
                             text="nope",
                         )

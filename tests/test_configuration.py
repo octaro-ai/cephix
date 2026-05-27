@@ -121,7 +121,9 @@ def test_home_defaults_returns_block(tmp_path: Path) -> None:
     ensure_home_config(tmp_path)
     block = home_defaults(tmp_path)
     assert "kernel" in block
-    assert block["kernel"]["type"] == "echo"
+    assert block["kernel"]["name"] == "base"
+    assert "actor" in block
+    assert block["actor"]["name"] == "echo"
 
 
 # ---------------------------------------------------------------------------

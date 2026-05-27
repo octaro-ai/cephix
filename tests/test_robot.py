@@ -26,7 +26,7 @@ class _RecordingComponent(BusComponent):
     ) -> None:
         # Per-instance metadata so the manifest carries unique types
         # (the registry never sees these fakes; we just need uniqueness).
-        self.component_type = name
+        self.component_name = name
         self.component_category = category
         self.name = name
         self._log = log
@@ -298,7 +298,7 @@ async def test_robot_caps_shutdown_at_grace_when_drain_hangs(
     """A drain() that doesn't return is capped at the per-component grace."""
 
     class _SilentDrainer(BusComponent):
-        component_type = "silent-drainer"
+        component_name = "silent-drainer"
         component_category = ComponentCategory.CHANNEL
         component_description = "test fixture"
 
@@ -335,7 +335,7 @@ async def test_robot_returns_immediately_when_drain_returns_fast() -> None:
     import time
 
     class _FastDrainer(BusComponent):
-        component_type = "fast-drainer"
+        component_name = "fast-drainer"
         component_category = ComponentCategory.CHANNEL
         component_description = "test fixture"
 
@@ -371,7 +371,7 @@ async def test_robot_logs_drain_exception_without_aborting_shutdown(
     """A drain() that raises is logged but doesn't break the shutdown path."""
 
     class _RaisingDrainer(BusComponent):
-        component_type = "raising-drainer"
+        component_name = "raising-drainer"
         component_category = ComponentCategory.CHANNEL
         component_description = "test fixture"
 
@@ -446,7 +446,7 @@ async def test_telemetry_component_starts_before_robot_boot_is_published() -> No
     seen: list[RobotEvent] = []
 
     class _MiniRecorder(BusComponent):
-        component_type = "mini-recorder"
+        component_name = "mini-recorder"
         component_category = ComponentCategory.TELEMETRY
         component_description = "test fixture"
 

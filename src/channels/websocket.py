@@ -30,7 +30,7 @@ Server -> Client (kernel response)::
         "type": "output",
         "text": "echo: hello",
         "run_id": "run-...",
-        "source": "kernel.echo",
+        "source": "kernel.base",
         "payload": {...},
         "timestamp": "2026-..."
     }
@@ -61,7 +61,9 @@ from typing import Any
 from aiohttp import WSMsgType, web
 
 from src.bus.messages import (
+    INPUT_TOPIC,
     LIFECYCLE_TOPIC,
+    OUTPUT_TOPIC,
     RobotEvent,
     RobotInput,
     RobotOutput,
@@ -86,10 +88,9 @@ def _new_session_id() -> str:
 class WebsocketChannel(ChannelPort):
     """aiohttp-based WebSocket bridge between bus and outside world."""
 
-    component_type = "websocket"
+    component_name = "websocket"
     component_category = ComponentCategory.CHANNEL
     component_description = "WebSocket bridge over aiohttp. JSON frames, session-based routing."
-    component_wizard_fields = ("host", "port")
 
     def __init__(
         self,
@@ -98,8 +99,8 @@ class WebsocketChannel(ChannelPort):
         port: int = 8765,
         path: str = "/ws",
         principal_template: str = "ws:{session}",
-        input_topic: str = "input.message",
-        output_topic: str = "output.message",
+        input_topic: str = INPUT_TOPIC,
+        output_topic: str = OUTPUT_TOPIC,
     ) -> None:
         self._host = host
         self._port = port

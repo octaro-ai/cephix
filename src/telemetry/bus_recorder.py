@@ -29,13 +29,12 @@ logger = logging.getLogger(__name__)
 class BusRecorder(BusComponent):
     """Persist every event delivered on the bus through an :class:`EventSink`."""
 
-    component_type = "bus_recorder"
+    component_name = "bus_recorder"
     component_category = ComponentCategory.TELEMETRY
     component_description = (
         "Telemetry recorder. Subscribes to every bus event and persists it "
         "via the configured EventSink."
     )
-    component_wizard_fields = ()
 
     def __init__(self, *, sink: EventSink) -> None:
         if not isinstance(sink, EventSink):

@@ -38,7 +38,7 @@ def _make_bot(home_path: Path, robot_id: str, *, enabled: bool = True) -> None:
             "id": robot_id,
             "name": robot_id.capitalize(),
             "enabled": enabled,
-            "kernel": {"type": "echo"},
+            "kernel": {"name": "base"},
         },
     )
 
@@ -202,7 +202,7 @@ def test_remove_unregisters_external_workspace(
     other_ws.mkdir(parents=True)
     save_robot_config(
         other_ws,
-        {"id": "alpha", "name": "Alpha", "enabled": True, "kernel": {"type": "echo"}},
+        {"id": "alpha", "name": "Alpha", "enabled": True, "kernel": {"name": "base"}},
     )
     register_robot_override("alpha", other_ws, home)
 

@@ -92,10 +92,13 @@ def run_wizard(
     defaults = home_defaults(home_override)
 
     bus_spec = _pick_component(
-        console, ComponentCategory.BUS, defaults.get("bus") or {"type": "asyncio"}
+        console, ComponentCategory.BUS, defaults.get("bus") or {"name": "asyncio"}
     )
     kernel_spec = _pick_component(
-        console, ComponentCategory.KERNEL, defaults.get("kernel") or {"type": "echo"}
+        console, ComponentCategory.KERNEL, defaults.get("kernel") or {"name": "base"}
+    )
+    actor_spec = _pick_component(
+        console, ComponentCategory.ACTOR, defaults.get("actor") or {"name": "echo"}
     )
     channel_specs = _pick_channels(console, defaults.get("channels") or [])
 
@@ -108,6 +111,8 @@ def run_wizard(
         robot_yaml["bus"] = bus_spec
     if kernel_spec is not None:
         robot_yaml["kernel"] = kernel_spec
+    if actor_spec is not None:
+        robot_yaml["actor"] = actor_spec
     if channel_specs is not None:
         robot_yaml["channels"] = channel_specs
 
@@ -165,12 +170,14 @@ def reconfigure(
 
     defaults = home_defaults(home_override)
 
-    bus_default = current.get("bus") or defaults.get("bus") or {"type": "asyncio"}
-    kernel_default = current.get("kernel") or defaults.get("kernel") or {"type": "echo"}
+    bus_default = current.get("bus") or defaults.get("bus") or {"name": "asyncio"}
+    kernel_default = current.get("kernel") or defaults.get("kernel") or {"name": "base"}
+    actor_default = current.get("actor") or defaults.get("actor") or {"name": "echo"}
     channels_default = current.get("channels") or defaults.get("channels") or []
 
     bus_spec = _pick_component(console, ComponentCategory.BUS, bus_default)
     kernel_spec = _pick_component(console, ComponentCategory.KERNEL, kernel_default)
+    actor_spec = _pick_component(console, ComponentCategory.ACTOR, actor_default)
     channel_specs = _pick_channels(console, channels_default)
 
     new_yaml: dict[str, Any] = {
@@ -182,6 +189,8 @@ def reconfigure(
         new_yaml["bus"] = bus_spec
     if kernel_spec is not None:
         new_yaml["kernel"] = kernel_spec
+    if actor_spec is not None:
+        new_yaml["actor"] = actor_spec
     if channel_specs is not None:
         new_yaml["channels"] = channel_specs
 
@@ -228,34 +237,34 @@ def _pick_component(
         console.print(f"[yellow]no components registered for category {category.value}[/]")
         return default_spec or None
 
-    default_type = (default_spec or {}).get("type") or options[0].component_type
+    default_name = (default_spec or {}).get("name") or options[0].component_name
     label = category.value.capitalize()
 
     if len(options) == 1:
         chosen = options[0]
         console.print(
-            f"[dim]{label}: only one option ([bold]{chosen.component_type}[/bold]) — using it.[/]"
+            f"[dim]{label}: only one option ([bold]{chosen.component_name}[/bold]) — using it.[/]"
         )
     else:
-        _show_component_table(console, label, options, default_type)
-        choices = [cls.component_type for cls in options]
-        type_key = Prompt.ask(
-            f"{label} type",
+        _show_component_table(console, label, options, default_name)
+        choices = [cls.component_name for cls in options]
+        picked_name = Prompt.ask(
+            f"{label} name",
             choices=choices,
-            default=default_type if default_type in choices else choices[0],
+            default=default_name if default_name in choices else choices[0],
             console=console,
         )
-        chosen = next(cls for cls in options if cls.component_type == type_key)
+        chosen = next(cls for cls in options if cls.component_name == picked_name)
 
     spec = _ask_for_kwargs(
         console,
         chosen,
-        existing=default_spec if (default_spec or {}).get("type") == chosen.component_type
+        existing=default_spec if (default_spec or {}).get("name") == chosen.component_name
         else {},
     )
-    spec_with_type: dict[str, Any] = {"type": chosen.component_type}
-    spec_with_type.update(spec)
-    return spec_with_type
+    spec_with_name: dict[str, Any] = {"name": chosen.component_name}
+    spec_with_name.update(spec)
+    return spec_with_name
 
 
 def _pick_channels(
@@ -294,28 +303,28 @@ def _pick_channels(
 
 def _summarise_channel(spec: dict[str, Any]) -> str:
     """One-line human summary of a channel spec for the Confirm prompt."""
-    type_key = spec.get("type") or spec.get("class") or "?"
+    name = spec.get("name") or spec.get("class") or "?"
     extras: list[str] = []
     for field in ("host", "port", "path"):
         if field in spec:
             extras.append(f"{field}={spec[field]}")
     if extras:
-        return f"{type_key} ({', '.join(extras)})"
-    return str(type_key)
+        return f"{name} ({', '.join(extras)})"
+    return str(name)
 
 
 def _show_component_table(
     console: Console,
     label: str,
     options: list[type[RobotComponent]],
-    default_type: str,
+    default_name: str,
 ) -> None:
     table = Table(title=f"Available {label}s", show_lines=False)
-    table.add_column("type", style="cyan", no_wrap=True)
+    table.add_column("name", style="cyan", no_wrap=True)
     table.add_column("description")
     for cls in options:
-        marker = "[bold]*[/bold]" if cls.component_type == default_type else " "
-        table.add_row(f"{marker} {cls.component_type}", cls.component_description or "")
+        marker = "[bold]*[/bold]" if cls.component_name == default_name else " "
+        table.add_row(f"{marker} {cls.component_name}", cls.component_description or "")
     console.print(table)
 
 
@@ -325,13 +334,13 @@ def _ask_for_kwargs(
     *,
     existing: dict[str, Any],
 ) -> dict[str, Any]:
-    """Prompt for each user-facing parameter declared by ``cls``.
+    """Prompt for each user-facing parameter declared for ``cls``.
 
-    Only parameters listed in ``cls.component_wizard_fields`` are
+    Only parameters listed in :data:`WIZARD_ALLOWLIST` for ``cls`` are
     asked. Plumbing parameters (topics, paths, principal templates,
-    ...) keep their defaults silently. ``component_wizard_fields = None``
-    falls back to "ask for everything" so external components without
-    an explicit allow-list still work.
+    ...) keep their defaults silently. A component absent from the
+    allow-list falls back to "ask for every parameter" so external
+    components without an explicit registration still work.
     """
     import inspect
 
@@ -340,7 +349,7 @@ def _ask_for_kwargs(
     except (ValueError, TypeError):
         return {}
 
-    allow = getattr(cls, "component_wizard_fields", None)
+    allow = WIZARD_ALLOWLIST.get(cls)
 
     answers: dict[str, Any] = {}
     for param_name, param in sig.parameters.items():
@@ -369,7 +378,7 @@ def _ask_for_kwargs(
         else:
             default = None
 
-        prompt_text = f"  {cls.component_type}.{param_name}"
+        prompt_text = f"  {cls.component_name}.{param_name}"
         if default is None:
             answer = Prompt.ask(prompt_text, console=console).strip()
             if not answer:
@@ -400,3 +409,69 @@ def _coerce(text: str, default: Any) -> Any:
         except ValueError:
             return text
     return text
+
+
+# ---------------------------------------------------------------------------
+# Wizard allow-list registry
+# ---------------------------------------------------------------------------
+#
+# Which constructor parameters of a component the wizard prompts for.
+# This is purely a *UI hint* and lives next to the wizard, not on the
+# component class -- the component contract (``RobotComponent``) stays
+# focused on runtime concerns (lifecycle, identity, manifest, audit).
+#
+# Semantics:
+#
+# - A class is in the dict        -> ask only for the listed params,
+#                                    everything else is plumbing and
+#                                    keeps its default.
+# - A class is NOT in the dict    -> "ask for every parameter" fallback
+#                                    so external plugins keep working
+#                                    even without registration.
+# - An empty tuple ``()``         -> "ask nothing"; all defaults.
+#
+# External plugins register themselves via :func:`register_wizard_fields`.
+
+
+WIZARD_ALLOWLIST: dict[type[RobotComponent], tuple[str, ...]] = {}
+
+
+def register_wizard_fields(
+    cls: type[RobotComponent],
+    fields: tuple[str, ...] = (),
+) -> type[RobotComponent]:
+    """Declare which constructor params of ``cls`` the wizard prompts for.
+
+    Use this from plugin code that defines its own ``RobotComponent``
+    subclass and wants the wizard to expose specific user-facing
+    parameters. Without registration, the wizard falls back to asking
+    for *every* parameter of the class.
+
+    Idempotent: re-registering the same class with the same fields is
+    a no-op. Re-registering with different fields raises so the
+    declaration stays unambiguous.
+    """
+    existing = WIZARD_ALLOWLIST.get(cls)
+    if existing is not None and existing != fields:
+        raise ValueError(
+            f"wizard fields for {cls.__name__} already registered as "
+            f"{existing!r}; refusing to override with {fields!r}"
+        )
+    WIZARD_ALLOWLIST[cls] = fields
+    return cls
+
+
+def _register_builtin_wizard_fields() -> None:
+    """Wizard allow-lists for the components that ship with cephix."""
+    from src.actor.echo import EchoActor
+    from src.bus.asyncio_bus import AsyncioBus
+    from src.channels.websocket import WebsocketChannel
+    from src.kernel.base import BaseKernel
+
+    register_wizard_fields(AsyncioBus, ())
+    register_wizard_fields(BaseKernel, ("input_topic", "output_topic", "actor_timeout"))
+    register_wizard_fields(EchoActor, ("prefix",))
+    register_wizard_fields(WebsocketChannel, ("host", "port"))
+
+
+_register_builtin_wizard_fields()

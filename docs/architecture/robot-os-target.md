@@ -53,7 +53,7 @@ flowchart LR
     direction LR
     topicInput["RobotInput und RobotTrigger"]
     topicOutput["RobotOutput"]
-    topicReqRes["RobotRequest und RobotResponse"]
+    topicReqRes["ComponentRequest und ComponentResponse"]
     topicLifecycle["RobotBoot RobotReady RobotShutdown"]
     topicAudit["RobotAuditNote"]
   end
@@ -123,9 +123,9 @@ Eigenschaften:
 - **Reihenfolge**: FIFO pro Queue, bewusst keine globale Ordnung.
 - **Priority pro Queue**: Antworten duerfen vor neuen Inputs eingereiht
   werden, damit ein laufender Run nicht hinter neuer Konversation wartet.
-- **Timeouts und Dead Letter**: eine `RobotRequest` deklariert ihre maximale
+- **Timeouts und Dead Letter**: eine `ComponentRequest` deklariert ihre maximale
   Antwortzeit; bei Ueberschreitung erzeugt der Bus eine
-  Fehler-`RobotResponse`. Nicht zustellbare Nachrichten landen in einer
+  Fehler-`ComponentResponse`. Nicht zustellbare Nachrichten landen in einer
   Dead-Letter-Queue.
 
 Pub/Sub ist die Ausnahme, nicht die Regel. Broadcast wird gezielt fuer
@@ -163,10 +163,10 @@ Mechanismus-Paket und keine Erweiterung von `subscribe_all` (siehe
 Mapping pro Nachrichtentyp:
 
 - `RobotInput` und `RobotTrigger`: Queue, Empfaenger Kernel.
-- `RobotRequest`: Queue, gerichtet an genau einen Adressaten (Tool-Driver,
+- `ComponentRequest`: Queue, gerichtet an genau einen Adressaten (Tool-Driver,
   Loader, Content-Filter).
-- `RobotResponse`: Queue, ueber `correlation_id` zurueck an den Sender der
-  `RobotRequest`.
+- `ComponentResponse`: Queue, ueber `correlation_id` zurueck an den Sender der
+  `ComponentRequest`.
 - `RobotOutput`: Queue, ueber Adressierung an den passenden Channel.
 - `RobotBoot`, `RobotReady`, `RobotShutdown`: Pub/Sub mit retain auf
   `robot.lifecycle`. Eine Quelle (der `Robot`), beliebig viele
@@ -189,10 +189,10 @@ Erwartungshaltung aus:
   Routing und Audit.
 - `RobotOutput`: Nachricht an die Aussenwelt, fire-and-forget. Beispiel:
   Antworttext an User, Mailversand-Bestaetigung an Channel.
-- `RobotRequest`: gerichtete Anfrage zwischen Bus-Teilnehmern, erwartet
+- `ComponentRequest`: gerichtete Anfrage zwischen Bus-Teilnehmern, erwartet
   Antwort. Beispiel: Kernel fragt Tool Execution Layer nach `mail.list`.
   Kernel fragt Channel nach Approval.
-- `RobotResponse`: Antwort auf eine `RobotRequest`. Verweist per
+- `ComponentResponse`: Antwort auf eine `ComponentRequest`. Verweist per
   Korrelation auf die ausloesende Anfrage. Kann Erfolg oder Fehler sein,
   Fehler ist explizit modelliert.
 - `RobotBoot`: Lifecycle-Broadcast *frueh* in der Bootsequenz, sobald
@@ -246,7 +246,16 @@ abgeschaltetem Strom.
   keine Kompetenzen ausserhalb von "Routing und Retain".
 - `Kernel` ist eine `RobotComponent` mit `category=KERNEL` --
   *austauschbarer Userspace-Reasoner*. Kontext-Kurator und
-  Actor-Vermittler, *nicht* OS-Kernel.
+  Actor-Vermittler, *nicht* OS-Kernel. Walkt pro `RobotInput` eine
+  fixe Phasen-Pipeline (`Observe -> Plan -> Act -> Finalize ->
+  Respond`); der `BaseKernel` ist direkt nutzbar, spezialisierende
+  Kernel (`ChatKernel`, `LLMKernel`, ...) erben den Loop und
+  ueberschreiben einzelne Phasen.
+- `Actor` ist eine `RobotComponent` mit `category=ACTOR` -- der
+  Service-Provider, den der Kernel waehrend `Acting` befragt. Heute
+  als trivialer `EchoActor` (mirror-back); spaeter `LLMActor`,
+  `MockActor`, `ProgramActor`, `HumanActor`. Bootet *vor* dem Kernel,
+  damit der erste `bus.request()` einen Subscriber findet.
 - `Channels` sind `RobotComponent`s mit `category=CHANNEL` --
   Bruecken zur Aussenwelt. Sie ziehen ihre Identitaet aus dem
   retained Lifecycle-Event auf dem Bus.
@@ -264,7 +273,7 @@ Der Lifecycle-Vertrag ist zweistufig:
 - `BusComponent` ist die Spezialisierung fuer Komponenten, die beim
   Start den laufenden Bus brauchen. Ihre `start(bus)`-Methode bekommt
   den `BusPort` explizit injiziert. Kernel, Channels, Telemetrie,
-  Audit und spaeter Governance/Actors gehoeren in diese Klasse.
+  Audit, Actors und spaeter Governance gehoeren in diese Klasse.
 
 Der Bus ist bewusst **kein** `BusComponent`: er ist der Upstream,
 an den andere Komponenten andocken. Er ist `RobotComponent` plus
@@ -283,6 +292,7 @@ niedrige Werte starten zuerst:
 | `BUS` | `0` | Skelett -- muss als erstes oben sein |
 | `TELEMETRY` | `5` | Skelett -- liest *alles* mit (`subscribe_all`); bootet **vor** dem `RobotBoot`-Publish, damit der Lifecycle ab dem allerersten Event lueckenlos aufgezeichnet wird |
 | `AUDIT` | `6` | Userspace -- persistiert kuratierte `RobotAuditNote`-Events; vor dem Userspace-Reasoner damit auch Audit-Notes der ersten Userspace-Komponenten landen, aber *nicht* im Skelett, weil vor Userspace nichts kuratiert wird |
+| `ACTOR` | `8` | Service-Provider, den der Kernel waehrend `Acting` per `ComponentRequest` befragt. Bootet vor dem Kernel, damit der erste `bus.request()` keinen Subscriber-losen Topic findet |
 | `KERNEL` | `10` | Userspace-Reasoner |
 | `CHANNEL` | `20` | Aussenwelt-Bruecken, brauchen Bus *und* Kernel |
 | Reserviert: `GOVERNANCE` (15) | -- | Wird eingefuehrt, sobald die Komponente existiert |
@@ -335,7 +345,7 @@ Robot.start()
   Phase 3: Userspace + RobotReady (_phase3_userspace)
     ├─ for c in components if c not in SKELETON_CATEGORIES, sortiert
     │   nach BOOT_PRIORITY:                   c.start(bus)
-    │   (Audit (Prio 6) -> Kernel (Prio 10) -> Channels (Prio 20))
+    │   (Audit (Prio 6) -> Actor (Prio 8) -> Kernel (Prio 10) -> Channels (Prio 20))
     └─ bus.publish_broadcast(RobotReady, retain=True)
         "online" log -- ab hier reines Idle
 ```
@@ -377,7 +387,8 @@ Robot.stop()
     └─ for c in userspace_components, sortiert reverse(BOOT_PRIORITY):
         ├─ c.drain() mit per-Komponente shutdown_grace als Hard-Cap
         └─ c.stop()
-        (z.B. Channels (Prio 20) zuerst, dann Kernel (Prio 10))
+        (z.B. Channels (Prio 20) zuerst, dann Kernel (Prio 10),
+         dann Actor (Prio 8), dann Audit (Prio 6))
 
   Phase 2↓: Skelett verabschieden (_phase2_down)
     └─ for c in skeleton_components, sortiert reverse(BOOT_PRIORITY):
@@ -441,9 +452,9 @@ Ablauf in `Robot._phase3_down()` (analog `_phase2_down()`):
 
 Konsequenzen fuer Komponenten:
 
-- **Default `drain()` returnt sofort.** `EchoKernel`, `AsyncioBus`
-  und jede triviale Komponente erbt damit "fertig in 0 ms" --
-  vergessenes Opt-in kann es nicht geben.
+- **Default `drain()` returnt sofort.** `BaseKernel`, `EchoActor`,
+  `AsyncioBus` und jede triviale Komponente erbt damit "fertig in 0 ms"
+  -- vergessenes Opt-in kann es nicht geben.
 - **Wer was zu tun hat, ueberschreibt `drain()`.** Beispiel
   `WebsocketChannel`: notifiziert alle Sessions per JSON-Frame,
   schliesst die WebSockets, returnt. `LLMKernel` (zukuenftig):
@@ -503,6 +514,7 @@ wenn das OS verklemmt ist), oder Magic SysRq im Linux-Kernel
 | OS-Kernel (Routing und Mechanik) | Bus (`category=BUS`, `BOOT_PRIORITY=0`) |
 | init / PID 1 (Lifecycle, Persona) | `Robot` selbst -- keine eigene Service-Klasse |
 | `auditd` / Linux-Auditing | `BusRecorder` (`category=TELEMETRY`, Prio 5) plus `AuditNoteSink` (`category=AUDIT`, Prio 6) |
+| Service-Provider (LLM-Endpoint, Mock) | Actor im Cephix-Sinn (`category=ACTOR`, Prio 8) -- bootet vor dem Kernel, weil der Kernel ihn waehrend `Acting` per `ComponentRequest` anspricht |
 | Userspace-Daemon (reagiert auf Events) | Kernel im Cephix-Sinn (`category=KERNEL`, Prio 10) |
 | Treiber / IO | Channels (`category=CHANNEL`, Prio 20) |
 | BMC / IPMI / Magic SysRq | ControlPlane (Out-of-band, eigener Port, Token-Auth) |
@@ -555,32 +567,163 @@ Operator-UI ist konsequent auch nur ein Channel.
 
 Ein Bus-Teilnehmer mit besonderen Privilegien. Er sieht alle relevanten
 Topics, darf den Kernel Capability Layer ansprechen und entscheidet,
-welcher Actor den naechsten Schritt macht. Der Kernel ruft keine
-Komponente direkt auf; er publiziert `RobotRequest` und konsumiert
-`RobotResponse`.
+welcher Actor den naechsten Schritt macht. Bus-Verkehr und Kernel-zu-
+Actor-Verkehr sind getrennt: zur Aussenwelt sendet der Kernel
+`RobotInput`/`RobotOutput` (und ggf. `ComponentRequest`/`ComponentResponse`
+fuer Tool-Calls), zum Actor ruft er in-process `actor.run()`.
 
 Der Kernel selbst ist Actor-neutral. Er traegt keine LLM-Logik. Seine
-Aufgabe ist, ein passendes Context Image zu erzeugen und es als
-`RobotRequest` an einen Actor-Topic zu schicken.
+Aufgabe ist, einen passenden *Actor Context* zu erzeugen und ihn an
+den Actor zu uebergeben.
+
+#### Run State Machine: 5 Phasen pro `RobotInput`
+
+Jeder Lauf eines Kernels (genau ein `RobotInput` -> potentiell mehrere
+Bus-Nachrichten) folgt einer fixen Phasen-Pipeline mit symmetrischer
+IO/Compute/IO-Aufteilung:
+
+```
+Observe   ->   Plan        ->   Act           ->   Finalize    ->   Respond
+Bus IN         compute          Actor call          compute          Bus OUT
+(RobotInput)   (history,        (in-process,        (parse,          (RobotOutput
+                context)         no bus traffic)     classify)         oder ComponentRequest
+                                                                       an Tools)
+```
+
+- **`Observe`**: Der eingehende `RobotInput` wird in einen `RunContext`
+  gehaengt. Reine Bus-Eingangsphase; per Default keine weitere
+  Verarbeitung.
+- **`Plan`**: Lokale Vorbereitung des *Actor Context*. Ein
+  `BaseKernel` legt nur den Input-Block hin; ein `ChatKernel` haengt
+  History/Memory an, ein `LLMKernel` zusaetzlich Tool-Schemas, ein
+  `PlanExecuteKernel` zerlegt den Auftrag in Schritte. Keine
+  Bus-Interaktion.
+- **`Act`**: Direkter In-Process-Call zum Actor. Der Kernel haelt den
+  Actor als Konstruktor-injizierte Referenz und ruft
+  `actor.run(actor_context)` synchron auf, gebounded durch
+  `actor_timeout`. **Kein** Bus-Round-Trip: Kernel-zu-Actor ist eine
+  Service-Methode innerhalb derselben logischen Einheit; nichts auf
+  dem gemeinsamen Bus. Damit kann ein Actor alles sein, was eine
+  `run()`-Methode hat -- HTTP-Client gegen einen LLM-Provider,
+  Subprozess (Playwright, Browser, lokales Modell), gRPC-Client oder
+  Operator-UI -- der Kernel merkt es nicht.
+- **`Finalize`**: Antwort verarbeiten. Default: Text aus
+  `response.text` in `ctx.output_text`, Rest aus `response.payload`
+  in `ctx.output_payload`. Spezialisierende Kernel inspizieren hier
+  Tool-Intents, parsen strukturierte Antworten oder updaten
+  History. `response.metadata` (Provider, Tokens, Kosten) wird hier
+  ueblicherweise als `RobotAuditNote` im Namen des Actors auf den
+  Bus gelegt.
+- **`Respond`**: Bus-Ausgangsphase. Default: einen `RobotOutput`
+  publishen. Ein Tool-Layer-faehiger Kernel published bei
+  Tool-Intent stattdessen einen `ComponentRequest` an `tool.call` --
+  `Respond` bleibt damit reine Bus-Schreibphase, die Routing-
+  Entscheidung lebt in `Finalize`. `ComponentRequest` und
+  `ComponentResponse` bleiben Bus-Vokabular fuer
+  Komponente-zu-Komponente-Verkehr (Tool Execution Layer); fuer den
+  Kernel-Actor-Handoff werden sie nicht verwendet.
+
+Pro abgeschlossener Phase published der Kernel ein `KernelPhase`-
+Event auf `kernel.phase` (Topic = `KERNEL_PHASE_TOPIC`). Das ist
+nicht nur ein State-Marker, sondern der **Wide-Event-Log** des
+Kernels (im Sinne von Charity Majors / Stripe Canonical Log Lines):
+jedes Phasen-Event traegt ein `details: dict` mit strukturierten,
+abfragbaren Analytics-Feldern -- `phase_duration_ms`,
+`actor_name`/`actor_duration_ms`/`actor_ok`, `input_text_len`,
+Modell-Namen, Token-Kosten (sobald LLM-Actoren die in
+`ActorResponse.metadata` zurueckgeben), `path` (`output`/`tool`/
+`empty`), `error_type`. Das `done`-Event jedes Runs ist die
+kanonische Wide-Event-Zeile mit den Aggregaten (`run_duration_ms`,
+`iterations`, `total_actor_ms`, `outcome`).
+
+Damit ist die `telemetry.jsonl`-Datei keine Boot-Log-Datei, sondern
+ein structured-event Stream, den Tools (jq, ClickHouse, DuckDB,
+nominal.dev) direkt indizieren koennen. Beispielabfrage:
+
+```bash
+jq -c 'select(.event_type == "KernelPhase" and .phase == "done"
+  and .details.outcome == "error")' telemetry.jsonl
+```
+
+Eiserne Trennung zur Audit-Spur: `KernelPhase` traegt Analytics-
+Felder (Counters, IDs, Laengen, Hashes, Modellnamen, Token-Counts).
+Inhalt -- der eigentliche Text einer LLM-Antwort, Argumente eines
+Tool-Calls, Begruendung einer Verweigerung -- gehoert in
+`RobotAuditNote`, niemals in `details`. Audit beantwortet *was
+genau ist passiert*, Wide-Event beantwortet *wie schnell, wie
+oft, wie teuer*.
+
+Iterationsmodell: ein Lauf hat per Default genau einen
+Phasen-Zyklus. Sobald der Tool Execution Layer existiert, kann
+`Respond` einen `ComponentRequest` an Tools setzen statt eines
+`RobotOutput`; der Kernel laesst dann den Lauf "offen" und startet
+einen weiteren Zyklus, sobald die `ComponentResponse` zurueckkommt
+(`ctx.iteration` zaehlt). So liegt ReAct (`Thought->Action->
+Observation->...`) als Schleife auf demselben Phasen-Set.
+
+#### Kernel-Klassenhierarchie
+
+- `KernelPort` (Marker auf `BusComponent`) -- Type-Check fuer Builder
+  und ControlPlane-Operationen.
+- `BaseKernel(KernelPort)` -- direkt nutzbarer Kernel. Implementiert
+  den Phasen-Loop, das Phase-Event-Emitting, die
+  Input-Subscription und sinnvolle Defaults fuer alle fuenf Phasen.
+  Bekommt seinen Actor als Konstruktor-Pflichtparameter; der Builder
+  baut den Actor zuerst und injiziert ihn.
+- `ChatKernel`, `LLMKernel`, `PlanExecuteKernel` (zukuenftig) erben
+  von `BaseKernel` und ueberschreiben einzelne Phasen, ohne den Loop
+  oder die Telemetrie zu kennen.
+
+Es gibt **keinen `EchoKernel`**: Echo-Verhalten lebt im `EchoActor`
+(siehe unten). Ein eigener "Echo-Kernel" waere eine Verschmelzung
+von Kernel und Actor und wuerde die Trennung untergraben, die das
+ganze Modell traegt.
 
 ### Actors: LLM, Programm, Mensch
 
-Drei austauschbare Bus-Teilnehmer, die alle auf demselben Actor-Topic eine
-`RobotRequest` "entscheide den naechsten Schritt" konsumieren und mit
-einer `RobotResponse` antworten:
+Austauschbare In-Process-Mitarbeiter (`category=ACTOR`, Prio 8), die
+alle dasselbe Interface erfuellen: `async run(actor_context: dict)
+-> ActorResponse`. **Nicht** auf dem Bus -- der Kernel haelt den
+Actor als direkte Python-Referenz. Damit ist ein Actor alles, was
+eine `run()`-Methode hat:
 
-- `LLM Actor`: Driver gegen Anthropic, OpenAI oder lokales Modell. Bekommt
-  das Context Image als Prompt und antwortet mit Plan, Tool-Intent oder
-  Text.
-- `Program Actor`: deterministischer Driver. Bekommt das Context Image als
-  strukturierte Daten und fuehrt Code aus. Geeignet fuer eingelaeufige
-  SOP-Schritte oder Reflexe.
-- `Human Actor`: Operator-UI als Driver. Bekommt das Context Image als
-  verstaendliche Sicht und der Mensch entscheidet manuell.
+- `EchoActor` (heute): trivialer Default. Spiegelt den Input-Text als
+  praefixierte Antwort. Macht den `BaseKernel` ohne LLM-Schluessel
+  end-to-end laufbar und dient als Debug-Linse: ein `ChatKernel` mit
+  `EchoActor` zeigt im Telemetrie-Log exakt den Actor Context, den
+  ein echter LLM gesehen haette.
+- `LLMActor` (zukuenftig): HTTP-Driver gegen Anthropic, OpenAI oder
+  lokales Modell. Bekommt den Actor Context als Prompt und antwortet
+  mit Plan, Tool-Intent oder Text. Provider, Tokenzahl, Kosten
+  landen in `ActorResponse.metadata` und werden vom Kernel als
+  `RobotAuditNote` publiziert.
+- `MockActor` (zukuenftig): scripted/fixture-getriebener Driver fuer
+  Tests und Replays.
+- `ProgramActor` (zukuenftig): deterministischer Driver. Bekommt den
+  Actor Context als strukturierte Daten und fuehrt Code aus. Geeignet
+  fuer einlaeufige SOP-Schritte oder Reflexe.
+- `HumanActor` (zukuenftig): Operator-UI als Driver. Bekommt den
+  Actor Context als verstaendliche Sicht und der Mensch entscheidet
+  manuell.
+- `PlaywrightActor` (zukuenftig): Subprozess-Actor. `start()` spawnt
+  Playwright, `run()` schickt Befehle ueber IPC, `stop()` killt das
+  Subprozess. Zeigt den Wert davon, dass Actors trotzdem
+  `RobotComponent` sind: Lifecycle, Drain und `shutdown_grace`
+  greifen automatisch.
 
-Wechsel mitten im Run ist moeglich, weil der Kernel pro `RobotRequest`
-neu adressiert. Ein Mensch kann ein Run-Stueck uebernehmen, ohne dass der
-Kernel oder der Bus angepasst werden muessen.
+Wechsel mitten im Run ist *nicht* trivial moeglich, weil der Kernel
+seinen Actor an Konstruktion erhaelt. Mehr-Actor-Setups mit
+dynamischer Auswahl (z. B. "Plan mit Anthropic, Execution mit
+OpenAI") sind eine spaetere Erweiterung; entweder durch einen
+`MultiActor`-Wrapper oder durch einen Kernel, der mehrere Actor-Slots
+bekommt.
+
+Bootreihenfolge: Actor (`Prio 8`) startet *vor* dem Kernel
+(`Prio 10`). Der Kernel ist beim Start auf einen bereits initialisierten
+Actor angewiesen (Subprozess hochgefahren, HTTP-Pool offen, etc.).
+Beim Shutdown ist die Reihenfolge umgekehrt: Kernel verstummt zuerst,
+Actor danach -- so kann er noch laufende Decisions zu Ende fuehren,
+bevor seine Ressourcen freigegeben werden.
 
 ### Kernel Capability Layer
 
@@ -595,8 +738,8 @@ Infrastruktur und werden ueber eigene Topics auf dem Bus angesprochen.
 Alles, was die Welt veraendert oder Daten aus der Welt holt. Hier passt
 [MCS](https://modelcontextstandard.io/) als Driver-Standard, weil ein
 Driver API und Secrets kapselt und der Kernel keinen Zugriff auf
-Credentials hat. Tools werden ueber `RobotRequest` mit definiertem
-Tool-Namen angefordert; das Ergebnis kommt als `RobotResponse`.
+Credentials hat. Tools werden ueber `ComponentRequest` mit definiertem
+Tool-Namen angefordert; das Ergebnis kommt als `ComponentResponse`.
 
 Die Trennung ist hart: was die Welt aendert, geht ueber den Tool
 Execution Layer; was den Roboter aendert, geht ueber den Kernel
@@ -630,13 +773,13 @@ Hybrid aus Middleware und Teilnehmer.
 
 Harte Pre-Delivery-Pruefung als Bus-Middleware:
 
-- `RobotRequest` an Tool Execution: Risk-Klasse, Approval-Regel,
+- `ComponentRequest` an Tool Execution: Risk-Klasse, Approval-Regel,
   SOP-`safe_actions`, Topic-ACL.
 - `RobotOutput` an Channel: Topic-ACL, Adressat-Vertrauensstufe.
 - `RobotInput` an Kernel: Channel-Vertrauensstufe, Ratelimit.
 
 Eine Middleware-Pruefung kann zustellen, abweisen, oder durch eine
-`RobotRequest` an den User fuer Approval umgelenkt werden. Sie ist
+`ComponentRequest` an den User fuer Approval umgelenkt werden. Sie ist
 deterministisch und fuer den Publisher unsichtbar.
 
 Inhaltliche Pruefung als expliziter Bus-Teilnehmer:
@@ -645,8 +788,8 @@ Inhaltliche Pruefung als expliziter Bus-Teilnehmer:
 - Promptinjection-Scan auf `RobotInput`.
 - Output-Filter auf `RobotOutput`.
 
-Inhaltliche Pruefer werden per `RobotRequest` aufgerufen und antworten mit
-`RobotResponse`. Sie duerfen modellbasiert oder langsam sein, ohne den
+Inhaltliche Pruefer werden per `ComponentRequest` aufgerufen und antworten mit
+`ComponentResponse`. Sie duerfen modellbasiert oder langsam sein, ohne den
 Hot Path zu blockieren.
 
 ### Persistenz-Layer
@@ -683,7 +826,7 @@ Beispiel:
 
 ```yaml
 persistence:
-  type: jsonl
+  name: jsonl
   path: logs       # Roboter-weiter Persistenz-Root, relativ zum Workspace
 telemetry:
   enabled: true    # writes to channel "telemetry"
@@ -695,7 +838,7 @@ Wechsel des Backends ist ein einziger Block-Tausch:
 
 ```yaml
 persistence:
-  type: sqlite
+  name: sqlite
   path: logs/cephix.db
 ```
 
@@ -769,6 +912,24 @@ ueber den Bus geht, geht auch in die Telemetrie. Audit ist die
 narrative Verantwortungsspur und ist explizit -- ein Eintrag nur,
 weil eine Komponente bewusst `publish_audit(...)` aufgerufen hat.
 
+#### Wer hat's getan: `source` vs `component` in Audit-Notes
+
+`RobotEvent.source` ist *bus-mechanisch* der Publisher des Events.
+`RobotAuditNote.component` ist *narrativ* die Komponente, die die
+auditierte Aktion durchgefuehrt hat. Im Regelfall sind beide
+identisch -- eine Komponente auditiert ihre eigene Tat, und
+`publish_audit(...)` setzt automatisch `component = source`.
+
+Sie fallen auseinander, wenn eine Komponente einen Audit-Eintrag
+*on behalf of* einer anderen schreibt. Kanonischer Fall: der
+Kernel published eine Audit-Note ueber einen Tool-Call seines
+in-process Actors -- der Actor selbst kann nicht publishen
+(nicht auf dem Bus), aber er ist der Doer. Dann setzt
+`publish_audit(..., on_behalf_of="actor.echo")` `source =
+"kernel.base"` und `component = "actor.echo"`. Linux Audit kennt
+dieselbe Trennung als `auid` (logging user) vs `uid` (effective
+user).
+
 #### Off-Bus-Regel
 
 Was nicht auf dem Bus stattfindet, existiert in der Architektur
@@ -798,7 +959,7 @@ Ein Loeschen von User Memory beruehrt Tool-, Skill- und SOP-Notebooks
 nicht. Damit bleibt der Roboter klueger, ohne Persoenliches zu speichern.
 
 Lernen findet als gewoehnliche Bus-Konversation statt: Ein Run schreibt
-am Ende eine `RobotRequest` an den Kernel Capability Layer, ein neues
+am Ende eine `ComponentRequest` an den Kernel Capability Layer, ein neues
 Notebook-Item zu speichern. Audit sieht das automatisch, weil es auf dem
 Bus liegt.
 
@@ -810,19 +971,20 @@ Bus liegt.
 | Persistenz | Erste Implementierung in-memory; der Bus ist als Port mit den Eigenschaften persistenter Queue-Bibliotheken modelliert (Adapter-Tausch ohne Architekturschnitt). Prio fuer fruehe Persistenz haben Audit und ausstehende Approvals. |
 | Bus-Semantik | Routende Queues, FIFO pro Teilnehmer, Priority erlaubt, Timeouts und Dead Letter. Pub/Sub fuer Lifecycle (`RobotBoot`, `RobotReady`, `RobotShutdown` mit retain) und Audit (`RobotAuditNote` ohne retain). Routable und Broadcast leben in getrennten Buckets. Der Bus ist Mechanik, *kein* Identitaetstraeger. |
 | Identitaet und Lifecycle-Owner | `Robot` ist eine *Single Class*: Identitaet (id, name) liegt direkt im Konstruktor (ohne Bus-Abhaengigkeit), die ControlPlane ist ein Feld der Klasse, und Boot/Shutdown werden vom selben Objekt orchestriert. Es gibt keine eigene `RobotService`-Schicht -- der Roboter ist sein eigener Init/PID-1. |
-| Komponenten-Reihenfolge | `BOOT_PRIORITY: dict[ComponentCategory, int]` legt die Boot-Reihenfolge fest (BUS=0, TELEMETRY=5, AUDIT=6, KERNEL=10, CHANNEL=20). Der Roboter sortiert die uebergebenen Komponenten einmal und walkt sie vorwaerts beim Boot, rueckwaerts beim Shutdown. Neue Komponenten-Kategorien aendern `BOOT_PRIORITY` -- der Lifecycle-Code bleibt unangetastet. |
+| Komponenten-Reihenfolge | `BOOT_PRIORITY: dict[ComponentCategory, int]` legt die Boot-Reihenfolge fest (BUS=0, TELEMETRY=5, AUDIT=6, ACTOR=8, KERNEL=10, CHANNEL=20). Der Roboter sortiert die uebergebenen Komponenten einmal und walkt sie vorwaerts beim Boot, rueckwaerts beim Shutdown. Neue Komponenten-Kategorien aendern `BOOT_PRIORITY` -- der Lifecycle-Code bleibt unangetastet. |
 | Komponenten-Vertrag | `RobotComponent` ist die generische Lifecycle-Einheit mit `start()/stop()/drain()`. `BusComponent` spezialisiert das fuer Teilnehmer, die den laufenden `BusPort` in `start(bus)` brauchen. Der Bus selbst ist `RobotComponent` + `BusPort`, aber kein `BusComponent`, weil er der Upstream ist. |
-| Bootstrap | Drei-Phasen-Sequenz in `Robot.start()`: Phase 1 bringt die ControlPlane out-of-band hoch; Phase 2 startet alle `SKELETON_CATEGORIES`-Komponenten in Prioritaets-Reihenfolge -- erst den Bus (`start()` ohne Bus-Argument), dann Querschnitts-Beobachter wie Telemetrie (`start(bus)`) -- und published retained `RobotBoot`; Phase 3 startet alle uebrigen Komponenten in Prioritaets-Reihenfolge (Audit vor Kernel vor Channels) und published retained `RobotReady`. Shutdown spiegelbildlich mit retained `RobotShutdown` und per-Komponente sequenziellem Drain mit Hard-Cap (SIGTERM/SIGKILL-Pattern); ControlPlane geht zuletzt offline. |
+| Bootstrap | Drei-Phasen-Sequenz in `Robot.start()`: Phase 1 bringt die ControlPlane out-of-band hoch; Phase 2 startet alle `SKELETON_CATEGORIES`-Komponenten in Prioritaets-Reihenfolge -- erst den Bus (`start()` ohne Bus-Argument), dann Querschnitts-Beobachter wie Telemetrie (`start(bus)`) -- und published retained `RobotBoot`; Phase 3 startet alle uebrigen Komponenten in Prioritaets-Reihenfolge (Audit vor Actor vor Kernel vor Channels) und published retained `RobotReady`. Shutdown spiegelbildlich mit retained `RobotShutdown` und per-Komponente sequenziellem Drain mit Hard-Cap (SIGTERM/SIGKILL-Pattern); ControlPlane geht zuletzt offline. |
 | ControlPlane | Out-of-band WebSocket auf eigenem Port (default `127.0.0.1:9876`, mit Auto-Resolve in `port_range` und finalem Fallback auf OS-assigned). Token-Auth via `CEPHIX_CONTROL_PLANE_TOKEN` in der bot-lokalen `.env`. Erste Operationen: `status`, `component.list`, `shutdown`. Bewusst nicht am Bus, damit Sovereign-Operationen auch bei wedged Bus funktionieren -- Analogie IPMI/BMC und Magic SysRq. |
 | Topic-ACLs | Teil des Bus-Vertrags. Beim Subscribe deklariert ein Teilnehmer die gewuenschten Topics; der Bus prueft die Berechtigung. Aktive Pre-Delivery-Pruefung (Block, Modifikation, Approval-Roundtrip) ist ein eigenes Plan-Item -- siehe "Bewusst noch nicht entschieden". |
 | Telemetrie und Audit | Zwei getrennte Beobachter-Komponenten an dedizierten Boot-Plaetzen (`TELEMETRY=5`, `AUDIT=6`). `BusRecorder` schreibt jedes Event via `subscribe_all`, `AuditNoteSink` schreibt nur kuratierte `RobotAuditNote`-Events. Off-Bus-Aktivitaeten muessen via `RobotComponent.publish_audit(...)` sichtbar gemacht werden. |
 | Persistenz | Ein Roboter-weiter Layer mit *einem* Konfig-Block `persistence:` und zwei Protokollen: `EventSink` (per-Stream Schreib-API) und `PersistenceProvider` (Channel-zu-Sink-Factory). Komponenten ziehen ihren Sink ueber den Channel-Namen, kennen das Backend nicht. Heute: `JsonlPersistenceProvider` als Builder-Helper. Sobald ein Backend mit geteilter Ressource dazukommt (SQLite-Pool, Supabase-Client), wird der Provider zur Komponente (`category=PERSISTENCE`, `BOOT_PRIORITY=3`) -- die Komponenten-Schnittstelle bleibt unveraendert. |
-| Governance-Platzierung | Hybrid. Harte Policy als Bus-Middleware, inhaltliche Filter als expliziter Teilnehmer per `RobotRequest`/`RobotResponse`. |
+| Governance-Platzierung | Hybrid. Harte Policy als Bus-Middleware, inhaltliche Filter als expliziter Teilnehmer per `ComponentRequest`/`ComponentResponse`. |
 | Run-Identitaet | Flache `run_id` pro Vorgang. Optionale `parent_run_id` fuer SOP-in-SOP, Skill-in-Skill und Approval-Continuation wird in der Implementierung entschieden, nicht jetzt im Bus-Vertrag fixiert. |
-| Fehler-Modellierung | `RobotResponse` traegt Erfolg- oder Fehler-Variante. Katastrophale Vorfaelle erzeugen zusaetzlich eine `RobotAuditNote`. |
+| Fehler-Modellierung | `ComponentResponse` traegt Erfolg- oder Fehler-Variante. Katastrophale Vorfaelle erzeugen zusaetzlich eine `RobotAuditNote`. |
 | Versionsbindung | Beim Start eines SOP-Runs werden alle benoetigten Skills und Tools mit Version eingefroren. Hotfixes betreffen nur neue Runs. |
-| MCS-Reichweite | MCS ist Driver-Standard im Tool Execution Layer. MCS-Toolbeschreibungen koennen zusaetzlich als Quelle fuer Tool-Schemas im Context Image dienen. SOPs und Skills bleiben eigenes Format. |
-| Actor-Modell | Ein Kernel, drei austauschbare Actors (LLM, Programm, Mensch) auf einem Actor-Topic. Modus-Wechsel pro `RobotRequest` moeglich. |
+| MCS-Reichweite | MCS ist Driver-Standard im Tool Execution Layer. MCS-Toolbeschreibungen koennen zusaetzlich als Quelle fuer Tool-Schemas im Actor Context dienen. SOPs und Skills bleiben eigenes Format. |
+| Actor-Modell | Ein Kernel, mehrere austauschbare Actors (`EchoActor` als Default, `LLMActor`/`MockActor`/`ProgramActor`/`HumanActor` zukuenftig) auf einem Actor-Topic. Modus-Wechsel pro `ComponentRequest` moeglich. Eigene `category=ACTOR` mit `BOOT_PRIORITY=8` -- Actor startet vor dem Kernel, sonst laeuft jeder erste Request ins Timeout. |
+| Kernel-Run-Pipeline | Jeder Kernel-Lauf walkt die fixe Phasen-Pipeline `Observe -> Plan -> Act -> Finalize -> Respond`. Symmetrische IO/Compute/IO-Aufteilung: Observe/Respond sind reine Bus-Phasen, Plan/Finalize reine lokale Verarbeitung, Act ist der einzige Bus-Roundtrip (zum Actor). Der `BaseKernel` implementiert den Loop, das Phasen-Telemetrie-Event (`KernelPhase` auf `kernel.phase`) und sinnvolle Defaults; spezialisierende Kernel (`ChatKernel`, `LLMKernel`, `PlanExecuteKernel`) ueberschreiben einzelne Phasen ohne den Loop zu kennen. Es gibt **keinen `EchoKernel`** -- Echo-Verhalten lebt im `EchoActor`, weil ein Kernel-internes Echo die Trennung Kernel/Actor verletzen wuerde. |
 | Kernel Capabilities vs. Tools | Was die Welt aendert, geht ueber Tool Execution Layer. Was den Roboter aendert, geht ueber Kernel Capability Layer. |
 
 Bewusst noch nicht entschieden:

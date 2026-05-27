@@ -13,8 +13,9 @@ import json
 import aiohttp
 import pytest
 
+from src.actor.echo import EchoActor
 from src.bus import AsyncioBus
-from src.kernel import EchoKernel
+from src.kernel import BaseKernel
 from src.ops.server import ControlPlane, ControlPlaneAuthRequired
 from src.robot import ControlPlaneConfig, Robot, RobotIdentity
 
@@ -24,9 +25,10 @@ def _robot(
     cp_config: ControlPlaneConfig | None = None,
     token: str | None = "test-token",
 ) -> Robot:
+    actor = EchoActor()
     return Robot(
         identity=RobotIdentity(id="x", name="X"),
-        components=[AsyncioBus(), EchoKernel()],
+        components=[AsyncioBus(), actor, BaseKernel(actor=actor)],
         control_plane_config=cp_config
         if cp_config is not None
         else ControlPlaneConfig(enabled=False),

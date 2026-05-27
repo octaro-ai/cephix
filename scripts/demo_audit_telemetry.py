@@ -40,7 +40,8 @@ logger = logging.getLogger("demo")
 ROBOT_YAML = {
     "id": "demo",
     "name": "Demo Bot",
-    "kernel": {"type": "echo", "prefix": "echo: "},
+    "kernel": {"type": "base", "actor_timeout": 5.0},
+    "actor": {"type": "echo", "prefix": "echo: "},
     "channels": [
         {"type": "websocket", "host": "127.0.0.1", "port": 0, "path": "/ws"}
     ],

@@ -7,8 +7,9 @@ plumbing separately.
 
 from __future__ import annotations
 
+from src.actor.echo import EchoActor
 from src.bus import AsyncioBus
-from src.kernel import EchoKernel
+from src.kernel import BaseKernel
 from src.ops.operations import (
     UnknownOperation,
     component_list,
@@ -21,9 +22,10 @@ from src.robot import ControlPlaneConfig, Robot, RobotIdentity
 
 def _robot(*, robot_id: str = "x", robot_name: str | None = "X") -> Robot:
     """Build a Robot with the control plane disabled (the test default)."""
+    actor = EchoActor()
     return Robot(
         identity=RobotIdentity(id=robot_id, name=robot_name),
-        components=[AsyncioBus(), EchoKernel()],
+        components=[AsyncioBus(), actor, BaseKernel(actor=actor)],
         control_plane_config=ControlPlaneConfig(enabled=False),
         shutdown_grace=0.0,
     )
@@ -51,7 +53,7 @@ async def test_status_after_serving() -> None:
         assert snap["uptime_s"] is not None
         assert snap["uptime_s"] >= 0.0
         categories = [c["category"] for c in snap["components"]]
-        assert categories == ["bus", "kernel"]
+        assert categories == ["bus", "actor", "kernel"]
     finally:
         await robot.stop()
 
@@ -61,8 +63,8 @@ async def test_component_list_returns_manifest() -> None:
     await robot.start()
     try:
         result = await component_list(robot)
-        assert [c["category"] for c in result] == ["bus", "kernel"]
-        assert all(isinstance(c["type"], str) and c["type"] for c in result)
+        assert [c["category"] for c in result] == ["bus", "actor", "kernel"]
+        assert all(isinstance(c["name"], str) and c["name"] for c in result)
     finally:
         await robot.stop()
 

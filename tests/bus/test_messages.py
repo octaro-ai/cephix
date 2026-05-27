@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from src.bus import RobotInput, RobotOutput, RobotRequest, RobotResponse
+from src.bus import (
+    KernelPhase,
+    RobotInput,
+    RobotOutput,
+    ComponentRequest,
+    ComponentResponse,
+)
 
 
 _COMMON = dict(
@@ -35,26 +41,26 @@ def test_robot_output_payload() -> None:
 
 def test_robot_request_requires_correlation_id() -> None:
     with pytest.raises(ValueError, match="correlation_id"):
-        RobotRequest(**_COMMON, action="tool.mail.list")
+        ComponentRequest(**_COMMON, action="tool.mail.list")
 
 
 def test_robot_request_requires_action() -> None:
     with pytest.raises(ValueError, match="action"):
-        RobotRequest(**_COMMON, correlation_id="corr-1", action="")
+        ComponentRequest(**_COMMON, correlation_id="corr-1", action="")
 
 
 def test_robot_response_requires_correlation_id() -> None:
     with pytest.raises(ValueError, match="correlation_id"):
-        RobotResponse(**_COMMON)
+        ComponentResponse(**_COMMON)
 
 
 def test_failed_response_requires_error() -> None:
     with pytest.raises(ValueError, match="error"):
-        RobotResponse(**_COMMON, correlation_id="corr-1", ok=False)
+        ComponentResponse(**_COMMON, correlation_id="corr-1", ok=False)
 
 
 def test_successful_response() -> None:
-    msg = RobotResponse(
+    msg = ComponentResponse(
         **_COMMON,
         correlation_id="corr-1",
         ok=True,
@@ -71,3 +77,45 @@ def test_messages_are_frozen() -> None:
 
     with pytest.raises(Exception):
         msg.topic = "other"  # type: ignore[misc]
+
+
+def test_kernel_phase_requires_phase() -> None:
+    with pytest.raises(ValueError, match="phase"):
+        KernelPhase(**_COMMON, kernel="base")
+
+
+def test_kernel_phase_requires_kernel() -> None:
+    with pytest.raises(ValueError, match="kernel"):
+        KernelPhase(**_COMMON, phase="observing")
+
+
+def test_kernel_phase_carries_iteration_and_error() -> None:
+    msg = KernelPhase(
+        **_COMMON,
+        phase="error",
+        kernel="base",
+        iteration=2,
+        error="actor failed",
+    )
+    assert msg.phase == "error"
+    assert msg.kernel == "base"
+    assert msg.iteration == 2
+    assert msg.error == "actor failed"
+    assert msg.details == {}
+
+
+def test_kernel_phase_carries_wide_event_details() -> None:
+    """The details dict is the kernel's wide-event analytics slot."""
+    msg = KernelPhase(
+        **_COMMON,
+        phase="acting",
+        kernel="base",
+        details={
+            "actor_name": "echo",
+            "actor_duration_ms": 12.4,
+            "actor_ok": True,
+        },
+    )
+    assert msg.details["actor_name"] == "echo"
+    assert msg.details["actor_duration_ms"] == 12.4
+    assert msg.details["actor_ok"] is True

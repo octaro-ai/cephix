@@ -10,8 +10,8 @@ from src.bus import (
     AsyncioBus,
     RobotInput,
     RobotOutput,
-    RobotRequest,
-    RobotResponse,
+    ComponentRequest,
+    ComponentResponse,
 )
 
 
@@ -122,9 +122,9 @@ async def test_per_subscriber_fifo_isolated_from_slow_consumer() -> None:
 async def test_request_response_correlation() -> None:
     bus = AsyncioBus()
 
-    async def echo(event: RobotRequest) -> None:  # type: ignore[arg-type]
+    async def echo(event: ComponentRequest) -> None:  # type: ignore[arg-type]
         await bus.publish(
-            RobotResponse(
+            ComponentResponse(
                 topic=f"response.{event.action}",
                 principal=event.principal,
                 source="echo",
@@ -139,7 +139,7 @@ async def test_request_response_correlation() -> None:
 
     await bus.start()
     try:
-        request = RobotRequest(
+        request = ComponentRequest(
             topic="request.echo",
             principal="user-1",
             source="test",
@@ -162,7 +162,7 @@ async def test_request_times_out_into_failed_response() -> None:
 
     await bus.start()
     try:
-        request = RobotRequest(
+        request = ComponentRequest(
             topic="request.nobody",
             principal="user-1",
             source="test",

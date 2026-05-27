@@ -11,8 +11,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from src.actor.echo import EchoActor
+from src.channels.websocket import WebsocketChannel
 from src.configuration import CONTROL_PLANE_TOKEN_ENV, load_robot_env
-from src.kernel.echo import EchoKernel
 from src.onboarding import _ask_for_kwargs, _ensure_control_plane_token
 
 
@@ -29,15 +30,13 @@ class _RecordingPrompt:
 
 
 def test_wizard_only_prompts_for_allowlisted_fields() -> None:
-    """EchoKernel exposes only ``prefix``; topics must remain silent."""
+    """EchoActor exposes only ``prefix``; nothing else must be asked."""
     recorder = _RecordingPrompt()
     with patch("src.onboarding.Prompt", recorder):
-        answers = _ask_for_kwargs(console=None, cls=EchoKernel, existing={})
+        answers = _ask_for_kwargs(console=None, cls=EchoActor, existing={})
 
     prompted = [c["prompt"] for c in recorder.calls]
     assert any("prefix" in p for p in prompted)
-    assert not any("input_topic" in p for p in prompted)
-    assert not any("output_topic" in p for p in prompted)
     # Default of prefix returned unchanged -> nothing recorded
     assert "prefix" not in answers
 
@@ -46,22 +45,35 @@ def test_wizard_records_changed_value_for_allowlisted_field() -> None:
     recorder = _RecordingPrompt()
     recorder.responses = {"  echo.prefix": "yo: "}
     with patch("src.onboarding.Prompt", recorder):
-        answers = _ask_for_kwargs(console=None, cls=EchoKernel, existing={})
+        answers = _ask_for_kwargs(console=None, cls=EchoActor, existing={})
     assert answers == {"prefix": "yo: "}
 
 
+def test_wizard_only_asks_websocket_allowlisted_fields() -> None:
+    """WebsocketChannel exposes ``host``+``port``; topic plumbing stays silent."""
+    recorder = _RecordingPrompt()
+    with patch("src.onboarding.Prompt", recorder):
+        _ask_for_kwargs(console=None, cls=WebsocketChannel, existing={})
+
+    prompted = [c["prompt"] for c in recorder.calls]
+    assert any("host" in p for p in prompted)
+    assert any("port" in p for p in prompted)
+    assert not any("input_topic" in p for p in prompted)
+    assert not any("output_topic" in p for p in prompted)
+
+
 def test_wizard_preserves_existing_values_for_blocked_fields() -> None:
-    """If a previous robot.yaml had a non-default topic, the wizard
-    keeps it instead of silently reverting to the constructor default."""
+    """If a previous robot.yaml had a non-default plumbing parameter,
+    the wizard keeps it instead of silently reverting to the
+    constructor default."""
     recorder = _RecordingPrompt()
     with patch("src.onboarding.Prompt", recorder):
         answers = _ask_for_kwargs(
             console=None,
-            cls=EchoKernel,
-            existing={"input_topic": "custom.in", "output_topic": "custom.out"},
+            cls=WebsocketChannel,
+            existing={"input_topic": "custom.input"},
         )
-    assert answers["input_topic"] == "custom.in"
-    assert answers["output_topic"] == "custom.out"
+    assert answers["input_topic"] == "custom.input"
 
 
 def test_wizard_skips_blocked_field_matching_default() -> None:
@@ -69,7 +81,7 @@ def test_wizard_skips_blocked_field_matching_default() -> None:
     with patch("src.onboarding.Prompt", recorder):
         answers = _ask_for_kwargs(
             console=None,
-            cls=EchoKernel,
+            cls=WebsocketChannel,
             existing={"input_topic": "input.message"},
         )
     assert "input_topic" not in answers

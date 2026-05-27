@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable, Protocol, runtime_checkable
 
-from src.bus.messages import RobotEvent, RobotRequest, RobotResponse
+from src.bus.messages import RobotEvent, ComponentRequest, ComponentResponse
 from src.components import BusComponent
 
 EventHandler = Callable[[RobotEvent], Awaitable[None]]
@@ -74,7 +74,7 @@ class BusPort(Protocol):
         """Publish a message on the bus.
 
         Delivered to every subscriber whose topic exactly matches
-        ``event.topic``. ``RobotResponse`` messages are additionally
+        ``event.topic``. ``ComponentResponse`` messages are additionally
         routed to outstanding ``request`` calls via ``correlation_id``.
         """
 
@@ -137,13 +137,13 @@ class BusPort(Protocol):
 
     async def request(
         self,
-        request: RobotRequest,
+        request: ComponentRequest,
         *,
         timeout: float | None = None,
-    ) -> RobotResponse:
-        """Send a ``RobotRequest`` and await the matching ``RobotResponse``.
+    ) -> ComponentResponse:
+        """Send a ``ComponentRequest`` and await the matching ``ComponentResponse``.
 
         ``timeout`` is in seconds; ``None`` waits indefinitely. On
-        timeout, a ``RobotResponse`` with ``ok=False`` and a timeout
+        timeout, a ``ComponentResponse`` with ``ok=False`` and a timeout
         error message is returned instead of raising.
         """

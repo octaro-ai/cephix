@@ -61,7 +61,7 @@ async def status(robot: Robot) -> dict[str, Any]:
         "components": [
             {
                 "category": c.category,
-                "type": c.type,
+                "name": c.name,
                 "description": c.description,
             }
             for c in robot.component_manifest
@@ -74,7 +74,7 @@ async def component_list(robot: Robot) -> list[dict[str, Any]]:
     return [
         {
             "category": c.category,
-            "type": c.type,
+            "name": c.name,
             "description": c.description,
         }
         for c in robot.component_manifest

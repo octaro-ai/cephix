@@ -32,13 +32,13 @@ class _MemorySink:
         self.closed = True
 
 
-def _note(action: str, *, actor: str = "kernel", **details: Any) -> RobotAuditNote:
+def _note(action: str, *, component: str = "kernel", **details: Any) -> RobotAuditNote:
     return RobotAuditNote(
         topic=AUDIT_TOPIC,
         principal="system",
-        source=actor,
+        source=component,
         run_id="run-1",
-        actor=actor,
+        component=component,
         action=action,
         details=details,
     )
@@ -116,7 +116,7 @@ async def test_sink_only_listens_on_audit_topic() -> None:
             principal="system",
             source="kernel",
             run_id="run-1",
-            actor="kernel",
+            component="kernel",
             action="should.not.appear",
             details={},
         )

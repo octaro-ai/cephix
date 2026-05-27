@@ -23,13 +23,12 @@ class AuditNoteSink(BusComponent):
     topic must stay clean.
     """
 
-    component_type = "audit_note_sink"
+    component_name = "audit_note_sink"
     component_category = ComponentCategory.AUDIT
     component_description = (
         "Audit recorder. Subscribes to the curated audit topic and persists "
         "every RobotAuditNote via the configured EventSink."
     )
-    component_wizard_fields = ()
 
     def __init__(self, *, sink: EventSink) -> None:
         if not isinstance(sink, EventSink):

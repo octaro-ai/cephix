@@ -5,10 +5,13 @@ The current set of subtypes covers the bus contract from
 
 - :class:`RobotInput`    -- conversational input from the outside world.
 - :class:`RobotOutput`   -- message to the outside world (fire-and-forget).
-- :class:`RobotRequest`  -- directed request between bus components
-  that expects a response.
-- :class:`RobotResponse` -- reply to a ``RobotRequest``, correlated via
-  ``correlation_id``.
+- :class:`ComponentRequest`  -- directed request between two
+  components on the bus that expects a response. ROS-style "service"
+  call: each service owns its own topic (e.g. ``tool.invoke`` for
+  the future tool execution layer); there is *no* global request
+  topic. Correlation via ``correlation_id``.
+- :class:`ComponentResponse` -- reply to a ``ComponentRequest``,
+  routed back to the original sender via ``correlation_id``.
 - :class:`RobotBoot`     -- early lifecycle broadcast: identity and the
   component manifest are now on the bus. Published *before* the kernel
   and channels attach so that their subscriptions immediately learn
@@ -27,9 +30,45 @@ The current set of subtypes covers the bus contract from
   persists every note. Distinct from raw telemetry: telemetry sees
   *every* event on the bus, audit sees only the deliberately
   recorded ones.
+- :class:`KernelPhase` -- emitted by a kernel as it walks through
+  the per-input run state machine (``observing`` -> ``planning`` ->
+  ``acting`` -> ``finalizing`` -> ``responding`` -> ``done``). The
+  Wide-Event log of the kernel: each phase transition carries a
+  free-form ``details`` dict where the kernel attaches structured,
+  queryable fields (durations, counters, IDs, model names, token
+  costs, error codes). The ``done`` event of each run is the
+  canonical wide-event row aggregating the full run.
 
 ``RobotTrigger`` is intentionally added later, once a concrete use
 case requires it.
+
+Topic constants
+---------------
+
+Every well-known bus topic lives in this module. Components that
+publish or subscribe should import the constant rather than hard-code
+the string. This keeps the wire vocabulary in one place and makes
+renames a one-file refactor.
+
+- :data:`LIFECYCLE_TOPIC` -- ``RobotBoot`` / ``RobotReady`` /
+  ``RobotShutdown``.
+- :data:`AUDIT_TOPIC` -- :class:`RobotAuditNote`.
+- :data:`KERNEL_PHASE_TOPIC` -- :class:`KernelPhase`.
+- :data:`INPUT_TOPIC` -- :class:`RobotInput` from channels into the
+  kernel.
+- :data:`OUTPUT_TOPIC` -- :class:`RobotOutput` from the kernel back
+  to channels.
+
+Actors deliberately do *not* have a topic here: the kernel calls
+into its actor as a direct in-process method call, not via the bus.
+
+:class:`ComponentRequest` / :class:`ComponentResponse` are the
+ROS-style "services" of the bus: each service owns its own topic
+(e.g. a future ``TOOL_TOPIC = "tool.invoke"``) and the request /
+response correlation is end-to-end. There is no global request
+topic on purpose -- each service-providing component publishes a
+constant in the same module, so subscribers and senders agree on
+the wire vocabulary in one place.
 """
 
 from __future__ import annotations
@@ -41,7 +80,10 @@ from typing import Any
 
 
 LIFECYCLE_TOPIC = "robot.lifecycle"
-AUDIT_TOPIC = "robot.audit.note"
+AUDIT_TOPIC = "audit.note"
+KERNEL_PHASE_TOPIC = "kernel.phase"
+INPUT_TOPIC = "input.message"
+OUTPUT_TOPIC = "output.message"
 
 
 def _new_event_id() -> str:
@@ -97,11 +139,11 @@ class RobotOutput(RobotEvent):
 
 
 @dataclass(frozen=True, kw_only=True)
-class RobotRequest(RobotEvent):
+class ComponentRequest(RobotEvent):
     """Directed request between bus components.
 
     Expects a response. ``correlation_id`` must be set so the bus can
-    deliver the matching ``RobotResponse`` back to the original sender.
+    deliver the matching ``ComponentResponse`` back to the original sender.
     """
 
     action: str = ""
@@ -109,14 +151,14 @@ class RobotRequest(RobotEvent):
 
     def __post_init__(self) -> None:
         if not self.correlation_id:
-            raise ValueError("RobotRequest requires a correlation_id")
+            raise ValueError("ComponentRequest requires a correlation_id")
         if not self.action:
-            raise ValueError("RobotRequest requires an action")
+            raise ValueError("ComponentRequest requires an action")
 
 
 @dataclass(frozen=True, kw_only=True)
-class RobotResponse(RobotEvent):
-    """Reply to a ``RobotRequest``.
+class ComponentResponse(RobotEvent):
+    """Reply to a ``ComponentRequest``.
 
     ``correlation_id`` must exactly match the originating request. The
     bus uses this field to route the response back to the original
@@ -129,9 +171,9 @@ class RobotResponse(RobotEvent):
 
     def __post_init__(self) -> None:
         if not self.correlation_id:
-            raise ValueError("RobotResponse requires a correlation_id")
+            raise ValueError("ComponentResponse requires a correlation_id")
         if not self.ok and not self.error:
-            raise ValueError("Failed RobotResponse must carry an error message")
+            raise ValueError("Failed ComponentResponse must carry an error message")
 
 
 @dataclass(frozen=True)
@@ -143,10 +185,15 @@ class ComponentInfo:
     together in :class:`RobotBoot` so that audit, observers and
     identity-aware components can learn the full composition with one
     event.
+
+    ``category`` is the role bucket (``"bus"``, ``"actor"``,
+    ``"kernel"``, ...). ``name`` is the registered component name
+    (``"asyncio"``, ``"echo"``, ``"base"``, ...) -- the same string
+    users put under ``name:`` in their ``robot.yaml``.
     """
 
     category: str
-    type: str
+    name: str
     description: str = ""
 
 
@@ -231,8 +278,14 @@ class RobotAuditNote(RobotEvent):
     fields mirror a "who did what, on whose behalf, with what
     arguments" structure:
 
-    - ``actor`` -- the component identity (typically its
-      ``component_type``).
+    - ``component`` -- the component whose action this note records.
+      Defaults to the publisher (:attr:`RobotEvent.source`) if not
+      given. Override only for *publish-on-behalf-of* records, where
+      one component records what another did. Canonical example: the
+      kernel publishes an audit note for its in-process actor (which
+      is not on the bus), so ``source = "kernel.base"`` while
+      ``component = "actor.echo"``. Linux audit makes the same split
+      between ``auid`` (logging user) and ``uid`` (effective user).
     - ``action`` -- a short machine-readable label (e.g.
       ``"tool.invoke"``, ``"approval.deny"``, ``"mail.send"``).
     - ``details`` -- arbitrary JSONable payload. Sinks serialize this
@@ -246,12 +299,89 @@ class RobotAuditNote(RobotEvent):
     ``AUDIT_TOPIC``.
     """
 
-    actor: str = ""
+    component: str = ""
     action: str = ""
     details: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.actor:
-            raise ValueError("RobotAuditNote requires a non-empty actor")
+        if not self.component:
+            # Default the doer to the publisher: the common case is a
+            # component auditing its own action. Frozen dataclass, so
+            # we have to bypass __setattr__.
+            object.__setattr__(self, "component", self.source)
+        if not self.component:
+            raise ValueError(
+                "RobotAuditNote requires a non-empty component "
+                "(no fallback available because source is empty too)"
+            )
         if not self.action:
             raise ValueError("RobotAuditNote requires a non-empty action")
+
+
+@dataclass(frozen=True, kw_only=True)
+class KernelPhase(RobotEvent):
+    """Phase transition emitted by a kernel as it processes one input.
+
+    Every kernel run walks a deterministic state machine
+    (``observing`` -> ``planning`` -> ``acting`` -> ``finalizing`` ->
+    ``responding`` -> ``done``). On each transition the kernel
+    publishes one of these events on :data:`KERNEL_PHASE_TOPIC`.
+
+    Wide-event design
+    -----------------
+
+    These events are the kernel's *wide-event log* (in the Charity
+    Majors / canonical-log-line sense). Each transition carries a
+    free-form ``details`` dict where the kernel attaches structured,
+    queryable analytics:
+
+    - ``acting`` events carry actor name, actor latency, success
+      flag, and -- for LLM actors -- model name, token counts, cost.
+    - ``done`` events aggregate the whole run: total duration, total
+      iterations, total actor time, outcome (``"ok"`` / ``"error"`` /
+      ``"empty"``).
+    - ``error`` events name the failed phase and a short error type.
+
+    The ``done`` event is the canonical wide-event row for an entire
+    run; phase-specific events are the span-level breakdown. The
+    persistence layer writes both to JSONL, so the same data answers
+    both "where in the run did time go?" and "show me all failed
+    runs in the last hour with model X" without a second source of
+    truth.
+
+    Cardinal rule for ``details``: structured fields only. Durations,
+    counts, IDs, model names, hashes, error codes, flags. *Not*: full
+    payloads (chat history, full text, raw images) or stack traces.
+    Inhalt belongs in :class:`RobotAuditNote`; debug minutiae stay
+    out of the wide-event log.
+
+    Fields:
+
+    - ``phase`` -- the phase being entered (mirrors :class:`RunPhase`).
+    - ``iteration`` -- 0-based iteration counter; increments only when
+      tool round-trips reopen the loop.
+    - ``kernel`` -- ``component_name`` of the emitting kernel so
+      observers can attribute traffic with multiple kernels on a bus.
+    - ``error`` -- non-empty only when ``phase == "error"``; carries
+      a short, human-readable error label. Detailed error context
+      goes into ``details``.
+    - ``details`` -- arbitrary JSONable analytics fields. Empty by
+      default; the kernel decides what to put in.
+
+    Distinct from :class:`RobotAuditNote`: phase events are
+    fine-grained operational telemetry that the kernel emits for
+    *every* run; audit notes are deliberate, semantic records of
+    curated actions (tool invocations, approvals, denials).
+    """
+
+    phase: str = ""
+    iteration: int = 0
+    kernel: str = ""
+    error: str = ""
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.phase:
+            raise ValueError("KernelPhase requires a non-empty phase")
+        if not self.kernel:
+            raise ValueError("KernelPhase requires a non-empty kernel")

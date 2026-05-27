@@ -221,7 +221,7 @@ class Robot:
         return tuple(
             ComponentInfo(
                 category=c.component_category.value,
-                type=c.component_type,
+                name=c.component_name,
                 description=c.component_description,
             )
             for c in self._components
@@ -594,7 +594,7 @@ class Robot:
 
         def key(c: RobotComponent) -> tuple[int, str]:
             prio = BOOT_PRIORITY.get(c.component_category, unknown_priority)
-            return (prio, c.component_type)
+            return (prio, c.component_name)
 
         sortable.sort(key=key)
         return sortable

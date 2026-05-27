@@ -13,7 +13,7 @@ from src.components import BusComponent, ComponentCategory
 class _Producer(BusComponent):
     """Tiny test component that uses publish_audit on demand."""
 
-    component_type = "test_producer"
+    component_name = "test_producer"
     component_category = ComponentCategory.KERNEL
 
     def __init__(self) -> None:
@@ -67,7 +67,7 @@ async def test_publish_audit_lands_on_audit_topic() -> None:
     assert len(received) == 1
     note = received[0]
     assert note.topic == AUDIT_TOPIC
-    assert note.actor == "test_producer"
+    assert note.component == "test_producer"
     assert note.action == "tool.invoke"
     assert note.details == {"tool": "grep", "argv": ["-n", "x"]}
     assert note.source == "test_producer"
@@ -110,6 +110,6 @@ async def test_publish_audit_reaches_audit_note_sink_end_to_end() -> None:
 
     assert len(persistence.records) == 1
     record = persistence.records[0]
-    assert record["actor"] == "test_producer"
+    assert record["component"] == "test_producer"
     assert record["action"] == "approval.deny"
     assert record["details"] == {"reason": "policy"}

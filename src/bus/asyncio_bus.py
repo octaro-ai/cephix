@@ -7,7 +7,7 @@ Properties of iteration 0:
   subscriber only slows down its own queue.
 - Request/response correlation via ``correlation_id`` backed by
   :class:`asyncio.Future`.
-- Timeouts are surfaced as failure ``RobotResponse`` instances rather
+- Timeouts are surfaced as failure ``ComponentResponse`` instances rather
   than raised exceptions.
 
 Intentionally not here:
@@ -25,8 +25,8 @@ from dataclasses import dataclass, field
 
 from src.bus.messages import (
     RobotEvent,
-    RobotRequest,
-    RobotResponse,
+    ComponentRequest,
+    ComponentResponse,
     _new_event_id,
     _now_iso,
 )
@@ -57,17 +57,16 @@ class _AsyncSubscription:
 class AsyncioBus(BusPort, RobotComponent):
     """In-memory bus on top of asyncio primitives."""
 
-    component_type = "asyncio"
+    component_name = "asyncio"
     component_category = ComponentCategory.BUS
     component_description = "In-memory asyncio bus. Single-process, no persistence."
-    component_wizard_fields = ()
 
     def __init__(self) -> None:
         self._subscriptions: dict[str, list[_AsyncSubscription]] = {}
         self._broadcast_subscriptions: dict[str, list[_AsyncSubscription]] = {}
         self._all_subscriptions: list[_AsyncSubscription] = []
         self._retained: dict[str, RobotEvent] = {}
-        self._pending: dict[str, asyncio.Future[RobotResponse]] = {}
+        self._pending: dict[str, asyncio.Future[ComponentResponse]] = {}
         self._running = False
         self._lock = asyncio.Lock()
 
@@ -129,7 +128,7 @@ class AsyncioBus(BusPort, RobotComponent):
         if not self._running:
             raise RuntimeError("AsyncioBus is not running; call start() first")
 
-        if isinstance(event, RobotResponse):
+        if isinstance(event, ComponentResponse):
             fut = self._pending.pop(event.correlation_id or "", None)
             if fut is not None and not fut.done():
                 fut.set_result(event)
@@ -201,19 +200,19 @@ class AsyncioBus(BusPort, RobotComponent):
 
     async def request(
         self,
-        request: RobotRequest,
+        request: ComponentRequest,
         *,
         timeout: float | None = None,
-    ) -> RobotResponse:
+    ) -> ComponentResponse:
         if not self._running:
             raise RuntimeError("AsyncioBus is not running; call start() first")
 
         correlation_id = request.correlation_id
         if not correlation_id:
-            raise ValueError("RobotRequest requires a correlation_id")
+            raise ValueError("ComponentRequest requires a correlation_id")
 
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[RobotResponse] = loop.create_future()
+        future: asyncio.Future[ComponentResponse] = loop.create_future()
         self._pending[correlation_id] = future
 
         try:
@@ -223,7 +222,7 @@ class AsyncioBus(BusPort, RobotComponent):
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending.pop(correlation_id, None)
-            return RobotResponse(
+            return ComponentResponse(
                 event_id=_new_event_id(),
                 topic=request.topic,
                 principal=request.principal,
