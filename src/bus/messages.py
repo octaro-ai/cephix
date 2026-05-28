@@ -97,6 +97,44 @@ INPUT_TOPIC = "input.message"
 OUTPUT_TOPIC = "output.message"
 
 
+def component_lifecycle_topic(name: str) -> str:
+    """Per-component lifecycle topic: ``component.<name>.lifecycle``.
+
+    Each component owns its own retain slot via this dedicated topic,
+    so a slow-updating component does not get its retained snapshot
+    clobbered by a chatty neighbour. Subscribers that want to watch
+    *one* component subscribe directly; observers that want to watch
+    every component fall back to :meth:`BusPort.subscribe_all` and
+    filter on the topic prefix until wildcard subscriptions land in
+    the bus.
+
+    The entity-first hierarchy (``component.<name>.*``) clusters all
+    events for a single component together -- ``component.<name>.lifecycle``,
+    ``component.<name>.mount``, future ``component.<name>.metrics`` --
+    so per-component filtering in logs and dashboards is one prefix
+    match.
+    """
+    if not name:
+        raise ValueError("component_lifecycle_topic requires a non-empty name")
+    return f"component.{name}.lifecycle"
+
+
+def component_mount_topic(name: str) -> str:
+    """Per-component mount-event topic: ``component.<name>.mount``.
+
+    Mirrors :func:`component_lifecycle_topic` for :class:`MountEvent`
+    streams. Mount events are intentionally *not* retained: the
+    authoritative "what is currently mounted" snapshot lives in the
+    retained :class:`ComponentLifecycle` (via
+    :attr:`ComponentInfo.metadata`). Mount events are the realtime
+    stream of transitions for subscribers that need to react when
+    something gets swapped.
+    """
+    if not name:
+        raise ValueError("component_mount_topic requires a non-empty name")
+    return f"component.{name}.mount"
+
+
 def _new_event_id() -> str:
     return f"evt-{uuid.uuid4().hex[:12]}"
 
@@ -105,22 +143,61 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-ResultStatus = Literal["ok", "error"]
+ResultStatus = Literal["ok", "warn", "error"]
 """Discriminator on every :class:`Failable` event.
 
-Two values, two cases:
+Three values, three cases:
 
 - ``"ok"`` -- the event reports a successful outcome. The companion
   :attr:`Failable.error` field is ``None``.
+- ``"warn"`` -- the event reports a soft issue: the operation
+  succeeded (or partially succeeded) but the publisher wants to flag
+  something. :attr:`Failable.error` carries a structured
+  :class:`ErrorInfo` describing the issue (e.g. ``code="cache_fallback"``,
+  ``code="rate_limit_retry"``, ``code="partial_result"``).
 - ``"error"`` -- the event reports a failure. :attr:`Failable.error`
   carries the structured :class:`ErrorInfo`.
 
+The split between ``warn`` and ``error`` lets channels render a
+yellow indicator for soft issues while keeping the green/red
+contract simple. Subscribers that care only about hard failures
+filter on ``"status":"error"``; subscribers that want every
+abnormality filter on ``status != "ok"``.
+
 Stays a string (not an int / not an :class:`enum.Enum`) on purpose:
 we are in dynamic Python, the JSONL telemetry is human-read first,
-and ``"status":"error"`` filters cleanly with ``rg`` / ``jq`` /
-``grep``. HTTP-style numeric status codes carry web-protocol baggage
-that does not fit our domain; granular categorisation lives on
-:attr:`ErrorInfo.code` instead.
+and ``"status":"warn"`` / ``"status":"error"`` filter cleanly with
+``rg`` / ``jq`` / ``grep``. HTTP-style numeric status codes carry
+web-protocol baggage that does not fit our domain; granular
+categorisation lives on :attr:`ErrorInfo.code` instead.
+"""
+
+
+LifecyclePhase = Literal["boot", "ready", "warn", "failure", "shutdown"]
+"""Discriminator on every :class:`LifecycleAware` event.
+
+Five values, three groups:
+
+- ``"boot"`` -- the entity has come up but is not yet operational.
+  Equivalent to a kernel announcing itself in dmesg before userspace
+  is reachable.
+- ``"ready"`` -- the entity is fully operational. Equivalent to
+  systemd's ``multi-user.target reached``.
+- ``"warn"`` -- the entity is operational but flagging an issue
+  (degraded mode, retried connection, slow upstream, ...). The
+  publisher attaches details via :attr:`LifecycleAware.message` and
+  through richer state on the carrier event (e.g. the fresh
+  :attr:`ComponentInfo.metadata` snapshot on ``ComponentLifecycle``).
+- ``"failure"`` -- the entity is not operational. Distinct from
+  ``"shutdown"``: failure is unintended, shutdown is graceful.
+- ``"shutdown"`` -- graceful drain has begun. Analog to POSIX
+  ``SIGTERM``: the entity acknowledges it is going away.
+
+There is intentionally no ``"update"`` phase. Re-publishing the
+current phase with a fresh payload is the update mechanism: the
+retained slot is overwritten and the latest state is what every
+subscriber sees. This mirrors MQTT's retain semantics and keeps the
+phase vocabulary tied to *state changes*, not refresh cadence.
 """
 
 
@@ -174,7 +251,18 @@ class Failable:
     Adds two fields to whichever class mixes it in: a
     :data:`ResultStatus` discriminator and an optional
     :class:`ErrorInfo`. Enforces a hard invariant in
-    :meth:`__post_init__`: ``status == "ok"`` iff ``error is None``.
+    :meth:`__post_init__`:
+
+    - ``status == "ok"`` iff ``error is None``;
+    - ``status in ("warn", "error")`` requires a non-``None``
+      :class:`ErrorInfo`.
+
+    The ``warn`` status carries a structured :class:`ErrorInfo` for
+    the same reason ``error`` does: the wide-event log query
+    ``"code":"<x>"`` finds every soft *and* hard occurrence of an
+    issue across every Failable event class. The status discriminator
+    tells subscribers how to render it (yellow vs. red); the code
+    classifies it.
 
     Subclasses that override ``__post_init__`` *must* call
     ``super().__post_init__()`` so the invariant runs.
@@ -194,9 +282,49 @@ class Failable:
             raise ValueError(
                 f"{type(self).__name__}: status='ok' must not carry an ErrorInfo"
             )
-        if self.status == "error" and self.error is None:
+        if self.status in ("warn", "error") and self.error is None:
             raise ValueError(
-                f"{type(self).__name__}: status='error' requires an ErrorInfo"
+                f"{type(self).__name__}: status={self.status!r} requires an ErrorInfo"
+            )
+
+
+@dataclass(frozen=True, kw_only=True)
+class LifecycleAware:
+    """Mixin contract for events that report a lifecycle phase.
+
+    Adds two fields to whichever class mixes it in: a
+    :data:`LifecyclePhase` discriminator and a status-agnostic
+    :attr:`message` slot. Enforces in :meth:`__post_init__` that
+    :attr:`phase` is one of the five canonical
+    :data:`LifecyclePhase` values.
+
+    Used by both :class:`RobotLifecycle` (the robot-as-a-whole
+    broadcast) and :class:`ComponentLifecycle` (per-component
+    broadcasts under ``component.<name>.lifecycle``). Single shared
+    vocabulary so a subscriber can apply the same render rules
+    (green / yellow / red / shutdown) to either source.
+
+    :attr:`message` is a short, human-readable note about *this*
+    transition (``"draining queue"``, ``"model loaded"``,
+    ``"rate limit hit, falling back to cache"``). Status-agnostic:
+    publishers may attach a message on every phase, including
+    ``ready``. Detailed structured context belongs on the carrier
+    event (e.g. :attr:`ComponentInfo.metadata` on
+    :class:`ComponentLifecycle`) or on a :class:`RobotAuditNote`.
+
+    Subclasses that override ``__post_init__`` *must* call
+    ``super().__post_init__()`` so the phase check runs.
+    """
+
+    phase: LifecyclePhase = "boot"
+    message: str = ""
+
+    def __post_init__(self) -> None:
+        allowed = ("boot", "ready", "warn", "failure", "shutdown")
+        if self.phase not in allowed:
+            raise ValueError(
+                f"{type(self).__name__}.phase must be one of {allowed}, "
+                f"got {self.phase!r}"
             )
 
 
@@ -304,27 +432,40 @@ class ComponentInfo:
     component it composes itself out of and publishes them all
     together in :class:`RobotLifecycle` (``phase="boot"`` and
     ``phase="ready"``) so that audit, observers and identity-aware
-    components can learn the full composition with one event.
+    components can learn the full composition with one event. The
+    same snapshot also rides on :class:`ComponentLifecycle` for the
+    per-component status broadcasts.
 
     ``category`` is the role bucket (``"bus"``, ``"actor"``,
     ``"kernel"``, ...). ``name`` is the registered component name
     (``"asyncio"``, ``"echo"``, ``"base"``, ...) -- the same string
     users put under ``name:`` in their ``robot.yaml``.
+
+    ``metadata`` is the component-specific telemetry slot.
+    Components that want to expose richer state to the manifest and
+    to per-component lifecycle events populate it with structured,
+    JSONable fields. Examples: an ``LLMActor`` puts ``model_name``,
+    ``provider`` and ``context_window_tokens`` here; a tool layer
+    puts the count of mounted tools; a queue-backed channel puts
+    pending message counters. Keep it queryable -- the wide-event
+    rule applies (structured fields, no full payloads or stack
+    traces).
     """
 
     category: str
     name: str
     description: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, kw_only=True)
-class RobotLifecycle(RobotEvent):
-    """Broadcast lifecycle phase transition.
+class RobotLifecycle(LifecycleAware, RobotEvent):
+    """Broadcast lifecycle phase transition for the robot as a whole.
 
     One event class for the entire lifecycle. The :attr:`phase` field
-    discriminates between three retained broadcasts on
-    :data:`LIFECYCLE_TOPIC`, all published by :class:`src.robot.Robot`
-    itself:
+    (inherited from :class:`LifecycleAware`) discriminates between
+    retained broadcasts on :data:`LIFECYCLE_TOPIC`, all published by
+    :class:`src.robot.Robot` itself:
 
     - ``boot`` -- early lifecycle broadcast, *before* kernel and
       channels attach. Carries identity and the full component
@@ -336,6 +477,12 @@ class RobotLifecycle(RobotEvent):
       the retained slot so a late subscriber sees the most recent
       authoritative state.
       Analog: ``systemd multi-user.target reached``.
+    - ``warn`` -- the robot is operational but flagging an issue
+      with one or more components. Reserved for the owner-loop /
+      health-check path; not produced by the boot path itself.
+    - ``failure`` -- the robot reports an unrecoverable degradation.
+      Distinct from ``shutdown``: failure is unintended, shutdown
+      is graceful.
     - ``shutdown`` -- graceful shutdown is starting. Audit sinks
       and other observers learn here that drain has begun. The
       drain itself is *not* coordinated through this event -- the
@@ -347,13 +494,12 @@ class RobotLifecycle(RobotEvent):
       SIGKILL.
 
     Discriminator design follows :class:`KernelPhase`: structural
-    variation lives in a field, not in a subclass. ``boot`` and
-    ``ready`` share envelope and manifest; ``shutdown`` shares the
-    envelope and may carry an explanatory ``message``. Splitting
-    these into three classes would have produced ~95% structural
-    overlap -- the InfoQ "schema proliferation" pattern -- without
-    any subscriber-side benefit, since the lifecycle topic and the
-    publishing component are identical for all three.
+    variation lives in a field, not in a subclass. All phases share
+    envelope and manifest; splitting them into separate classes
+    would have produced ~95% structural overlap -- the InfoQ
+    "schema proliferation" pattern -- without any subscriber-side
+    benefit, since the lifecycle topic and the publishing component
+    are identical for all phases.
 
     Why no ``grace_seconds``: the shutdown grace window is
     supervisor policy, not part of the broadcast. It lives on
@@ -365,29 +511,30 @@ class RobotLifecycle(RobotEvent):
     (no payload), systemd ``TimeoutStopSec=`` (unit property),
     Kubernetes ``terminationGracePeriodSeconds`` (pod spec).
 
-    Why ``message`` instead of ``reason``: the robot is always the
-    publisher, so this is the robot's announcement, not a
-    justification given by some external party. ``message`` is
-    short, human-readable text the robot supplies a default for and
-    that operators can override (e.g. via ``Robot.stop(message=...)``).
-    Following the same convention as :attr:`KernelPhase.message`,
-    this is a short label, not a free-form payload -- detailed
-    context belongs in a :class:`RobotAuditNote`.
+    Why ``message`` (inherited from :class:`LifecycleAware`)
+    instead of ``reason``: the robot is always the publisher, so
+    this is the robot's announcement, not a justification given by
+    some external party. ``message`` is short, human-readable text
+    the robot supplies a default for and that operators can
+    override (e.g. via ``Robot.stop(message=...)``). Following the
+    same convention as :attr:`KernelPhase.message`, this is a short
+    label, not a free-form payload -- detailed context belongs in
+    a :class:`RobotAuditNote`.
+
+    No ``update`` phase: when component manifest snapshots change
+    (e.g. a component swapped its mounted slot), the robot
+    re-publishes the current phase with the fresh manifest. The
+    retained slot is overwritten, late subscribers see the latest
+    state, and there is no separate "refresh" phase to interpret.
     """
 
-    phase: Literal["boot", "ready", "shutdown"] = "boot"
     robot_id: str | None = None
     robot_name: str | None = None
     boot_id: str = ""
     components: tuple[ComponentInfo, ...] = ()
-    message: str = ""
 
     def __post_init__(self) -> None:
-        allowed = ("boot", "ready", "shutdown")
-        if self.phase not in allowed:
-            raise ValueError(
-                f"RobotLifecycle.phase must be one of {allowed}, got {self.phase!r}"
-            )
+        super().__post_init__()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -547,3 +694,130 @@ class KernelPhase(Failable, RobotEvent):
             raise ValueError("KernelPhase requires a non-empty phase")
         if not self.kernel:
             raise ValueError("KernelPhase requires a non-empty kernel")
+
+
+@dataclass(frozen=True, kw_only=True)
+class ComponentLifecycle(LifecycleAware, RobotEvent):
+    """Per-component lifecycle phase transition.
+
+    Each component owns its own lifecycle topic:
+    ``component.<info.name>.lifecycle`` (built via
+    :func:`component_lifecycle_topic`). Retain semantics are the
+    standard "one retained event per topic", so a late subscriber
+    sees the component's most recent state without needing a
+    multi-slot retain map.
+
+    Owner-pattern: components do not publish their own lifecycle
+    events. The owner publishes for them.
+
+    - The :class:`src.robot.Robot` owns its directly registered
+      components and publishes ``boot``, ``ready``, ``warn``,
+      ``failure`` and ``shutdown`` for each of them based on
+      :meth:`RobotComponent.health_check` results.
+    - A kernel owns its in-process actor (which has no bus
+      attachment) and publishes the actor's lifecycle on the
+      kernel's behalf.
+    - Future tool layers, governance components and similar
+      sub-orchestrators do the same for whatever they manage.
+
+    The ``parent`` field names the owner's
+    :attr:`RobotComponent.component_name` so a subscriber can tell
+    "actor.echo went to warn -- which kernel owns it?" at a glance.
+    Empty ``parent`` means "owned directly by the robot".
+
+    The :attr:`info` snapshot rides on every event, so a subscriber
+    that only wants the current state of the world subscribes
+    broadcast and reads ``info.metadata`` from the retained slot.
+    There is no separate ``update`` phase: when metadata changes
+    (an LLM actor swaps its model, a tool layer mounts a new tool),
+    the owner re-publishes the current phase with a fresh
+    :class:`ComponentInfo`. Last-writer-wins on the retained slot.
+
+    Distinct from :class:`MountEvent`: lifecycle is the *state of
+    the component itself* (running, degraded, shutting down). Mount
+    events are the *transitions of internal slots* a component
+    manages (which actor / tool / SOP it currently has wired).
+    """
+
+    info: ComponentInfo
+    parent: str = ""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not self.info.name:
+            raise ValueError(
+                "ComponentLifecycle.info requires a non-empty ComponentInfo.name"
+            )
+
+
+@dataclass(frozen=True, kw_only=True)
+class MountEvent(RobotEvent):
+    """Realtime stream event: an internal slot of a component changed.
+
+    Published by composite components (kernels, tool layers, SOP
+    libraries, ...) when one of their managed slots gets wired or
+    unwired. Travels on ``component.<owner>.mount`` (built via
+    :func:`component_mount_topic`).
+
+    Use cases:
+
+    - A kernel reporting which actor it currently runs:
+      ``MountEvent(owner="kernel.base", slot="actor",
+      mounted=ComponentInfo(category="actor", name="openai",
+      metadata={"model": "gpt-5"}))``.
+    - A future tool layer reporting which tools are wired:
+      ``slot="tool.weather"``, ``slot="tool.mail"``, ...
+
+    Mount events are *not retained*: the authoritative "what is
+    currently mounted" snapshot lives in
+    :attr:`ComponentInfo.metadata` on the retained
+    :class:`ComponentLifecycle`. Mount events are the
+    fire-and-forget realtime stream for subscribers that need to
+    react to swaps. Late subscribers reconstruct the current state
+    from the retained lifecycle, not from a mount-event replay.
+
+    Two phases only: ``mounted`` and ``unmounted``. Replacing a
+    slot is two events (unmounted-old, mounted-new) so each slot
+    has at most one occupant at any timestamp; this keeps observer
+    state machines trivial and matches the way ROS service
+    handlers are reported.
+
+    The :attr:`mounted` field is the snapshot of what is in the
+    slot. Required when ``phase == "mounted"`` (the snapshot is the
+    point of the event); ``None`` when ``phase == "unmounted"``.
+
+    Failure semantics on purpose absent: ``MountEvent`` is *not* a
+    :class:`Failable` event. It reports a successful transition
+    after the fact, never an attempted one. Mount failures travel
+    via :class:`ComponentLifecycle` (``phase="warn"`` or
+    ``phase="failure"``, ``error=ErrorInfo(code="mount_failed",
+    ...)``) on the owner's lifecycle topic, optionally accompanied
+    by a :class:`RobotAuditNote` when the attempt itself needs an
+    audit trail. Splitting these concerns keeps each event class
+    semantically pure: observations are fire-and-forget, status
+    lives on lifecycle, deliberate actions are in the audit log.
+    """
+
+    phase: Literal["mounted", "unmounted"] = "mounted"
+    owner: str = ""
+    slot: str = ""
+    mounted: ComponentInfo | None = None
+
+    def __post_init__(self) -> None:
+        if self.phase not in ("mounted", "unmounted"):
+            raise ValueError(
+                f"MountEvent.phase must be 'mounted' or 'unmounted', "
+                f"got {self.phase!r}"
+            )
+        if not self.owner:
+            raise ValueError("MountEvent requires a non-empty owner")
+        if not self.slot:
+            raise ValueError("MountEvent requires a non-empty slot")
+        if self.phase == "mounted" and self.mounted is None:
+            raise ValueError(
+                "MountEvent(phase='mounted') requires a mounted ComponentInfo"
+            )
+        if self.phase == "unmounted" and self.mounted is not None:
+            raise ValueError(
+                "MountEvent(phase='unmounted') must not carry a mounted ComponentInfo"
+            )

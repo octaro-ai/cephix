@@ -173,6 +173,14 @@ Mapping pro Nachrichtentyp:
   `robot.lifecycle`. Eine Quelle (der `Robot`), beliebig viele
   Subscriber. Phasen-Variation lebt im `phase`-Feld, nicht in
   Subklassen.
+- `ComponentLifecycle`: Pub/Sub mit retain auf
+  `component.<name>.lifecycle` — eigenes Topic pro Komponente,
+  also ein Retain-Slot pro Komponente. Owner publiziert; aktuell
+  Robot fuer direkte Kinder, Kernel fuer den In-Process-Actor.
+- `MountEvent`: Pub/Sub *ohne* retain auf `component.<name>.mount`.
+  Der "aktueller Mount-Stand"-Snapshot lebt in
+  `ComponentInfo.metadata` auf dem retained `ComponentLifecycle`;
+  `MountEvent` ist nur der Realtime-Stream der Transitionen.
 - `RobotAuditNote`: Routable Queue auf `robot.audit.note`. Wird vom
   `AuditNoteSink` konsumiert (Komponente mit `category=AUDIT`).
   Telemetry-Recorder sieht die Note ebenfalls, aber als Teil seines
@@ -204,8 +212,10 @@ Erwartungshaltung aus:
   Korrelation auf die ausloesende Anfrage. Erbt von `Failable`: Erfolg
   (`status="ok"` plus `payload`) und Fehler (`status="error"` plus
   `error: ErrorInfo`) tragen dasselbe Vokabular wie der Rest des Bus.
-- `RobotLifecycle`: einziger Lifecycle-Typ, drei Phasen ueber das
-  `phase`-Feld unterschieden:
+- `RobotLifecycle`: einziger Lifecycle-Typ fuer den Roboter als
+  Ganzes. Erbt vom `LifecycleAware`-Mixin, das die fuenf
+  kanonischen Phasen `boot`, `ready`, `warn`, `failure`,
+  `shutdown` durchsetzt:
   - `phase="boot"`: *frueh* in der Bootsequenz, sobald Identitaet
     und Komponenten-Inventar bekannt sind, aber bevor Kernel und
     Channels attachen. Traegt `robot_id`, `robot_name`, `boot_id`
@@ -217,6 +227,11 @@ Erwartungshaltung aus:
     Manifest-Snapshot, ueberschreibt den retained-Slot und
     signalisiert "Roboter ist im Vollbetrieb". Analogon:
     `multi-user.target reached` bei systemd.
+  - `phase="warn"` / `phase="failure"`: optional, wenn der Robot
+    eine seiner Komponenten ueber den Owner-Loop als degradiert
+    bzw. ausgefallen meldet. Re-Publish mit aktualisiertem
+    Manifest aktualisiert den retained Slot — kein separater
+    `update`-Phase noetig.
   - `phase="shutdown"`: bei Beginn der Shutdown-Sequenz. Traegt
     optional `message` (Default `"Robot shutting down"`, vom
     Operator ueberschreibbar via `Robot.stop(message=...)`).
@@ -228,6 +243,27 @@ Erwartungshaltung aus:
     Observer-Subscriber lernen so, dass eine Shutdown-Phase laeuft.
     Der Drain selbst wird *nicht* ueber den Bus orchestriert (siehe
     Lebenszyklus-Abschnitt). Analogon: SIGTERM.
+- `ComponentLifecycle`: per-Komponente Lifecycle-Broadcast auf
+  `component.<name>.lifecycle`. Selbe fuenf Phasen wie
+  `RobotLifecycle` (geteilt ueber das `LifecycleAware`-Mixin),
+  aber pro Komponente *einzeln* gepublished. Eigenes Topic =
+  eigener Retain-Slot, also kein Multi-Slot-Retain im Bus
+  notwendig. Owner-Pattern: der Robot publishes fuer seine
+  direkt registrierten Komponenten, ein Kernel publishes fuer
+  seinen In-Process-Actor (der nicht am Bus haengt). Traegt eine
+  `ComponentInfo` mit `metadata`-Slot — dort wandert
+  komponenten-spezifische Telemetrie hin (geladenes LLM-Modell,
+  Pending-Queue-Tiefe, Connection-Flag). Re-Publish mit
+  aktualisiertem `metadata` ist die Update-Mechanik; kein
+  separater `update`-Phase.
+- `MountEvent`: Realtime-Stream-Event auf `component.<name>.mount`,
+  publiziert wenn ein Composite (Kernel, Tool-Layer, SOP-Bibliothek)
+  einen seiner internen Slots wired oder unwired. Phasen
+  `mounted` und `unmounted`; *nicht* retained — der autoritative
+  "was ist gerade gemounted"-Snapshot lebt in
+  `ComponentInfo.metadata` auf dem retained `ComponentLifecycle`.
+  Mount-Events sind die fire-and-forget-Stream-Variante fuer
+  Subscriber, die auf Swaps reagieren wollen.
 - `RobotAuditNote`: ausschliesslich fuer Audit relevante Nachricht, die
   kein anderer Teilnehmer braucht.
 
@@ -247,11 +283,31 @@ Jeder Event, der ein Erfolg-oder-Fehler-Ergebnis transportiert
 `Failable`-Mixin. Damit liegen Erfolgs- und Fehlerfaelle bus-weit in
 *einem* Vokabular vor:
 
-- `status: ResultStatus` — Diskriminator, `Literal["ok", "error"]`.
-- `error: ErrorInfo | None` — strukturierter Fehlerdeskriptor; nur
-  gesetzt, wenn `status == "error"`. Invariante wird im
-  `Failable.__post_init__` durchgesetzt: `status == "ok"` *gdw.*
-  `error is None`.
+- `status: ResultStatus` — Diskriminator,
+  `Literal["ok", "warn", "error"]`.
+- `error: ErrorInfo | None` — strukturierter Fehlerdeskriptor.
+  Invariante wird im `Failable.__post_init__` durchgesetzt:
+  `status == "ok"` *gdw.* `error is None`; `status` in
+  `("warn", "error")` *verlangt* eine `ErrorInfo`.
+
+Die drei Stufen modellieren *Severity*, der `error.code` modelliert
+*Kind*. Subscriber, die nur harte Fehler interessiert, filtern auf
+`"status":"error"`; Subscriber, die jede Auffaelligkeit sehen
+wollen (Caching-Fallbacks, Retry-Recoveries, Soft-Rate-Limits),
+filtern auf `status != "ok"`. Channels rendern entsprechend
+gruen / gelb / rot — analog zu sysout-vs-syserr im Terminal,
+nur mit einer Zwischenstufe.
+
+Konkrete Use-Cases pro Klasse:
+
+- `RobotOutput(status="warn", message="Antwort aus Cache",
+  error=ErrorInfo(code="cache_fallback"))` — UX zeigt einen
+  gelben Indikator, Antwort ist trotzdem da.
+- `KernelPhase(status="warn", error=ErrorInfo(code="rate_limit_retry"))` —
+  Phase erfolgreich, hatte aber Retry. Wide-Event-Log filterbar
+  via `"status":"warn"`.
+- `ComponentResponse(status="warn", error=ErrorInfo(code="partial_result"))` —
+  Tool antwortet, aber unvollstaendig.
 
 `ErrorInfo` ist die strukturierte Variante eines Fehlers (modelliert
 nach gRPC `google.rpc.Status` / HTTP RFC 9457):
@@ -300,6 +356,59 @@ Form (Recovery-Versuch, Skip, einzelne oder mehrere Outputs), ist
 selbst einen `RobotOutput(status="error", message=..., error=...)`,
 typischerweise innerhalb einer ueberschriebenen Phase oder eines
 expliziten Fehler-Pfads.
+
+### Lifecycle-Vokabular: `LifecyclePhase`, `LifecycleAware`, `ComponentHealth`
+
+Das Lifecycle-Vokabular ist orthogonal zum Result-Vokabular: es
+beschreibt nicht "ist die *Antwort* gut gegangen?" sondern "wo
+befindet sich diese *Entitaet* im Lebenszyklus?". Beide laufen ueber
+ein Mixin, das die `phase`-Validierung an einer Stelle haelt
+(`LifecycleAware`).
+
+`LifecyclePhase = Literal["boot", "ready", "warn", "failure",
+"shutdown"]` ist gemeinsam fuer den Roboter (`RobotLifecycle`) und
+seine Komponenten (`ComponentLifecycle`). Bedeutung pro Wert:
+
+- `boot` — Entitaet ist hochgefahren, aber noch nicht
+  betriebsbereit. Aequivalent zu Kernel-dmesg vor Userspace-Start.
+- `ready` — vollstaendig betriebsbereit. Aequivalent zu systemd
+  `multi-user.target reached`.
+- `warn` — betriebsbereit, signalisiert aber ein Problem
+  (degraded mode, retried connection, slow upstream, ...). Der
+  Carrier-Event (`info.metadata` auf `ComponentLifecycle`) traegt
+  Detail-Telemetrie, der `message`-Slot vom Mixin traegt eine
+  kurze Notiz.
+- `failure` — nicht betriebsbereit. Abgrenzung zu `shutdown`:
+  failure ist ungewollt, shutdown ist graceful.
+- `shutdown` — graceful drain hat begonnen. Aequivalent zu POSIX
+  SIGTERM.
+
+Es gibt bewusst keinen `update`-Phase: Re-Publish derselben Phase
+mit frischem Payload ist die Update-Mechanik. Der retained Slot
+wird ueberschrieben, der spaeteste Subscriber sieht den neuesten
+Stand. Das spiegelt MQTT-Retain-Semantik und haelt das
+Phasen-Vokabular an *Zustandsuebergaenge* gebunden, nicht an
+Refresh-Kadenz.
+
+`ComponentHealth` ist der Rueckgabetyp von
+`RobotComponent.health_check()`. Drei Felder mit derselben
+Invariante wie `Failable`:
+
+- `status: HealthStatus` (Alias auf `ResultStatus`) — `"ok"` /
+  `"warn"` / `"error"`.
+- `error: ErrorInfo | None` — strukturierter Diagnose-Slot,
+  notwendig bei `warn` und `error`, verboten bei `ok`.
+- `metadata: dict[str, Any]` — komponenten-spezifische
+  JSON-faehige Telemetrie. Der Owner kopiert sie auf
+  `ComponentInfo.metadata` des naechsten retained
+  `ComponentLifecycle`-Events.
+
+Owner-Pattern: das Eigentum-Objekt befragt seine Children regelmaessig
+ueber `health_check()` und mappt das Ergebnis auf eine
+`ComponentLifecycle`-Phase: `ok -> ready`, `warn -> warn`,
+`error -> failure`. Robot besitzt seine direkten Kinder; Kernel
+besitzt seinen In-Process-Actor (der keinen Bus-Anschluss hat);
+zukuenftige Tool-Layer besitzen ihre Tools.
 
 ## Lebenszyklus und Bootsequenz
 
@@ -1073,7 +1182,8 @@ Bus liegt.
 | Persistenz | Ein Roboter-weiter Layer mit *einem* Konfig-Block `persistence:` und zwei Protokollen: `EventSink` (per-Stream Schreib-API) und `PersistenceProvider` (Channel-zu-Sink-Factory). Komponenten ziehen ihren Sink ueber den Channel-Namen, kennen das Backend nicht. Heute: `JsonlPersistenceProvider` als Builder-Helper. Sobald ein Backend mit geteilter Ressource dazukommt (SQLite-Pool, Supabase-Client), wird der Provider zur Komponente (`category=PERSISTENCE`, `BOOT_PRIORITY=3`) -- die Komponenten-Schnittstelle bleibt unveraendert. |
 | Governance-Platzierung | Hybrid. Harte Policy als Bus-Middleware, inhaltliche Filter als expliziter Teilnehmer per `ComponentRequest`/`ComponentResponse`. |
 | Run-Identitaet | Flache `run_id` pro Vorgang. Optionale `parent_run_id` fuer SOP-in-SOP, Skill-in-Skill und Approval-Continuation wird in der Implementierung entschieden, nicht jetzt im Bus-Vertrag fixiert. |
-| Fehler-Modellierung | Einheitlich ueber das `Failable`-Mixin (`status: ResultStatus`, `error: ErrorInfo \| None`) auf `RobotOutput`, `ComponentResponse` und `KernelPhase`. Strukturierter Fehler statt String: `ErrorInfo.code` aus dem kanonischen Vokabular (`timeout`, `unavailable`, `not_found`, `invalid_argument`, `unauthorized`, `internal`, `cancelled` plus namespaced Komponenten-Codes), `message` als Klartext, `details` als Wide-Event-Slot. Phase-Fehler mit `KernelPhase(status="error")` sind reine Telemetrie; ob sie als `RobotOutput(status="error")` zum User durchgeschlagen werden, entscheidet der Kernel selbst (kein Auto-Surfacing im `BaseKernel`). Katastrophale Vorfaelle erzeugen zusaetzlich eine `RobotAuditNote`. |
+| Fehler-Modellierung | Einheitlich ueber das `Failable`-Mixin (`status: ResultStatus`, `error: ErrorInfo \| None`) auf `RobotOutput`, `ComponentResponse` und `KernelPhase`. `ResultStatus` ist `Literal["ok", "warn", "error"]`: ok ohne ErrorInfo, warn und error *mit* strukturierter ErrorInfo. `ErrorInfo.code` aus dem kanonischen Vokabular (`timeout`, `unavailable`, `not_found`, `invalid_argument`, `unauthorized`, `internal`, `cancelled` plus namespaced Komponenten-Codes), `message` als Klartext, `details` als Wide-Event-Slot. `warn` modelliert Soft-Issues (Cache-Fallback, Retry-Recovery, Partial-Result), die in der UX gelb statt rot landen. Phase-Fehler mit `KernelPhase(status="error")` sind reine Telemetrie; ob sie als `RobotOutput(status="error")` zum User durchgeschlagen werden, entscheidet der Kernel selbst (kein Auto-Surfacing im `BaseKernel`). Katastrophale Vorfaelle erzeugen zusaetzlich eine `RobotAuditNote`. |
+| Component Lifecycle | Pro-Komponente `ComponentLifecycle` auf `component.<name>.lifecycle` (eigenes Topic = eigener Retain-Slot). Phasen aus `LifecyclePhase = Literal["boot", "ready", "warn", "failure", "shutdown"]`, gemeinsam mit `RobotLifecycle` ueber das `LifecycleAware`-Mixin. Owner-Pattern: Robot publishes fuer direkte Kinder, Kernel publishes fuer In-Process-Actor. `RobotComponent.health_check()` liefert `ComponentHealth` (`ok` / `warn` / `error` plus optional `ErrorInfo` und `metadata`); der Owner mappt das Ergebnis auf eine Lifecycle-Phase. `MountEvent` auf `component.<name>.mount` (nicht retained) ist der Realtime-Stream fuer Slot-Wirings; der autoritative Mount-Snapshot lebt in `ComponentInfo.metadata` auf dem retained `ComponentLifecycle`. |
 | Versionsbindung | Beim Start eines SOP-Runs werden alle benoetigten Skills und Tools mit Version eingefroren. Hotfixes betreffen nur neue Runs. |
 | MCS-Reichweite | MCS ist Driver-Standard im Tool Execution Layer. MCS-Toolbeschreibungen koennen zusaetzlich als Quelle fuer Tool-Schemas im Actor Context dienen. SOPs und Skills bleiben eigenes Format. |
 | Actor-Modell | Ein Kernel, mehrere austauschbare Actors (`EchoActor` als Default, `LLMActor`/`MockActor`/`ProgramActor`/`HumanActor` zukuenftig) auf einem Actor-Topic. Modus-Wechsel pro `ComponentRequest` moeglich. Eigene `category=ACTOR` mit `BOOT_PRIORITY=8` -- Actor startet vor dem Kernel, sonst laeuft jeder erste Request ins Timeout. |

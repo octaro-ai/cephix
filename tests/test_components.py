@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.actor.echo import EchoActor
 from src.bus.asyncio_bus import AsyncioBus
+from src.bus.messages import ErrorInfo
 from src.channels.websocket import WebsocketChannel
-from src.components import BusComponent, ComponentCategory, RobotComponent
+from src.components import (
+    BusComponent,
+    ComponentCategory,
+    ComponentHealth,
+    RobotComponent,
+)
 from src.kernel.base import BaseKernel
 
 
@@ -78,3 +86,81 @@ def test_external_components_without_registration_default_to_ask_all() -> None:
         component_category = ComponentCategory.KERNEL
 
     assert External not in WIZARD_ALLOWLIST
+
+
+# ---------------------------------------------------------------------------
+# ComponentHealth invariant
+# ---------------------------------------------------------------------------
+
+
+def test_component_health_defaults_to_ok() -> None:
+    h = ComponentHealth()
+    assert h.status == "ok"
+    assert h.error is None
+    assert h.metadata == {}
+
+
+def test_component_health_ok_must_not_carry_error() -> None:
+    with pytest.raises(ValueError, match="status='ok' must not"):
+        ComponentHealth(error=ErrorInfo(code="boom"))
+
+
+def test_component_health_warn_requires_error() -> None:
+    with pytest.raises(ValueError, match="status='warn' requires"):
+        ComponentHealth(status="warn")
+
+
+def test_component_health_error_requires_error() -> None:
+    with pytest.raises(ValueError, match="status='error' requires"):
+        ComponentHealth(status="error")
+
+
+def test_component_health_warn_with_metadata() -> None:
+    h = ComponentHealth(
+        status="warn",
+        error=ErrorInfo(code="rate_limit_warning", message="3 retries used"),
+        metadata={"model": "gpt-5", "retries": 3},
+    )
+    assert h.status == "warn"
+    assert h.metadata["retries"] == 3
+    assert h.error is not None
+    assert h.error.code == "rate_limit_warning"
+
+
+# ---------------------------------------------------------------------------
+# health_check default hook
+# ---------------------------------------------------------------------------
+
+
+async def test_robot_component_default_health_check_is_ok() -> None:
+    """A component that does not override health_check is assumed healthy."""
+
+    class _Plain(RobotComponent):
+        component_name = "plain-test"
+        component_category = ComponentCategory.KERNEL
+
+    h = await _Plain().health_check()
+    assert h.status == "ok"
+    assert h.error is None
+    assert h.metadata == {}
+
+
+async def test_component_health_check_can_be_overridden() -> None:
+    """A component reporting warn must surface a structured ErrorInfo."""
+
+    class _Degraded(RobotComponent):
+        component_name = "degraded-test"
+        component_category = ComponentCategory.ACTOR
+
+        async def health_check(self) -> ComponentHealth:
+            return ComponentHealth(
+                status="warn",
+                error=ErrorInfo(code="cache_only", message="upstream unavailable"),
+                metadata={"model": "gpt-5"},
+            )
+
+    h = await _Degraded().health_check()
+    assert h.status == "warn"
+    assert h.error is not None
+    assert h.error.code == "cache_only"
+    assert h.metadata == {"model": "gpt-5"}

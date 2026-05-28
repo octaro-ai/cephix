@@ -32,11 +32,74 @@ ship without an extra dependency.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from src.bus.messages import ErrorInfo, ResultStatus
+
 if TYPE_CHECKING:
     from src.bus.ports import BusPort
+
+
+HealthStatus = ResultStatus
+"""Alias of :data:`src.bus.messages.ResultStatus` exposed at the
+component-health call site.
+
+Component health uses the same three-valued vocabulary as every
+other :class:`Failable` event on the bus -- ``"ok"``, ``"warn"``,
+``"error"`` -- so the owner can map a health-check result onto a
+:class:`ComponentLifecycle` phase with no translation table:
+``"ok" -> "ready"``, ``"warn" -> "warn"``, ``"error" -> "failure"``.
+The alias is purely for ergonomics in code that reads
+``ComponentHealth(status="warn", ...)``.
+"""
+
+
+@dataclass(frozen=True)
+class ComponentHealth:
+    """Return value of :meth:`RobotComponent.health_check`.
+
+    Three fields, one invariant:
+
+    - ``status`` -- :data:`HealthStatus` (``"ok"`` / ``"warn"`` /
+      ``"error"``). The discriminator. ``"ok"`` means fully
+      operational; ``"warn"`` means operational but flagging an
+      issue; ``"error"`` means not operational.
+    - ``error`` -- :class:`ErrorInfo` carrying the structured
+      diagnostic. Required when ``status`` is ``"warn"`` or
+      ``"error"``; forbidden when ``status`` is ``"ok"``. Same
+      structure as the ``Failable.error`` field on bus events,
+      so the same ``code`` taxonomy works in both worlds.
+    - ``metadata`` -- free-form JSONable telemetry the owner is
+      welcome to copy into :attr:`ComponentInfo.metadata` on the
+      next :class:`ComponentLifecycle` event. Use for component-
+      specific state: an LLM actor's loaded model, a queue's
+      pending count, a tool's registered tool set.
+
+    The invariant matches :class:`Failable`: ``status == "ok"``
+    iff ``error is None``. ``warn`` and ``error`` both carry an
+    :class:`ErrorInfo` -- the status discriminates *severity*, the
+    code discriminates *kind*. There is intentionally no separate
+    ``notes`` slot: the human-readable note lives on
+    :attr:`ErrorInfo.message` for ``warn``/``error``, and on the
+    :attr:`metadata` slot for ``ok`` (where a free-form note
+    rarely makes sense anyway).
+    """
+
+    status: HealthStatus = "ok"
+    error: ErrorInfo | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.status == "ok" and self.error is not None:
+            raise ValueError(
+                "ComponentHealth: status='ok' must not carry an ErrorInfo"
+            )
+        if self.status in ("warn", "error") and self.error is None:
+            raise ValueError(
+                f"ComponentHealth: status={self.status!r} requires an ErrorInfo"
+            )
 
 
 class ComponentCategory(str, Enum):
@@ -193,6 +256,39 @@ class RobotComponent:
         ``OnStop()``.
         """
         return None
+
+    async def health_check(self) -> ComponentHealth:
+        """Report current health and component-specific telemetry.
+
+        Called by the *owner* of the component (the robot for its
+        directly registered components; a kernel for its in-process
+        actor; future tool layers for their managed tools). The
+        owner translates the result into a
+        :class:`src.bus.messages.ComponentLifecycle` event:
+
+        - ``ComponentHealth(status="ok", ...)`` -> ``phase="ready"``
+          (or ``phase="boot"`` during the initial transition).
+        - ``ComponentHealth(status="warn", error=..., ...)`` ->
+          ``phase="warn"``.
+        - ``ComponentHealth(status="error", error=..., ...)`` ->
+          ``phase="failure"``.
+
+        Default returns ``"ok"``: a component that does not override
+        this hook is assumed healthy as long as it is started.
+        Override when the component has meaningful runtime state
+        worth surfacing -- a loaded LLM model, a pending queue depth,
+        a remote-connection flag, a degraded-mode indicator. Put
+        component-specific telemetry on
+        :attr:`ComponentHealth.metadata`; the owner copies it onto
+        :attr:`src.bus.messages.ComponentInfo.metadata` of the next
+        retained :class:`src.bus.messages.ComponentLifecycle`.
+
+        The contract is intentionally similar to Kubernetes' liveness
+        / readiness probes: a fast, idempotent observation, *not* a
+        heavy diagnostic. The owner may call this on a poll cadence;
+        implementations must not block.
+        """
+        return ComponentHealth()
 
     async def publish_audit(
         self,
