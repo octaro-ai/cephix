@@ -460,6 +460,7 @@ class WebsocketChannel(ChannelPort):
                 topic=self._input_topic,
                 principal=principal,
                 source="channel.websocket",
+                source_id=self.instance_id,
                 run_id=run_id,
                 message=message.strip(),
                 payload=payload,

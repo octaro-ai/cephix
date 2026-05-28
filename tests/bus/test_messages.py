@@ -45,6 +45,13 @@ def test_robot_input_defaults() -> None:
     assert msg.event_id.startswith("evt-")
     assert msg.timestamp
     assert msg.correlation_id is None
+    assert msg.source_id == ""
+
+
+def test_robot_event_carries_explicit_source_id() -> None:
+    """Every event accepts the publisher's per-instance id."""
+    msg = RobotInput(**_COMMON, message="hi", source_id="abc123def456")
+    assert msg.source_id == "abc123def456"
 
 
 def test_robot_output_payload_defaults_to_ok() -> None:

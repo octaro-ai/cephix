@@ -191,16 +191,121 @@ async def test_robot_logs_boot_and_shutdown_narrative(
 
     messages = [rec.message for rec in caplog.records if rec.name == "src.robot"]
     assert "starting..." in messages
-    assert "AsyncioBus started" in messages
-    assert any(m.startswith("_RecordingComponent attached") for m in messages)
+    # Component log lines now carry the per-instance id in
+    # parentheses ("AsyncioBus (a3f7c2b1d4e9) started"), so the
+    # narrative assertions check for the prefix instead of the
+    # exact line. The id itself is verified by the dedicated
+    # test_robot_logs_include_instance_ids below.
+    assert any(m.startswith("AsyncioBus ") and m.endswith("started") for m in messages)
+    assert any(m.startswith("_RecordingComponent ") and m.endswith("attached") for m in messages)
     assert "robot online (Ctrl-C to stop)" in messages
-    assert any(m.startswith("_RecordingComponent detached") for m in messages)
-    assert "AsyncioBus stopped" in messages
+    assert any(m.startswith("_RecordingComponent ") and m.endswith("detached") for m in messages)
+    assert any(m.startswith("AsyncioBus ") and m.endswith("stopped") for m in messages)
     assert "robot offline" in messages
 
     online_idx = messages.index("robot online (Ctrl-C to stop)")
     offline_idx = messages.index("robot offline")
     assert online_idx < offline_idx
+
+    # Boot-level "Entering" markers introduce every category that
+    # boots. The matching closing markers (``... complete``,
+    # ``Leaving ...``, ``shutdown complete``) are intentionally
+    # silenced for readability -- the next "Entering" line and the
+    # final "robot offline" already bracket the section. The robot
+    # under test has BUS (priority 0) and KERNEL (priority 10).
+    assert any("Entering Boot Level 0 (BUS)" in m for m in messages)
+    assert any("Entering Boot Level 10 (KERNEL)" in m for m in messages)
+    # Closing markers are off by convention; assert they stay quiet.
+    assert not any("Boot Level 0 (BUS) complete" in m for m in messages)
+    assert not any("Leaving Boot Level 0 (BUS)" in m for m in messages)
+    assert not any("Boot Level 0 (BUS) shutdown complete" in m for m in messages)
+
+
+async def test_robot_uses_symmetric_boot_and_shutdown_verbs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``BusComponent`` -> attached/detached, plain -> started/stopped.
+
+    Asymmetric pairs ("started" but never "stopped" on shutdown)
+    confuse a log reader scanning a restart loop. The verb a
+    component uses on boot must mirror the verb on shutdown.
+    """
+
+    class _PlainActorLike(RobotComponent):
+        component_name = "plain-actor"
+        component_category = ComponentCategory.ACTOR
+
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+    bus = AsyncioBus()
+    plain = _PlainActorLike()
+    bus_attached = _RecordingComponent(
+        "ws", [], category=ComponentCategory.CHANNEL
+    )
+
+    robot = Robot(
+        identity=RobotIdentity(),
+        components=[bus, plain, bus_attached],
+        control_plane_config=ControlPlaneConfig(enabled=False),
+        shutdown_grace=0.0,
+    )
+
+    with caplog.at_level(logging.INFO, logger="src.robot"):
+        async with robot:
+            pass
+
+    messages = [rec.message for rec in caplog.records if rec.name == "src.robot"]
+
+    # Plain RobotComponent: ``started`` on boot, ``stopped`` on shutdown.
+    assert any(m.startswith("AsyncioBus ") and m.endswith("started") for m in messages)
+    assert any(m.startswith("AsyncioBus ") and m.endswith("stopped") for m in messages)
+    assert not any(m.startswith("AsyncioBus ") and m.endswith("detached") for m in messages)
+    assert any(m.startswith("_PlainActorLike ") and m.endswith("started") for m in messages)
+    assert any(m.startswith("_PlainActorLike ") and m.endswith("stopped") for m in messages)
+    assert not any(m.startswith("_PlainActorLike ") and m.endswith("detached") for m in messages)
+
+    # BusComponent: ``attached`` on boot, ``detached`` on shutdown.
+    assert any(m.startswith("_RecordingComponent ") and m.endswith("attached") for m in messages)
+    assert any(m.startswith("_RecordingComponent ") and m.endswith("detached") for m in messages)
+    assert not any(m.startswith("_RecordingComponent ") and m.endswith("stopped") for m in messages)
+
+
+async def test_robot_log_lines_include_component_instance_ids(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Each component log line carries its 12-char instance id.
+
+    Without the suffix two ``BaseKernel`` instances would log the
+    same line. The test asserts the format
+    ``<ClassName> (<id>) <verb>`` is consistently used both on
+    boot and on shutdown.
+    """
+    import re
+
+    robot = _make_robot()
+
+    with caplog.at_level(logging.INFO, logger="src.robot"):
+        async with robot:
+            pass
+
+    messages = [rec.message for rec in caplog.records if rec.name == "src.robot"]
+    pattern = re.compile(
+        r"^(AsyncioBus|_RecordingComponent) "
+        r"\(([0-9a-f]{12})\) "
+        r"(started|attached|stopped|detached)$"
+    )
+    matched = [m for m in messages if pattern.match(m)]
+    # Two components, two start lines + two stop lines = four matches.
+    assert len(matched) == 4
+    # Each line's id round-trips: same 12 hex chars in the same shape.
+    for m in matched:
+        match = pattern.match(m)
+        assert match is not None
+        assert len(match.group(2)) == 12
 
 
 async def test_robot_logs_lifecycle_with_identity(

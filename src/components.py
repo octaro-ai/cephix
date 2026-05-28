@@ -31,6 +31,7 @@ ship without an extra dependency.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
@@ -40,6 +41,19 @@ from src.bus.messages import ErrorInfo, ResultStatus
 
 if TYPE_CHECKING:
     from src.bus.ports import BusPort
+
+
+INSTANCE_ID_LENGTH: int = 12
+"""Length of the per-instance ID generated for every :class:`RobotComponent`.
+
+Twelve hex chars give us 48 bits of randomness -- enough to keep
+collisions vanishingly unlikely across the components of a single
+robot, while staying short enough to read in one glance in log
+lines like ``EchoActor (a3f7c2b1d4e9) started``. Matches the
+short-id style already used elsewhere on the bus
+(:func:`src.bus.messages._new_event_id` clips event UUIDs to the
+same width).
+"""
 
 
 HealthStatus = ResultStatus
@@ -247,6 +261,41 @@ class RobotComponent:
     component_category: ClassVar[ComponentCategory]
     component_description: ClassVar[str] = ""
 
+    @property
+    def instance_id(self) -> str:
+        """Stable, unique short ID for *this* component instance.
+
+        Generated lazily on first access and cached on the instance
+        for the rest of its lifetime. Twelve hex chars
+        (:data:`INSTANCE_ID_LENGTH`), so a log reader can spot two
+        ``BaseKernel`` instances of the same name apart at a glance:
+        ``BaseKernel (a3f7c2b1d4e9) attached`` vs
+        ``BaseKernel (b91d44e5f0a8) attached``.
+
+        Distinct from :attr:`component_name`: the *name* is the
+        registered type identifier shared by every instance of the
+        same class (``"base"`` for every ``BaseKernel``). The
+        instance id is the per-instance discriminator. Bus events
+        carry both: :attr:`src.bus.messages.RobotEvent.source` is
+        the semantic name, :attr:`RobotEvent.source_id` is the
+        instance id.
+
+        Lazy generation (instead of ``__init__``-time) so subclasses
+        do not have to remember to call ``super().__init__()`` for
+        the id to exist; a missing ``__init__`` is the dataclass
+        idiom and we accommodate it.
+        """
+        cached = getattr(self, "_instance_id", None)
+        if cached:
+            return cached
+        new_id = uuid.uuid4().hex[:INSTANCE_ID_LENGTH]
+        # ``object.__setattr__`` bypasses ``frozen``-style guards
+        # subclasses might add; the field is intentionally
+        # write-once so the cached value sticks for the lifetime of
+        # the instance.
+        object.__setattr__(self, "_instance_id", new_id)
+        return new_id
+
     async def start(self) -> None:
         """Bring the component online.
 
@@ -353,6 +402,7 @@ class RobotComponent:
             topic=AUDIT_TOPIC,
             principal=principal,
             source=self.component_name,
+            source_id=self.instance_id,
             run_id=run_id,
             correlation_id=correlation_id,
             component=on_behalf_of or "",

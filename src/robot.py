@@ -56,7 +56,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from types import TracebackType
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Literal, Self
 
 from src.bus.messages import (
     LIFECYCLE_TOPIC,
@@ -335,16 +335,21 @@ class Robot:
         """
         self._phase = RobotPhase.ATTACHING
 
-        for component in self._skeleton_components():
-            await self._start_component(component)
-            # Once the bus is up, every subsequent skeleton component
-            # needs it as a constructor-time argument. Cache it as
-            # soon as it appears.
-            if (
-                self._bus is None
-                and component.component_category is ComponentCategory.BUS
-            ):
-                self._bus = self._locate_bus()
+        for prio, category, group in self._group_by_category(
+            self._skeleton_components()
+        ):
+            self._log_phase_marker(prio, category, "boot_enter")
+            for component in group:
+                await self._start_component(component)
+                # Once the bus is up, every subsequent skeleton
+                # component needs it as a constructor-time argument.
+                # Cache it as soon as it appears.
+                if (
+                    self._bus is None
+                    and component.component_category is ComponentCategory.BUS
+                ):
+                    self._bus = self._locate_bus()
+            # self._log_phase_marker(prio, category, "boot_complete")  # closing marker silenced -- noisy in dense logs
 
         if self._bus is None:
             # No bus component was registered at all -- _locate_bus
@@ -369,8 +374,13 @@ class Robot:
         """Phase 3: start userspace components, broadcast ``RobotLifecycle(phase="ready")``."""
         self._phase = RobotPhase.ACTIVATING
 
-        for component in self._userspace_components():
-            await self._start_component(component)
+        for prio, category, group in self._group_by_category(
+            self._userspace_components()
+        ):
+            self._log_phase_marker(prio, category, "boot_enter")
+            for component in group:
+                await self._start_component(component)
+            # self._log_phase_marker(prio, category, "boot_complete")  # closing marker silenced -- noisy in dense logs
 
         assert self._bus is not None  # set by phase 2
         ready = RobotLifecycle(
@@ -438,17 +448,25 @@ class Robot:
         # components down underneath them.
         await asyncio.sleep(0)
 
-        for component in reversed(self._userspace_components()):
-            if component in self._started:
-                await self._drain_then_stop(component, grace)
+        userspace_groups = self._group_by_category(self._userspace_components())
+        for prio, category, group in reversed(userspace_groups):
+            # self._log_phase_marker(prio, category, "shutdown_enter")  # shutdown markers silenced -- only Entering kept on boot side
+            for component in reversed(group):
+                if component in self._started:
+                    await self._drain_then_stop(component, grace)
+            # self._log_phase_marker(prio, category, "shutdown_complete")  # shutdown markers silenced -- only Entering kept on boot side
 
     async def _phase2_down(self, grace: float) -> None:
         """Phase 2 down: drain+stop skeleton (bus is last)."""
         self._phase = RobotPhase.STOPPING
 
-        for component in reversed(self._skeleton_components()):
-            if component in self._started:
-                await self._drain_then_stop(component, grace)
+        skeleton_groups = self._group_by_category(self._skeleton_components())
+        for prio, category, group in reversed(skeleton_groups):
+            # self._log_phase_marker(prio, category, "shutdown_enter")  # shutdown markers silenced -- only Entering kept on boot side
+            for component in reversed(group):
+                if component in self._started:
+                    await self._drain_then_stop(component, grace)
+            # self._log_phase_marker(prio, category, "shutdown_complete")  # shutdown markers silenced -- only Entering kept on boot side
 
         # The bus is gone now; clear the pointer for status reporters.
         self._bus = None
@@ -500,17 +518,17 @@ class Robot:
         visible in the component type instead of smuggling it through
         category-specific call signatures.
         """
-        name = type(component).__name__
+        label = self._component_label(component)
         if isinstance(component, BusComponent):
             assert self._bus is not None, (
-                f"bus component {name} cannot start without a bus; "
+                f"bus component {label} cannot start without a bus; "
                 "the bus must boot first"
             )
             await component.start(self._bus)
-            logger.info("%s attached", name)
+            logger.info("%s attached", label)
         else:
             await component.start()
-            logger.info("%s started", name)
+            logger.info("%s started", label)
         self._started.append(component)
 
     async def _drain_then_stop(
@@ -527,7 +545,7 @@ class Robot:
         SIGKILL": the drain is invoked but cancelled at the first
         await; trivial drains (default ``return None``) still complete.
         """
-        name = type(component).__name__
+        label = self._component_label(component)
         timeout = grace if grace > 0 else 0.001
         try:
             await asyncio.wait_for(component.drain(), timeout=timeout)
@@ -537,28 +555,113 @@ class Robot:
                     "%s drain grace %.1fs elapsed for %s; forcing stop",
                     self._label,
                     grace,
-                    name,
+                    label,
                 )
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception(
-                "%s drain hook for %s raised; forcing stop", self._label, name
+                "%s drain hook for %s raised; forcing stop", self._label, label
             )
 
         try:
             await component.stop()
         except Exception:
-            logger.exception("error while stopping %s; continuing", name)
+            logger.exception("error while stopping %s; continuing", label)
             return
 
-        if component is self._bus:
-            logger.info("%s stopped", name)
+        # Shutdown verb mirrors the boot verb: a ``BusComponent``
+        # was ``attached`` and is now ``detached``; a plain
+        # ``RobotComponent`` (the bus itself, actors, off-bus
+        # utilities) was ``started`` and is now ``stopped``.
+        if isinstance(component, BusComponent):
+            logger.info("%s detached", label)
         else:
-            logger.info("%s detached", name)
+            logger.info("%s stopped", label)
 
         with contextlib.suppress(ValueError):
             self._started.remove(component)
+
+    # ---- logging helpers --------------------------------------------------
+
+    @staticmethod
+    def _component_label(component: RobotComponent) -> str:
+        """Format a single component for log lines: ``<ClassName> (<id>)``.
+
+        The 12-char :attr:`RobotComponent.instance_id` is the
+        discriminator that lets a reader pick one of two
+        ``BaseKernel`` instances apart at a glance. The class name
+        stays in front so the existing log idiom ("EchoActor
+        started") survives -- the id is the new addition, in
+        parentheses where Linux-style logs put auxiliary identity.
+        """
+        return f"{type(component).__name__} ({component.instance_id})"
+
+    @staticmethod
+    def _group_by_category(
+        components: list[RobotComponent],
+    ) -> list[tuple[int, ComponentCategory, list[RobotComponent]]]:
+        """Bucket ``components`` by category, ordered by boot priority.
+
+        Each tuple is ``(priority, category, components_in_category)``.
+        The robot iterates these to log a phase marker per
+        category and then walks its members. Categories that
+        nobody registered for this robot are skipped, so a robot
+        without channels does not print an empty
+        ``CHANNEL`` phase header.
+        """
+        groups: dict[ComponentCategory, list[RobotComponent]] = {}
+        for c in components:
+            groups.setdefault(c.component_category, []).append(c)
+        unknown_priority = max(BOOT_PRIORITY.values()) + 100
+        return sorted(
+            (
+                (BOOT_PRIORITY.get(cat, unknown_priority), cat, members)
+                for cat, members in groups.items()
+            ),
+            key=lambda t: t[0],
+        )
+
+    @staticmethod
+    def _log_phase_marker(
+        priority: int,
+        category: ComponentCategory,
+        kind: Literal[
+            "boot_enter",
+            "boot_complete",
+            "shutdown_enter",
+            "shutdown_complete",
+        ],
+    ) -> None:
+        """Emit a Linux-style boot-level marker on the robot logger.
+
+        Four kinds, two pairs:
+
+        - ``boot_enter`` / ``boot_complete`` -- bracket a category
+          while it boots. ``boot_enter`` is logged before the first
+          component of the category starts; ``boot_complete`` is
+          logged once they are all up.
+        - ``shutdown_enter`` / ``shutdown_complete`` -- mirror on
+          shutdown. ``shutdown_enter`` is logged before the first
+          component of the category begins teardown;
+          ``shutdown_complete`` is logged once the category is
+          fully gone.
+
+        ``priority`` and ``category`` come from
+        :data:`src.components.BOOT_PRIORITY` so the marker matches
+        the boot-priority numbers in the log line. The single-method
+        shape replaces the old four-method spread (``_phase_enter``,
+        ``_phase_exit``, ``_phase_leave``, ``_phase_down``) where
+        ``exit`` and ``leave`` were English synonyms and the boot /
+        shutdown side was ambiguous from the name alone.
+        """
+        templates = {
+            "boot_enter": "=== Entering Boot Level %d (%s) ===",
+            "boot_complete": "=== Boot Level %d (%s) complete ===",
+            "shutdown_enter": "=== Leaving Boot Level %d (%s) ===",
+            "shutdown_complete": "=== Boot Level %d (%s) shutdown complete ===",
+        }
+        logger.info(templates[kind], priority, category.name)
 
     # ---- component navigation ---------------------------------------------
 
@@ -664,16 +767,16 @@ class Robot:
         """
         while self._started:
             component = self._started.pop()
-            name = type(component).__name__
+            label = self._component_label(component)
             try:
                 await component.stop()
             except Exception:
-                logger.exception("error while stopping %s; continuing", name)
+                logger.exception("error while stopping %s; continuing", label)
                 continue
-            if component is self._bus:
-                logger.info("%s stopped", name)
+            if isinstance(component, BusComponent):
+                logger.info("%s detached", label)
             else:
-                logger.info("%s detached", name)
+                logger.info("%s stopped", label)
 
         self._bus = None
 

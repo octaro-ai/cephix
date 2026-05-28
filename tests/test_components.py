@@ -9,6 +9,7 @@ from src.bus.asyncio_bus import AsyncioBus
 from src.bus.messages import ErrorInfo
 from src.channels.websocket import WebsocketChannel
 from src.components import (
+    INSTANCE_ID_LENGTH,
     BusComponent,
     ComponentCategory,
     ComponentHealth,
@@ -89,6 +90,75 @@ def test_external_components_without_registration_default_to_ask_all() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-instance identity
+# ---------------------------------------------------------------------------
+
+
+class _Plain(RobotComponent):
+    component_name = "plain-id-test"
+    component_category = ComponentCategory.KERNEL
+
+
+def test_instance_id_is_short_hex_of_documented_length() -> None:
+    """The id must fit on a single log line and be hex-only."""
+    component = _Plain()
+    instance_id = component.instance_id
+
+    assert len(instance_id) == INSTANCE_ID_LENGTH
+    assert INSTANCE_ID_LENGTH == 12  # contract: documented value
+    assert all(ch in "0123456789abcdef" for ch in instance_id)
+
+
+def test_instance_id_is_stable_for_the_lifetime_of_an_instance() -> None:
+    """A repeat read returns the same id; the field is write-once."""
+    component = _Plain()
+    first = component.instance_id
+    second = component.instance_id
+
+    assert first == second
+
+
+def test_two_instances_of_the_same_class_get_distinct_ids() -> None:
+    """Otherwise the operator could not tell two BaseKernels apart."""
+    one = _Plain()
+    two = _Plain()
+
+    assert one.instance_id != two.instance_id
+
+
+def test_publish_audit_carries_instance_id_as_source_id() -> None:
+    """Audit notes record which *instance* of the component spoke."""
+    import asyncio
+
+    from src.bus.messages import AUDIT_TOPIC, RobotAuditNote, RobotEvent
+
+    async def run() -> None:
+        bus = AsyncioBus()
+        await bus.start()
+        captured: list[RobotAuditNote] = []
+
+        async def handler(event: RobotEvent) -> None:
+            if isinstance(event, RobotAuditNote):
+                captured.append(event)
+
+        sub = bus.subscribe(AUDIT_TOPIC, handler)
+        try:
+            component = _Plain()
+            await component.publish_audit(bus, action="probe")
+            await asyncio.sleep(0)
+        finally:
+            await sub.unsubscribe()
+            await bus.stop()
+        assert len(captured) == 1
+        note = captured[0]
+        assert note.topic == AUDIT_TOPIC
+        assert note.source == "plain-id-test"
+        assert note.source_id == component.instance_id
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
 # ComponentHealth invariant
 # ---------------------------------------------------------------------------
 
@@ -135,11 +205,11 @@ def test_component_health_warn_with_metadata() -> None:
 async def test_robot_component_default_health_check_is_ok() -> None:
     """A component that does not override health_check is assumed healthy."""
 
-    class _Plain(RobotComponent):
+    class _PlainHealth(RobotComponent):
         component_name = "plain-test"
         component_category = ComponentCategory.KERNEL
 
-    h = await _Plain().health_check()
+    h = await _PlainHealth().health_check()
     assert h.status == "ok"
     assert h.error is None
     assert h.metadata == {}

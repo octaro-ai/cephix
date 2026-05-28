@@ -22,9 +22,11 @@ from src.bus import (
     KERNEL_PHASE_TOPIC,
     ErrorInfo,
     KernelPhase,
+    MountEvent,
     RobotEvent,
     RobotInput,
     RobotOutput,
+    component_mount_topic,
 )
 from src.kernel.base import BaseKernel
 from src.kernel.run import RunPhase
@@ -138,8 +140,105 @@ async def test_base_kernel_with_echo_actor_produces_echoed_output() -> None:
     assert out.error is None
     assert out.topic == "output.message"
     assert out.source == "kernel.base"
+    assert out.source_id == kernel.instance_id
     assert out.run_id == "run-1"
     assert out.principal == "user-1"
+
+
+async def test_base_kernel_emits_mount_event_for_actor_on_start() -> None:
+    """The kernel announces which actor it wired in via MountEvent.
+
+    Subscribers learn 'kernel.base now has the echo actor mounted'
+    without having to cross-reference boot order, and the snapshot
+    carries the actor's instance id so two BaseKernel instances
+    can be told apart.
+    """
+    bus = AsyncioBus()
+    mounts: list[MountEvent] = []
+
+    async def collect(event: RobotEvent) -> None:
+        if isinstance(event, MountEvent):
+            mounts.append(event)
+
+    bus.subscribe(component_mount_topic("base"), collect)
+
+    actor = EchoActor()
+    await bus.start()
+    try:
+        kernel = await _start_kernel(bus, actor=actor)
+        await asyncio.sleep(0)
+        try:
+            assert len(mounts) == 1
+            mount = mounts[0]
+            assert mount.phase == "mounted"
+            assert mount.owner == "kernel.base"
+            assert mount.slot == "actor"
+            assert mount.source == "kernel.base"
+            assert mount.source_id == kernel.instance_id
+            assert mount.mounted is not None
+            assert mount.mounted.name == "echo"
+            assert mount.mounted.metadata["instance_id"] == actor.instance_id
+            assert mount.mounted.metadata["kernel_instance_id"] == kernel.instance_id
+        finally:
+            await kernel.stop()
+            await actor.stop()
+            await asyncio.sleep(0)
+    finally:
+        await bus.stop()
+
+    # On stop, a matching unmounted event closes the slot.
+    unmounted = [m for m in mounts if m.phase == "unmounted"]
+    assert len(unmounted) == 1
+    assert unmounted[0].mounted is None
+    assert unmounted[0].slot == "actor"
+
+
+async def test_base_kernel_phase_events_carry_kernel_instance_id() -> None:
+    """KernelPhase telemetry must identify the publishing kernel instance.
+
+    With two BaseKernel instances on one robot, a query like
+    ``"phase":"acting","status":"error"`` must still pin down
+    *which* kernel suffered the failure.
+    """
+    bus = AsyncioBus()
+    phases: list[KernelPhase] = []
+
+    async def collect(event: RobotEvent) -> None:
+        if isinstance(event, KernelPhase):
+            phases.append(event)
+
+    bus.subscribe(KERNEL_PHASE_TOPIC, collect)
+
+    actor = EchoActor()
+    await bus.start()
+    try:
+        kernel = await _start_kernel(bus, actor=actor)
+        try:
+            await bus.publish(
+                RobotInput(
+                    topic="input.message",
+                    principal="user",
+                    source="channel.test",
+                    run_id="run-id-1",
+                    message="hi",
+                )
+            )
+            await asyncio.sleep(0.05)
+        finally:
+            await kernel.stop()
+            await actor.stop()
+    finally:
+        await bus.stop()
+
+    assert phases  # at least one phase event captured
+    for ev in phases:
+        assert ev.source == "kernel.base"
+        assert ev.source_id == kernel.instance_id
+    # The acting phase carries the actor's id in its details so
+    # queries can correlate kernel and actor across the wide-event log.
+    acting = [p for p in phases if p.phase == RunPhase.ACTING.value]
+    assert acting, "expected at least one acting phase event"
+    assert acting[0].details.get("actor_instance_id") == actor.instance_id
 
 
 async def test_base_kernel_emits_one_phase_event_per_phase() -> None:

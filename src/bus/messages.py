@@ -335,12 +335,31 @@ class RobotEvent:
     The required fields follow the bus contract from
     ``docs/architecture/robot-os-target.md``. ``correlation_id`` is
     optional here and becomes mandatory on requests and responses.
+
+    Two source fields, two roles:
+
+    - :attr:`source` -- *semantic* publisher identity. The
+      registered :attr:`src.components.RobotComponent.component_name`
+      (``"echo"``, ``"base"``, ``"asyncio"``, ...) or a hierarchical
+      derivative (``"kernel.base"`` for events the kernel publishes
+      about its own pipeline). What an operator filters on when
+      asking "show me everything from the kernel".
+    - :attr:`source_id` -- *instance* publisher identity. The
+      :attr:`src.components.RobotComponent.instance_id` (12 hex
+      chars) of the publishing component instance. Discriminates
+      between two instances of the same ``component_name`` (e.g.
+      a robot with two ``BaseKernel`` instances). Default is
+      empty so legacy publishers and synthetic events (built in
+      tests, cooked up by the robot itself) still validate; a
+      regular component publishing on its own behalf should fill
+      it.
     """
 
     topic: str
     principal: str
     source: str
     run_id: str
+    source_id: str = ""
     event_id: str = field(default_factory=_new_event_id)
     correlation_id: str | None = None
     timestamp: str = field(default_factory=_now_iso)

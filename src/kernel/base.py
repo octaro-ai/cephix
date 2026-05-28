@@ -68,18 +68,21 @@ import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from src.actor.ports import ActorPort
 from src.bus.messages import (
     INPUT_TOPIC,
     KERNEL_PHASE_TOPIC,
     OUTPUT_TOPIC,
+    ComponentInfo,
     ErrorInfo,
     KernelPhase,
+    MountEvent,
     RobotEvent,
     RobotInput,
     RobotOutput,
+    component_mount_topic,
 )
 from src.bus.ports import BusPort, Subscription
 from src.components import ComponentCategory
@@ -180,11 +183,101 @@ class BaseKernel(KernelPort):
         self._bus = bus
         self._subscription = bus.subscribe(self._input_topic, self._on_input)
 
+        # Surface the actor-mount fact in two places so log readers,
+        # telemetry sinks and future control-plane UIs all see which
+        # actor sits in this kernel without having to cross-reference
+        # boot order:
+        # - a stable INFO log line ("X (id) injected into Y (id)")
+        #   for the operator skimming the console;
+        # - a :class:`MountEvent` on the kernel's mount topic so
+        #   subscribers can react to swaps and so the wide-event log
+        #   has a canonical "this kernel is wired to that actor"
+        #   record. The retained snapshot lives on
+        #   :class:`ComponentLifecycle` (later); ``MountEvent`` is
+        #   the fire-and-forget transition stream.
+        actor_class = type(self._actor).__name__
+        kernel_class = type(self).__name__
+        actor_id = getattr(self._actor, "instance_id", "")
+        logger.info(
+            "%s (%s) injected into %s (%s)",
+            actor_class,
+            actor_id,
+            kernel_class,
+            self.instance_id,
+        )
+        await self._publish_actor_mount(phase="mounted")
+
     async def stop(self) -> None:
+        await self._publish_actor_mount(phase="unmounted")
         if self._subscription is not None:
             await self._subscription.unsubscribe()
             self._subscription = None
         self._bus = None
+
+    async def _publish_actor_mount(
+        self, *, phase: Literal["mounted", "unmounted"]
+    ) -> None:
+        """Emit a :class:`MountEvent` for the actor slot on this kernel.
+
+        Called on both :meth:`start` (``phase="mounted"``) and
+        :meth:`stop` (``phase="unmounted"``) so subscribers see a
+        clean transition stream. The owner identifier mirrors the
+        kernel's :attr:`RobotEvent.source` convention
+        (``"kernel.<name>"``); the snapshot carries the actor's
+        instance identity in :attr:`ComponentInfo.metadata` so a
+        subscriber can correlate this event with later phase events
+        from the actor without keeping a side index.
+
+        Best-effort: a publish failure is logged but never aborts
+        the lifecycle. Actor mount is incidental telemetry, not a
+        precondition for the kernel running.
+        """
+        bus = self._bus
+        if bus is None:
+            return
+        owner = f"kernel.{self.component_name}"
+        actor_name = getattr(self._actor, "component_name", type(self._actor).__name__)
+        actor_metadata: dict[str, Any] = {
+            "kernel_instance_id": self.instance_id,
+        }
+        # ``ActorPort`` extends ``RobotComponent``, so a real actor
+        # always exposes ``instance_id``. ``getattr`` keeps the
+        # publish-side defensive against test doubles that fake an
+        # ``ActorPort`` interface without the full
+        # ``RobotComponent`` contract.
+        actor_instance_id = getattr(self._actor, "instance_id", "")
+        if actor_instance_id:
+            actor_metadata["instance_id"] = actor_instance_id
+        mounted_info: ComponentInfo | None
+        if phase == "mounted":
+            mounted_info = ComponentInfo(
+                category=ComponentCategory.ACTOR.value,
+                name=actor_name,
+                description=getattr(self._actor, "component_description", ""),
+                metadata=actor_metadata,
+            )
+        else:
+            mounted_info = None
+        try:
+            await bus.publish(
+                MountEvent(
+                    topic=component_mount_topic(self.component_name),
+                    principal=f"kernel:{self.component_name}",
+                    source=owner,
+                    source_id=self.instance_id,
+                    run_id="",
+                    phase=phase,
+                    owner=owner,
+                    slot="actor",
+                    mounted=mounted_info,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "%s: failed to emit actor mount event (phase=%s)",
+                type(self).__name__,
+                phase,
+            )
 
     # ---- run loop ---------------------------------------------------------
 
@@ -410,7 +503,10 @@ class BaseKernel(KernelPort):
         """
         assert ctx.input is not None
         actor_name = getattr(self._actor, "component_name", type(self._actor).__name__)
+        actor_instance_id = getattr(self._actor, "instance_id", "")
         ctx.phase_details["actor_name"] = actor_name
+        if actor_instance_id:
+            ctx.phase_details["actor_instance_id"] = actor_instance_id
         started = _utcnow()
         try:
             response = await asyncio.wait_for(
@@ -476,6 +572,7 @@ class BaseKernel(KernelPort):
             topic=self._output_topic,
             principal=ctx.input.principal,
             source=f"kernel.{self.component_name}",
+            source_id=self.instance_id,
             run_id=ctx.run_id,
             message=ctx.output_message,
             payload=dict(ctx.output_payload),
@@ -541,6 +638,7 @@ class BaseKernel(KernelPort):
                     topic=KERNEL_PHASE_TOPIC,
                     principal=principal,
                     source=f"kernel.{self.component_name}",
+                    source_id=self.instance_id,
                     run_id=ctx.run_id,
                     phase=ctx.phase.value,
                     iteration=ctx.iteration,
