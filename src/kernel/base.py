@@ -378,6 +378,10 @@ class BaseKernel(KernelPort):
         except Exception as exc:
             self._record_phase_failure(ctx, exc)
             await self._emit_phase(ctx)
+            # Preserve whatever the phase managed to write before it
+            # blew up so the trailing ``done`` wide-event still
+            # shows the partial state at the moment of failure.
+            self._absorb_phase_into_run(ctx)
             # Promote phase_error to the sticky run-level slot so
             # the trailing ``done`` event in ``_run`` can mirror it,
             # then clear the per-phase scratch.
@@ -390,7 +394,23 @@ class BaseKernel(KernelPort):
             ).total_seconds() * 1000.0
             ctx.phase_details["phase_duration_ms"] = round(duration_ms, 3)
         await self._emit_phase(ctx)
+        self._absorb_phase_into_run(ctx)
         self._reset_phase_slots(ctx)
+
+    @staticmethod
+    def _absorb_phase_into_run(ctx: "RunContext") -> None:
+        """Fold the just-finished phase's details into ``run_details``.
+
+        Renames ``phase_duration_ms`` to ``<phase>_duration_ms`` so
+        each phase's timing survives the merge; every other key is
+        last-write-wins (today no two phases share a key).
+        """
+        phase_name = ctx.phase.value
+        for key, value in ctx.phase_details.items():
+            if key == "phase_duration_ms":
+                ctx.run_details[f"{phase_name}_duration_ms"] = value
+            else:
+                ctx.run_details[key] = value
 
     def _record_phase_failure(
         self, ctx: "RunContext", exc: BaseException
@@ -597,8 +617,13 @@ class BaseKernel(KernelPort):
 
         The ``done`` event is the canonical wide-event row for the
         whole run -- the row a query like "show me all failed runs
-        in the last hour" hits on. Carries totals that the
-        per-phase events alone don't expose.
+        in the last hour" hits on. It is built by starting from the
+        cross-phase ``run_details`` accumulator (every key each
+        phase wrote, with per-phase ``phase_duration_ms`` already
+        renamed to ``<phase>_duration_ms``) and layering the
+        run-level totals on top. A subscriber that listens only on
+        ``done`` therefore sees the entire run in a single event;
+        the per-phase events remain available for granular views.
         """
         run_ms = (
             (ctx.ended_at - ctx.started_at).total_seconds() * 1000.0
@@ -611,6 +636,10 @@ class BaseKernel(KernelPort):
             outcome = "empty"
         else:
             outcome = "ok"
+        # Start from everything every phase produced...
+        ctx.phase_details = dict(ctx.run_details)
+        # ...then layer the run-level totals on top so they win over
+        # any (unlikely) collision and sit at the end of the dict.
         ctx.phase_details["run_duration_ms"] = round(run_ms, 3)
         ctx.phase_details["iterations"] = ctx.iteration + 1
         ctx.phase_details["total_actor_ms"] = round(ctx.total_actor_ms, 3)

@@ -105,6 +105,18 @@ class RunContext:
     ``details`` field, and clears it for the next phase. This is
     where the wide-event log gets its analytics-grade fields from.
 
+    ``run_details`` is the **cross-phase accumulator** the base
+    kernel maintains. After each phase emits its own
+    :class:`KernelPhase` event, the loop merges that phase's
+    ``phase_details`` into ``run_details`` so the trailing
+    ``done`` event can be the canonical wide-event row carrying
+    *everything* that happened during the run. Subscribers
+    interested in the full picture listen only on ``done``;
+    subscribers interested in granular per-phase progress still
+    get the individual events. The per-phase ``phase_duration_ms``
+    is renamed to ``<phase>_duration_ms`` during the merge so each
+    phase's timing survives.
+
     ``metadata`` is the open-ended scratchpad for phase-private data
     that should *not* end up in telemetry (e.g. a kernel that wants
     to remember which session a run belongs to before history is
@@ -144,3 +156,11 @@ class RunContext:
     phase_details: dict[str, Any] = field(default_factory=dict)
     phase_message: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    # Cross-phase wide-event accumulator. The base kernel merges
+    # every phase's ``phase_details`` into this dict (renaming
+    # ``phase_duration_ms`` to ``<phase>_duration_ms`` to keep
+    # per-phase timings) so the trailing ``done`` event can be
+    # rendered as the canonical wide-event row for the whole run.
+    # See class docstring for the rationale.
+    run_details: dict[str, Any] = field(default_factory=dict)

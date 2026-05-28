@@ -362,10 +362,16 @@ class LLMActorBase(LLMActorPort):
 
         - ``messages`` -- already-shaped list of
           :class:`ChatMessage` (or dicts with ``role`` / ``content``).
-          Used verbatim. The kernel's job is to honour this if it
-          already speaks LLM-native; the BaseKernel never produces
-          this shape.
-        - ``system`` -- system prompt to prepend. Falls back to
+          Used as-is. When the caller also supplies
+          ``system_prompt`` (preferred) or ``system``, that string is
+          prepended as a ``system`` :class:`ChatMessage` unless the
+          first explicit entry already has ``role=="system"``. This
+          is the path the :class:`~src.kernel.chat.ChatKernel`
+          takes: it computes a system prompt from firmware and a
+          history list from the session store, then hands both
+          fields to the actor.
+        - ``system`` / ``system_prompt`` -- system prompt to prepend
+          when there is no explicit ``messages`` list. Falls back to
           :attr:`_default_system_prompt`.
         - ``history`` -- prior turns as a list of dicts /
           :class:`ChatMessage`.
@@ -375,13 +381,27 @@ class LLMActorBase(LLMActorPort):
         """
         explicit = actor_context.get("messages")
         if isinstance(explicit, list) and explicit:
-            return [
+            converted = [
                 m if isinstance(m, ChatMessage) else ChatMessage(**m)
                 for m in explicit
             ]
+            system = (
+                actor_context.get("system_prompt")
+                or actor_context.get("system")
+                or self._default_system_prompt
+            )
+            if system and (not converted or converted[0].role != "system"):
+                converted.insert(
+                    0, ChatMessage(role="system", content=system)
+                )
+            return converted
 
         out: list[ChatMessage] = []
-        system = actor_context.get("system") or self._default_system_prompt
+        system = (
+            actor_context.get("system_prompt")
+            or actor_context.get("system")
+            or self._default_system_prompt
+        )
         if system:
             out.append(ChatMessage(role="system", content=system))
 
@@ -428,11 +448,22 @@ class LLMActorBase(LLMActorPort):
         request_id: str,
         extras: dict[str, Any],
     ) -> dict[str, Any]:
+        """Build the metadata dict the kernel merges into phase_details.
+
+        Always carries the full token vocabulary (input, output,
+        cache_read, cache_write, reasoning) so a kernel can map them
+        onto the OCF ``usage`` field without per-provider knowledge.
+        ``cost_usd`` reflects what the driver knows (typically ``0.0``
+        -- pricing is the kernel's job via the model catalog).
+        """
         metadata: dict[str, Any] = {
             "provider": self._provider,
             "model_id": self._model_id,
             "tokens_in": usage.tokens_in,
             "tokens_out": usage.tokens_out,
+            "cache_read_tokens": usage.cache_read_tokens,
+            "cache_write_tokens": usage.cache_write_tokens,
+            "reasoning_tokens": usage.reasoning_tokens,
             "cost_usd": usage.cost_usd,
             "finish_reason": finish_reason,
         }

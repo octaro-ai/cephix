@@ -72,16 +72,23 @@ defaults:
         actor: {name: echo}
 
     # Blueprint for LLM-driven bots. Same observability as `default`,
-    # but the actor is `llm.openai` (the robot.yaml supplies model_id
-    # and api_key).
+    # but the kernel is `chat` (firmware-backed system prompt, OCF-
+    # shaped persistent session history) and the actor is
+    # `llm.openai` (the robot.yaml supplies model_id and api_key).
+    # The three utilities (model catalog, firmware store, session
+    # store) are wired by convention from the `utility:` list.
     chatbot:
       bus: {name: asyncio}
       persistence: {name: jsonl}
       telemetry: {name: bus_recorder}
       audit: {name: audit_note_sink}
       control_plane: {name: control_plane}
+      utility:
+        - {name: model-catalog}
+        - {name: firmware-store}
+        - {name: session-store}
       kernel:
-        name: base
+        name: chat
         actor: {name: llm.openai}
       channels:
         - {name: websocket}
@@ -101,10 +108,23 @@ defaults:
         input_topic: input.message
         output_topic: output.message
         actor_timeout: 30.0
+      - name: chat
+        input_topic: input.message
+        output_topic: output.message
+        actor_timeout: 30.0
 
     actor:
       - {name: echo, prefix: "echo: "}
       - {name: llm.openai, provider: openai, timeout: 60.0, max_retries: 2}
+
+    utility:
+      # Off-bus helpers consumed by reference by other components.
+      # The model catalog ships its bundled `llmprice` snapshot;
+      # the markdown firmware store reads <workspace>/firmware/;
+      # the JSONL session store writes <workspace>/sessions/.
+      - {name: model-catalog}
+      - {name: firmware-store}
+      - {name: session-store}
 
     channel:
       - name: websocket

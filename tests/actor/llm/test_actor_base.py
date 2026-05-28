@@ -163,6 +163,48 @@ async def test_chat_only_actor_run_returns_response_with_metadata() -> None:
     assert response.metadata["cost_usd"] == 0.001
     assert response.metadata["finish_reason"] == "stop"
     assert response.metadata["provider_extras"] == {"native": "chat"}
+    # Cache/reasoning token vocab is always present so the kernel can map
+    # them onto the OCF ``usage`` field without per-provider knowledge.
+    assert response.metadata["cache_read_tokens"] == 0
+    assert response.metadata["cache_write_tokens"] == 0
+    assert response.metadata["reasoning_tokens"] == 0
+
+
+async def test_reply_metadata_surfaces_cache_and_reasoning_tokens() -> None:
+    """Drivers that report cache/reasoning counts pass them through."""
+
+    class _CachedDriver(LLMActorBase):
+        component_name = "cached"
+
+        async def _chat_native(
+            self,
+            messages: list[ChatMessage],
+            *,
+            max_output_tokens: int | None = None,
+            temperature: float | None = None,
+        ) -> LLMReply:
+            del messages, max_output_tokens, temperature
+            return LLMReply(
+                text="ok",
+                finish_reason="stop",
+                usage=LLMUsage(
+                    tokens_in=100,
+                    tokens_out=20,
+                    cache_read_tokens=30,
+                    cache_write_tokens=40,
+                    reasoning_tokens=5,
+                ),
+            )
+
+    a = _CachedDriver(model_id="m", provider="p")
+    response = await a.run({"message": "x"})
+    assert response.status == "ok"
+    md = response.metadata
+    assert md["tokens_in"] == 100
+    assert md["tokens_out"] == 20
+    assert md["cache_read_tokens"] == 30
+    assert md["cache_write_tokens"] == 40
+    assert md["reasoning_tokens"] == 5
 
 
 async def test_chat_only_actor_synthesises_stream() -> None:
@@ -347,6 +389,108 @@ async def test_explicit_messages_field_used_verbatim() -> None:
     ]
     await a.run({"messages": explicit})
     assert captured[0] == explicit
+
+
+async def test_system_prompt_prepended_when_messages_list_has_no_system() -> None:
+    """ChatKernel-style: history + user list comes in; firmware system prompt
+    is supplied alongside via ``system_prompt`` and the actor stitches them.
+    """
+    captured: list[list[ChatMessage]] = []
+
+    class _Capturing(LLMActorBase):
+        component_name = "cap"
+
+        async def _chat_native(self, messages, **kwargs) -> LLMReply:  # noqa: ANN001
+            captured.append(list(messages))
+            return LLMReply(text="ok")
+
+    a = _Capturing(model_id="m", provider="p")
+    await a.run(
+        {
+            "system_prompt": "## CONSTITUTION\nbe good.",
+            "messages": [
+                {"role": "user", "content": "earlier"},
+                {"role": "assistant", "content": "prior reply"},
+                {"role": "user", "content": "now"},
+            ],
+        }
+    )
+    roles = [m.role for m in captured[0]]
+    contents = [m.content for m in captured[0]]
+    assert roles == ["system", "user", "assistant", "user"]
+    assert contents[0] == "## CONSTITUTION\nbe good."
+    assert contents[-1] == "now"
+
+
+async def test_system_prompt_not_duplicated_when_messages_starts_with_system() -> None:
+    """If the caller already put a system message at the head, leave it alone."""
+    captured: list[list[ChatMessage]] = []
+
+    class _Capturing(LLMActorBase):
+        component_name = "cap"
+
+        async def _chat_native(self, messages, **kwargs) -> LLMReply:  # noqa: ANN001
+            captured.append(list(messages))
+            return LLMReply(text="ok")
+
+    a = _Capturing(model_id="m", provider="p", default_system_prompt="default")
+    await a.run(
+        {
+            "system_prompt": "from-firmware",
+            "messages": [
+                {"role": "system", "content": "explicit"},
+                {"role": "user", "content": "hi"},
+            ],
+        }
+    )
+    roles = [m.role for m in captured[0]]
+    assert roles == ["system", "user"]
+    assert captured[0][0].content == "explicit"
+
+
+async def test_legacy_history_path_still_works_without_messages_list() -> None:
+    """BaseKernel + EchoActor / MockLLM setups must keep working unchanged."""
+    captured: list[list[ChatMessage]] = []
+
+    class _Capturing(LLMActorBase):
+        component_name = "cap"
+
+        async def _chat_native(self, messages, **kwargs) -> LLMReply:  # noqa: ANN001
+            captured.append(list(messages))
+            return LLMReply(text="ok")
+
+    a = _Capturing(model_id="m", provider="p", default_system_prompt="S")
+    await a.run(
+        {
+            "message": "now",
+            "history": [
+                {"role": "user", "content": "before"},
+                {"role": "assistant", "content": "earlier"},
+            ],
+        }
+    )
+    roles = [m.role for m in captured[0]]
+    assert roles == ["system", "user", "assistant", "user"]
+
+
+async def test_system_prompt_alias_overrides_default() -> None:
+    """``system_prompt`` (firmware-aware name) is honoured even without a list."""
+    captured: list[list[ChatMessage]] = []
+
+    class _Capturing(LLMActorBase):
+        component_name = "cap"
+
+        async def _chat_native(self, messages, **kwargs) -> LLMReply:  # noqa: ANN001
+            captured.append(list(messages))
+            return LLMReply(text="ok")
+
+    a = _Capturing(
+        model_id="m", provider="p", default_system_prompt="default"
+    )
+    await a.run({"message": "hi", "system_prompt": "from-firmware"})
+    assert captured[0][0] == ChatMessage(
+        role="system", content="from-firmware"
+    )
 
 
 async def test_nested_input_message_shape_matches_basekernel_output() -> None:

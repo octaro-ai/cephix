@@ -31,6 +31,7 @@ smart-default and the future ``--all`` filter.
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,12 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TELEMETRY_CHANNEL = "telemetry"
 _DEFAULT_AUDIT_CHANNEL = "audit"
+
+# Packaged firmware templates that ship with cephix. Copied into the
+# robot workspace on a per-file copy-if-missing basis whenever a
+# ``firmware-store`` utility is built. Lives next to ``defaults.yaml``
+# under :mod:`src` so editable installs and wheels both find it.
+_PACKAGED_FIRMWARE_DIR: Path = Path(__file__).with_name("firmware")
 
 # Top-level keys in ``robot.yaml`` that are NOT component slots:
 # they are robot-level metadata (identity, CLI filter, template
@@ -182,13 +189,20 @@ def build_robot_from_config(
         section_name="utility",
         expected_category=ComponentCategory.UTILITY,
         library=library,
+        workspace=workspace,
     )
     bus_utilities = _build_components_list(
         cfg.get("bus_utility"),
         section_name="bus_utility",
         expected_category=ComponentCategory.BUS_UTILITY,
         library=library,
+        workspace=workspace,
     )
+
+    # Index utilities by ``component_name`` so the kernel builder can
+    # inject the right instance by convention without the YAML having
+    # to repeat references.
+    utility_index = _index_components_by_name(utilities + bus_utilities)
 
     # Kernels (singular or plural form). Each kernel owns a nested
     # ``actor:`` mapping, built and injected into the kernel.
@@ -201,7 +215,10 @@ def build_robot_from_config(
             "'kernels:' for several)"
         )
     actors, kernels = _build_kernels(
-        kernel_specs, library=library, credentials=credentials
+        kernel_specs,
+        library=library,
+        credentials=credentials,
+        utilities=utility_index,
     )
 
     # Channels (singular or plural form).
@@ -513,6 +530,7 @@ def _build_kernels(
     *,
     library: ComponentLibrary,
     credentials: CredentialProviderPort | None,
+    utilities: dict[str, RobotComponent] | None = None,
 ) -> tuple[list[ActorPort], list[RobotComponent]]:
     """Build every kernel together with its nested actor.
 
@@ -521,9 +539,19 @@ def _build_kernels(
     :class:`RobotComponent`s in the robot's component list -- the
     runtime lifecycle treats them independently, the kernel just
     holds a reference for its act phase.
+
+    Convention-DI: a kernel constructor that declares any of
+    ``firmware``, ``sessions``, ``model_catalog`` automatically
+    receives the matching utility instance from ``utilities``
+    (indexed by ``component_name``). An explicit value in the YAML
+    wins; a missing utility raises a precise ``ConfigError`` instead
+    of a vague ``TypeError`` deep inside the constructor.
     """
+    import inspect
+
     actors: list[ActorPort] = []
     kernels: list[RobotComponent] = []
+    utilities = utilities or {}
     for index, raw in enumerate(kernel_specs):
         kspec = dict(raw)
         actor_spec = kspec.pop("actor", None)
@@ -554,8 +582,43 @@ def _build_kernels(
                 "implement RobotComponent"
             )
 
+        # Convention-DI for kernels that consume off-bus utilities.
+        # Map kernel-constructor keyword -> required utility
+        # ``component_name``.
+        kernel_utility_conventions: dict[str, str] = {
+            "firmware": "firmware-store",
+            "sessions": "session-store",
+            "model_catalog": "model-catalog",
+        }
+        cls = _resolve_kernel_class(kspec)
+        try:
+            sig = inspect.signature(cls)
+        except (ValueError, TypeError):
+            sig = None
+        kernel_extras: dict[str, Any] = {"actor": actor}
+        if sig is not None:
+            for kwarg, util_name in kernel_utility_conventions.items():
+                if kwarg in kspec:
+                    continue
+                if kwarg not in sig.parameters:
+                    continue
+                utility = utilities.get(util_name)
+                if utility is None:
+                    label = (
+                        "robot.yaml#kernel"
+                        if len(kernel_specs) == 1
+                        else f"robot.yaml#kernels[{index}]"
+                    )
+                    raise ConfigError(
+                        f"{label} ({cls.__name__}) requires a "
+                        f"{util_name!r} utility for its "
+                        f"{kwarg!r} parameter; add it to the "
+                        "robot.yaml 'utility:' list (or the template's)."
+                    )
+                kernel_extras[kwarg] = utility
+
         kernel = _build_with_library(
-            kspec, category="kernel", library=library, actor=actor
+            kspec, category="kernel", library=library, **kernel_extras
         )
         if not isinstance(kernel, KernelPort):
             raise ConfigError(
@@ -570,6 +633,28 @@ def _build_kernels(
         actors.append(actor)
         kernels.append(kernel)
     return actors, kernels
+
+
+def _resolve_kernel_class(spec: dict[str, Any]) -> type:
+    """Peek the registered/imported kernel class for Convention-DI.
+
+    Mirrors :func:`_resolve_actor_class`; we need the class object
+    before construction so we can inspect its constructor signature
+    and decide which utilities to inject.
+    """
+    from src.registry import _import_class, get  # type: ignore[attr-defined]
+
+    if "class" in spec:
+        cls_path = spec["class"]
+        if not isinstance(cls_path, str):
+            raise ConfigError("kernel.class must be a dotted path string")
+        return _import_class(cls_path)
+    if "name" in spec:
+        name = spec["name"]
+        if not isinstance(name, str):
+            raise ConfigError("kernel.name must be a string")
+        return get(name)
+    raise ConfigError("kernel needs either a 'name' or a 'class' key")
 
 
 def _build_actor(
@@ -665,6 +750,7 @@ def _build_components_list(
     section_name: str,
     expected_category: ComponentCategory,
     library: ComponentLibrary,
+    workspace: str | Path | None = None,
 ) -> list[RobotComponent]:
     """Build a list of components from a category-keyed YAML section.
 
@@ -673,6 +759,13 @@ def _build_components_list(
     defaults). The builder verifies the resulting component's
     category matches the section so a misconfigured channel can't
     sneak into the utility list and vice versa.
+
+    Convention-DI: stores that need workspace-derived paths
+    (``firmware-store`` -> ``firmware_dir``, ``session-store`` ->
+    ``sessions_dir``) get them injected by convention when a
+    ``workspace`` is available. The ``firmware-store`` additionally
+    triggers a copy-if-missing seed of the packaged template files
+    so a fresh robot has something to read on the first boot.
     """
     if spec is None:
         return []
@@ -686,8 +779,19 @@ def _build_components_list(
             raise ConfigError(
                 f"robot.yaml#{section_name}[{index}] must be a mapping"
             )
+        item = dict(item)
+        extras: dict[str, Any] = {}
+        name = item.get("name")
+        if workspace is not None and isinstance(name, str):
+            workspace_path = Path(workspace)
+            if name == "firmware-store" and "firmware_dir" not in item:
+                firmware_dir = workspace_path / "firmware"
+                _seed_firmware(firmware_dir)
+                extras["firmware_dir"] = str(firmware_dir)
+            elif name == "session-store" and "sessions_dir" not in item:
+                extras["sessions_dir"] = str(workspace_path / "sessions")
         component = _build_with_library(
-            item, category=section_name, library=library
+            item, category=section_name, library=library, **extras
         )
         if not isinstance(component, RobotComponent):
             raise ConfigError(
@@ -703,6 +807,45 @@ def _build_components_list(
             )
         out.append(component)
     return out
+
+
+def _index_components_by_name(
+    components: list[RobotComponent],
+) -> dict[str, RobotComponent]:
+    """Map ``component_name`` -> instance.
+
+    Used to look up utilities by convention name when a kernel asks
+    for one via Convention-DI (e.g. ``ChatKernel`` wanting
+    ``firmware`` -> ``firmware-store``). If the same name appears
+    more than once (multi-instance utilities), the last entry wins
+    -- multi-instance utility wiring would need an explicit
+    ``utilities:`` mapping per-kernel, which is out of scope here.
+    """
+    out: dict[str, RobotComponent] = {}
+    for component in components:
+        name = getattr(component, "component_name", None)
+        if isinstance(name, str) and name:
+            out[name] = component
+    return out
+
+
+def _seed_firmware(workspace_firmware_dir: Path) -> None:
+    """Copy packaged firmware templates into the workspace per file.
+
+    Only ever ``copy-if-missing``: a file the user has edited or
+    deleted stays whatever the user made of it. Runs on every build
+    so a brand-new robot ends up with the starter set, and a
+    previously-pruned set has the missing files re-seeded next time
+    around. The packaged template directory ships next to
+    ``defaults.yaml`` under :mod:`src`.
+    """
+    if not _PACKAGED_FIRMWARE_DIR.exists():
+        return
+    workspace_firmware_dir.mkdir(parents=True, exist_ok=True)
+    for src_file in sorted(_PACKAGED_FIRMWARE_DIR.glob("*.md")):
+        dst = workspace_firmware_dir / src_file.name
+        if not dst.exists():
+            shutil.copyfile(src_file, dst)
 
 
 # ---------------------------------------------------------------------------

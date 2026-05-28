@@ -47,10 +47,33 @@ class _FakeChoice:
         self.delta = delta
 
 
+class _FakePromptDetails:
+    def __init__(self, cached: int = 0) -> None:
+        self.cached_tokens = cached
+
+
+class _FakeCompletionDetails:
+    def __init__(self, reasoning: int = 0) -> None:
+        self.reasoning_tokens = reasoning
+
+
 class _FakeUsage:
-    def __init__(self, prompt: int = 0, completion: int = 0) -> None:
+    def __init__(
+        self,
+        prompt: int = 0,
+        completion: int = 0,
+        *,
+        cached: int = 0,
+        reasoning: int = 0,
+    ) -> None:
         self.prompt_tokens = prompt
         self.completion_tokens = completion
+        self.prompt_tokens_details = (
+            _FakePromptDetails(cached=cached) if cached else None
+        )
+        self.completion_tokens_details = (
+            _FakeCompletionDetails(reasoning=reasoning) if reasoning else None
+        )
 
 
 class _FakeCompletion:
@@ -323,6 +346,56 @@ class TestRun:
             call = actor._client._completions.calls[0]
             assert "temperature" not in call
             assert "max_tokens" not in call
+        finally:
+            await actor.stop()
+
+    async def test_run_maps_cache_and_reasoning_token_details(
+        self, patched_openai
+    ) -> None:
+        """The driver translates the nested ``*_tokens_details`` fields.
+
+        OpenAI exposes cache hits via
+        ``usage.prompt_tokens_details.cached_tokens`` and reasoning
+        spend via ``usage.completion_tokens_details.reasoning_tokens``.
+        Both must land in the metadata under the internal Cephix
+        names so the kernel can persist them as OCF ``cache_read`` /
+        ``thinking``.
+        """
+        actor = LLMActorOpenAI(model_id="gpt-4o-mini", api_key="k")
+        await actor.start()
+        try:
+            actor._client._completions.next_return = _FakeCompletion(
+                text="ok",
+                usage=_FakeUsage(
+                    prompt=100, completion=20, cached=30, reasoning=5
+                ),
+            )
+            response = await actor.run({"message": "x"})
+            md = response.metadata
+            assert md["tokens_in"] == 100
+            assert md["tokens_out"] == 20
+            assert md["cache_read_tokens"] == 30
+            assert md["reasoning_tokens"] == 5
+            # OpenAI has no Anthropic-style cache_creation metric.
+            assert md["cache_write_tokens"] == 0
+        finally:
+            await actor.stop()
+
+    async def test_run_handles_missing_token_detail_blocks(
+        self, patched_openai
+    ) -> None:
+        """Older SDK responses or models without cache support are tolerated."""
+        actor = LLMActorOpenAI(model_id="gpt-4o-mini", api_key="k")
+        await actor.start()
+        try:
+            actor._client._completions.next_return = _FakeCompletion(
+                text="ok", usage=_FakeUsage(prompt=10, completion=2)
+            )
+            response = await actor.run({"message": "x"})
+            md = response.metadata
+            assert md["cache_read_tokens"] == 0
+            assert md["cache_write_tokens"] == 0
+            assert md["reasoning_tokens"] == 0
         finally:
             await actor.stop()
 

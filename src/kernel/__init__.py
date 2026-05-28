@@ -15,7 +15,8 @@ phase telemetry or the lifecycle.
 """
 
 from src.kernel.base import BaseKernel
+from src.kernel.chat import ChatKernel
 from src.kernel.ports import KernelPort
 from src.kernel.run import RunContext, RunPhase
 
-__all__ = ["BaseKernel", "KernelPort", "RunContext", "RunPhase"]
+__all__ = ["BaseKernel", "ChatKernel", "KernelPort", "RunContext", "RunPhase"]

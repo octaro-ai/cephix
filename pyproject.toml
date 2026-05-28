@@ -25,7 +25,7 @@ include = ["src*"]
 exclude = ["_reference*", "_reference.*"]
 
 [tool.setuptools.package-data]
-"src" = ["defaults.yaml"]
+"src" = ["defaults.yaml", "firmware/*.md"]
 
 [build-system]
 requires = ["setuptools>=68"]

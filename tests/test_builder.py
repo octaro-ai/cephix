@@ -617,6 +617,190 @@ def test_builder_bus_utility_section_empty_today_but_accepted() -> None:
 
 
 # ---------------------------------------------------------------------------
+# ChatKernel + utilities (firmware store, session store, model catalog)
+# ---------------------------------------------------------------------------
+
+
+class TestBuilderChatKernel:
+    """Builder wires firmware/sessions/model_catalog into ChatKernel."""
+
+    def _chat_cfg(self, **overrides: Any) -> dict[str, Any]:
+        cfg = _cfg(
+            {
+                "utility": [
+                    {"name": "model-catalog"},
+                    {"name": "firmware-store"},
+                    {"name": "session-store"},
+                ],
+                "kernel": {"name": "chat"},
+                "actor": {
+                    "name": "llm.openai",
+                    "model_id": "gpt-4o-mini",
+                    "api_key": "sk-test",
+                },
+            }
+        )
+        cfg.update(overrides)
+        return cfg
+
+    def test_builds_chat_kernel_with_utility_dependencies(
+        self, tmp_path: Path
+    ) -> None:
+        from src.kernel.chat import ChatKernel
+        from src.utility.firmware_store import MarkdownFirmwareStore
+        from src.utility.model_catalog import ModelCatalog
+        from src.utility.session_store import JsonlSessionStore
+
+        robot = build_robot_from_config(
+            self._chat_cfg(),
+            workspace=tmp_path,
+        )
+        kernel = next(c for c in robot.components if isinstance(c, ChatKernel))
+        assert isinstance(kernel._firmware, MarkdownFirmwareStore)
+        assert isinstance(kernel._sessions, JsonlSessionStore)
+        assert isinstance(kernel._model_catalog, ModelCatalog)
+
+    def test_session_store_dir_defaults_to_workspace_sessions(
+        self, tmp_path: Path
+    ) -> None:
+        from src.utility.session_store import JsonlSessionStore
+
+        robot = build_robot_from_config(
+            self._chat_cfg(),
+            workspace=tmp_path,
+        )
+        store = next(
+            c for c in robot.components if isinstance(c, JsonlSessionStore)
+        )
+        assert store._sessions_dir == tmp_path / "sessions"
+
+    def test_firmware_store_dir_defaults_to_workspace_firmware(
+        self, tmp_path: Path
+    ) -> None:
+        from src.utility.firmware_store import MarkdownFirmwareStore
+
+        robot = build_robot_from_config(
+            self._chat_cfg(),
+            workspace=tmp_path,
+        )
+        store = next(
+            c
+            for c in robot.components
+            if isinstance(c, MarkdownFirmwareStore)
+        )
+        assert store._firmware_dir == tmp_path / "firmware"
+
+    def test_firmware_seeded_into_empty_workspace(
+        self, tmp_path: Path
+    ) -> None:
+        """First build into a fresh workspace seeds the starter templates."""
+        build_robot_from_config(self._chat_cfg(), workspace=tmp_path)
+        firmware_dir = tmp_path / "firmware"
+        assert firmware_dir.is_dir()
+        assert (firmware_dir / "AGENTS.md").is_file()
+        assert (firmware_dir / "POLICY.md").is_file()
+        assert (firmware_dir / "CONSTITUTION.md").is_file()
+        # We deliberately don't ship HEARTBEAT.md.
+        assert not (firmware_dir / "HEARTBEAT.md").exists()
+
+    def test_firmware_seed_is_copy_if_missing(self, tmp_path: Path) -> None:
+        """User edits survive across builds; deletions are re-seeded."""
+        firmware_dir = tmp_path / "firmware"
+        firmware_dir.mkdir()
+        # Pre-seed AGENTS.md with custom content so we can check it
+        # survives the build.
+        custom = "MY CUSTOM AGENTS\nwith user content"
+        (firmware_dir / "AGENTS.md").write_text(custom, encoding="utf-8")
+        # POLICY.md is missing entirely -- the builder must re-seed it.
+
+        build_robot_from_config(self._chat_cfg(), workspace=tmp_path)
+
+        # User-edited file untouched.
+        assert (firmware_dir / "AGENTS.md").read_text(encoding="utf-8") == (
+            custom
+        )
+        # Previously-missing template re-seeded.
+        assert (firmware_dir / "POLICY.md").is_file()
+        assert (firmware_dir / "CONSTITUTION.md").is_file()
+
+    def test_chat_kernel_without_required_utility_raises(
+        self, tmp_path: Path
+    ) -> None:
+        """A chat kernel missing the firmware store is a config error."""
+        cfg = self._chat_cfg()
+        # Drop firmware-store: the kernel can no longer be wired.
+        cfg["utility"] = [
+            {"name": "model-catalog"},
+            {"name": "session-store"},
+        ]
+        with pytest.raises(ConfigError, match="firmware-store"):
+            build_robot_from_config(cfg, workspace=tmp_path)
+
+    def test_base_kernel_does_not_get_utility_injection(
+        self, tmp_path: Path
+    ) -> None:
+        """Only kernels that declare the constructor kwarg get the utility.
+
+        ``BaseKernel`` doesn't take ``firmware`` / ``sessions`` /
+        ``model_catalog``; the builder must not try to pass them
+        (or the registry will reject the kwarg).
+        """
+        from src.utility.firmware_store import MarkdownFirmwareStore
+
+        robot = build_robot_from_config(
+            _cfg(
+                {
+                    "utility": [
+                        {"name": "firmware-store"},
+                    ],
+                    "kernel": {"name": "base"},
+                    "actor": {"name": "echo"},
+                }
+            ),
+            workspace=tmp_path,
+        )
+        assert any(
+            isinstance(c, MarkdownFirmwareStore) for c in robot.components
+        )
+
+    def test_chatbot_template_resolves_to_chat_kernel(
+        self, tmp_path: Path
+    ) -> None:
+        """The shipped chatbot template builds end-to-end with workspace."""
+        import yaml as _yaml
+
+        from pathlib import Path as _Path
+
+        from src.kernel.chat import ChatKernel
+
+        # Read the packaged defaults straight from the source tree
+        # so the test does not depend on ~/.cephix being primed.
+        packaged_defaults_path = _Path(
+            __import__("src").__file__
+        ).parent / "defaults.yaml"
+        defaults = _yaml.safe_load(
+            packaged_defaults_path.read_text(encoding="utf-8")
+        ).get("defaults", {})
+
+        robot = build_robot_from_config(
+            {
+                "template": "chatbot",
+                "control_plane": {"enabled": False},
+                "kernel": {
+                    "actor": {
+                        "name": "llm.openai",
+                        "model_id": "gpt-4o-mini",
+                        "api_key": "sk-test",
+                    }
+                },
+            },
+            defaults=defaults,
+            workspace=tmp_path,
+        )
+        assert any(isinstance(c, ChatKernel) for c in robot.components)
+
+
+# ---------------------------------------------------------------------------
 # Templates: blueprint resolution + slot-merge semantics
 # ---------------------------------------------------------------------------
 

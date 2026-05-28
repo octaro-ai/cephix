@@ -70,16 +70,42 @@ class ChatMessage:
 class LLMUsage:
     """Token counts and derived cost from one model invocation.
 
-    All three numeric fields are non-negative. A driver that does
-    not have a count from the SDK leaves it at ``0`` rather than
+    All numeric fields are non-negative. A driver that does not
+    have a count from the SDK leaves it at ``0`` rather than
     raising -- consumers that need a guarantee should sanity-check
     via :class:`~src.utility.model_catalog.types.ModelSpec` or fall
     back to a tokenizer-based estimate.
+
+    Internal Cephix names; the mapping to the OCF ``usage`` field
+    names (``input``, ``output``, ``thinking``, ``cache_read``,
+    ``cache_write``, ``total``) happens at the persistence boundary
+    when the kernel builds a
+    :class:`~src.utility.session_store.types.SessionMessage`. Driver
+    mapping per provider:
+
+    - OpenAI: ``usage.prompt_tokens`` -> ``tokens_in``;
+      ``usage.completion_tokens`` -> ``tokens_out``;
+      ``usage.prompt_tokens_details.cached_tokens`` ->
+      ``cache_read_tokens``; ``usage.completion_tokens_details.``
+      ``reasoning_tokens`` -> ``reasoning_tokens``; ``cache_write``
+      stays ``0`` (no Anthropic-style write metric).
+    - Anthropic (future): ``cache_read_input_tokens`` ->
+      ``cache_read_tokens``; ``cache_creation_input_tokens`` ->
+      ``cache_write_tokens``; ``thinking_tokens`` ->
+      ``reasoning_tokens``.
+
+    ``cost_usd`` is filled by the **kernel** (via
+    :class:`~src.utility.model_catalog.ports.ModelCatalogPort`), not
+    by the driver: the driver reports counts, the kernel knows the
+    pricing. Drivers therefore leave it at the default ``0.0``.
     """
 
     tokens_in: int = 0
     tokens_out: int = 0
     cost_usd: float = 0.0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
 
     def __post_init__(self) -> None:
         if self.tokens_in < 0:
@@ -88,6 +114,12 @@ class LLMUsage:
             raise ValueError("LLMUsage.tokens_out must be >= 0")
         if self.cost_usd < 0:
             raise ValueError("LLMUsage.cost_usd must be >= 0")
+        if self.cache_read_tokens < 0:
+            raise ValueError("LLMUsage.cache_read_tokens must be >= 0")
+        if self.cache_write_tokens < 0:
+            raise ValueError("LLMUsage.cache_write_tokens must be >= 0")
+        if self.reasoning_tokens < 0:
+            raise ValueError("LLMUsage.reasoning_tokens must be >= 0")
 
 
 @dataclass(frozen=True)

@@ -239,13 +239,7 @@ class LLMActorOpenAI(LLMActorBase):
 
             chunk_usage = getattr(chunk, "usage", None)
             if chunk_usage is not None:
-                usage = LLMUsage(
-                    tokens_in=int(getattr(chunk_usage, "prompt_tokens", 0) or 0),
-                    tokens_out=int(
-                        getattr(chunk_usage, "completion_tokens", 0) or 0
-                    ),
-                    cost_usd=0.0,
-                )
+                usage = self._usage_from_sdk(chunk_usage)
 
             if text or finish_reason or usage or extras:
                 yield LLMDelta(
@@ -283,13 +277,42 @@ class LLMActorOpenAI(LLMActorBase):
             kwargs["temperature"] = float(temperature)
         return kwargs
 
-    @staticmethod
-    def _usage_from_completion(completion: Any) -> LLMUsage:
+    @classmethod
+    def _usage_from_completion(cls, completion: Any) -> LLMUsage:
         usage = getattr(completion, "usage", None)
         if usage is None:
             return LLMUsage()
+        return cls._usage_from_sdk(usage)
+
+    @staticmethod
+    def _usage_from_sdk(usage: Any) -> LLMUsage:
+        """Translate an OpenAI SDK ``usage`` object into :class:`LLMUsage`.
+
+        OpenAI surfaces cache and reasoning counts in nested
+        ``*_tokens_details`` blocks; both blocks (and their fields)
+        may be missing depending on model and request. We read
+        defensively so older SDK versions and minimal mocks still
+        produce a valid :class:`LLMUsage`. ``cache_write_tokens``
+        stays ``0`` on this driver -- OpenAI has no equivalent of
+        Anthropic's ``cache_creation_input_tokens``. ``cost_usd``
+        is the kernel's responsibility (catalog-driven), not the
+        driver's.
+        """
+        prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion = int(getattr(usage, "completion_tokens", 0) or 0)
+        prompt_details = getattr(usage, "prompt_tokens_details", None)
+        cache_read = int(
+            getattr(prompt_details, "cached_tokens", 0) or 0
+        ) if prompt_details is not None else 0
+        completion_details = getattr(usage, "completion_tokens_details", None)
+        reasoning = int(
+            getattr(completion_details, "reasoning_tokens", 0) or 0
+        ) if completion_details is not None else 0
         return LLMUsage(
-            tokens_in=int(getattr(usage, "prompt_tokens", 0) or 0),
-            tokens_out=int(getattr(usage, "completion_tokens", 0) or 0),
+            tokens_in=prompt,
+            tokens_out=completion,
             cost_usd=0.0,
+            cache_read_tokens=cache_read,
+            cache_write_tokens=0,
+            reasoning_tokens=reasoning,
         )

@@ -195,17 +195,23 @@ def _register_builtins() -> None:
     from src.actor.echo import EchoActor
     from src.actor.llm.mock_actor import MockLLMActor
     from src.actor.llm.openai_actor import LLMActorOpenAI
+    from src.utility.firmware_store import MarkdownFirmwareStore
     from src.utility.model_catalog import ModelCatalog
+    from src.utility.session_store import JsonlSessionStore
     from src.bus.asyncio_bus import AsyncioBus
     from src.channels.websocket import WebsocketChannel
     from src.credentials.provider import CredentialProvider
     from src.kernel.base import BaseKernel
+    from src.kernel.chat import ChatKernel
 
     register(AsyncioBus)
     register(BaseKernel)
+    register(ChatKernel)
     register(CredentialProvider)
     register(EchoActor)
+    register(JsonlSessionStore)
     register(LLMActorOpenAI)
+    register(MarkdownFirmwareStore)
     register(MockLLMActor)
     register(ModelCatalog)
     register(WebsocketChannel)

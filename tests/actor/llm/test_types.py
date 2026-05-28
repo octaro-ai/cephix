@@ -43,6 +43,32 @@ def test_llm_usage_rejects_negative_values() -> None:
         LLMUsage(tokens_out=-1)
     with pytest.raises(ValueError):
         LLMUsage(cost_usd=-0.01)
+    with pytest.raises(ValueError):
+        LLMUsage(cache_read_tokens=-1)
+    with pytest.raises(ValueError):
+        LLMUsage(cache_write_tokens=-1)
+    with pytest.raises(ValueError):
+        LLMUsage(reasoning_tokens=-1)
+
+
+def test_llm_usage_cache_and_reasoning_default_to_zero() -> None:
+    usage = LLMUsage()
+    assert usage.cache_read_tokens == 0
+    assert usage.cache_write_tokens == 0
+    assert usage.reasoning_tokens == 0
+
+
+def test_llm_usage_accepts_full_token_vocabulary() -> None:
+    usage = LLMUsage(
+        tokens_in=100,
+        tokens_out=20,
+        cache_read_tokens=30,
+        cache_write_tokens=40,
+        reasoning_tokens=5,
+    )
+    assert usage.cache_read_tokens == 30
+    assert usage.cache_write_tokens == 40
+    assert usage.reasoning_tokens == 5
 
 
 def test_llm_reply_default_is_empty_stop() -> None:

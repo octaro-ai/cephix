@@ -358,6 +358,130 @@ async def test_base_kernel_phase_events_carry_wide_event_details() -> None:
     assert isinstance(done["total_actor_ms"], (int, float))
 
 
+async def test_done_event_aggregates_all_phase_details() -> None:
+    """``done`` is the wide-event row: it carries every key every phase wrote.
+
+    Subscribers that only care about the run-as-a-whole should be
+    able to listen exclusively on ``done`` and reconstruct the
+    full picture from a single event. Per-phase
+    ``phase_duration_ms`` is namespaced as ``<phase>_duration_ms``
+    so each phase's timing survives the merge.
+    """
+    bus = AsyncioBus()
+    phases: list[KernelPhase] = []
+
+    async def collect_phases(event: RobotEvent) -> None:
+        if isinstance(event, KernelPhase):
+            phases.append(event)
+
+    bus.subscribe(KERNEL_PHASE_TOPIC, collect_phases)
+
+    actor = EchoActor()
+    await bus.start()
+    try:
+        kernel = await _start_kernel(bus, actor=actor)
+        try:
+            await bus.publish(
+                RobotInput(
+                    topic="input.message",
+                    principal="user",
+                    source="channel.test",
+                    run_id="run-aggregate",
+                    message="hello",
+                )
+            )
+            await asyncio.sleep(0.05)
+        finally:
+            await kernel.stop()
+            await actor.stop()
+    finally:
+        await bus.stop()
+
+    done = next(p for p in phases if p.phase == RunPhase.DONE.value)
+    details = done.details
+
+    # Run-level totals stay intact.
+    assert details["outcome"] == "ok"
+    assert details["iterations"] == 1
+    assert isinstance(details["run_duration_ms"], (int, float))
+    assert isinstance(details["total_actor_ms"], (int, float))
+
+    # Per-phase keys are rolled up onto done.
+    assert details["input_message_len"] == len("hello")
+    assert "input_event_id" in details
+    assert details["actor_name"] == "echo"
+    assert details["actor_status"] == "ok"
+    assert details["path"] == "output"
+    assert details["is_tool_call"] is False
+    assert details["output_message_len"] == len("echo: hello")
+    assert "output_event_id" in details
+
+    # Per-phase durations survive the merge under namespaced keys.
+    assert "phase_duration_ms" not in details
+    for namespaced in (
+        "observing_duration_ms",
+        "planning_duration_ms",
+        "acting_duration_ms",
+        "finalizing_duration_ms",
+        "responding_duration_ms",
+    ):
+        assert namespaced in details, namespaced
+        assert isinstance(details[namespaced], (int, float))
+
+
+async def test_done_event_carries_partial_details_on_failure() -> None:
+    """A failed run still rolls up everything the surviving phases produced.
+
+    The wide-event row is most valuable for debugging failures, so
+    the loop must absorb each phase's details into the run
+    accumulator even when a later phase raises. The failing phase
+    itself also contributes whatever it managed to write before
+    the exception.
+    """
+    bus = AsyncioBus()
+    phases: list[KernelPhase] = []
+
+    async def collect_phases(event: RobotEvent) -> None:
+        if isinstance(event, KernelPhase):
+            phases.append(event)
+
+    bus.subscribe(KERNEL_PHASE_TOPIC, collect_phases)
+
+    actor = _FailingActor()
+    await bus.start()
+    try:
+        kernel = await _start_kernel(bus, actor=actor)
+        try:
+            await bus.publish(
+                RobotInput(
+                    topic="input.message",
+                    principal="user",
+                    source="channel.test",
+                    run_id="run-aggregate-fail",
+                    message="boom",
+                )
+            )
+            await asyncio.sleep(0.05)
+        finally:
+            await kernel.stop()
+            await actor.stop()
+    finally:
+        await bus.stop()
+
+    done = next(p for p in phases if p.phase == RunPhase.DONE.value)
+    details = done.details
+
+    # Error totals are correct.
+    assert details["outcome"] == "error"
+    assert details["iterations"] == 1
+    # Surviving phases still rolled up.
+    assert details["input_message_len"] == len("boom")
+    assert "observing_duration_ms" in details
+    assert "planning_duration_ms" in details
+    # Failing phase's pre-exception scratch survives too.
+    assert "acting_duration_ms" in details
+
+
 # ---------------------------------------------------------------------------
 # Plan: actor context shape
 # ---------------------------------------------------------------------------
