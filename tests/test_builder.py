@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+
+def inspect_signature(cls: type) -> set[str]:
+    """Return the set of constructor keyword names of ``cls``."""
+    return set(inspect.signature(cls).parameters.keys())
 
 from src.actor.echo import EchoActor
 from src.audit.note_sink import AuditNoteSink
@@ -383,8 +389,35 @@ def test_builder_rejects_bad_port_range() -> None:
 
 
 # ---------------------------------------------------------------------------
-# LLM stack: utility + actor with catalog injection
+# LLM stack: utility section + actor (no catalog injection into actors)
 # ---------------------------------------------------------------------------
+
+
+def test_builder_drops_default_actor_fields_when_name_changes() -> None:
+    """Switching the actor type must not carry orphan default fields.
+
+    Regression: ``~/.cephix/cephix.yaml`` defaults to
+    ``actor: {name: echo, prefix: 'echo: '}``; switching the robot's
+    actor to ``llm.mock`` would previously deep-merge ``prefix`` into
+    the new spec and the registry would reject it. The
+    ``name``-discriminator rule in ``deep_merge`` keeps the override
+    spec clean.
+    """
+    from src.actor.llm.mock_actor import MockLLMActor
+
+    robot = build_robot_from_config(
+        {
+            "actor": {
+                "name": "llm.mock",
+                "model_id": "mock-echo",
+                "provider": "mock",
+            },
+            "kernel": {"name": "base"},
+            **_CP_OFF,
+        },
+        defaults={"actor": {"name": "echo", "prefix": "echo: "}},
+    )
+    assert any(isinstance(c, MockLLMActor) for c in robot.components)
 
 
 def test_builder_assembles_utility_list() -> None:
@@ -417,10 +450,20 @@ def test_builder_rejects_utility_section_with_wrong_category() -> None:
         )
 
 
-def test_builder_injects_catalog_into_mock_llm_actor() -> None:
-    """When a ModelCatalog utility is present, MockLLMActor gets it."""
+def test_builder_does_not_inject_catalog_into_actors() -> None:
+    """Actors are drivers, not catalog consumers.
+
+    Even with a ``ModelCatalog`` registered as a utility, no actor
+    receives a ``catalog`` reference: the catalog is the future
+    ``LLMKernel``'s dependency. Concrete actors (``MockLLMActor``,
+    ``LLMActorOpenAI``) therefore don't declare a ``catalog``
+    constructor kwarg, and an LLM actor that did declare one would
+    be a sign of regression -- the kernel/actor split would have
+    blurred again.
+    """
     from src.actor.llm.mock_actor import MockLLMActor
-    from src.utility.model_catalog import ModelCatalog
+
+    assert "catalog" not in inspect_signature(MockLLMActor)
 
     robot = build_robot_from_config(
         _cfg(
@@ -435,54 +478,17 @@ def test_builder_injects_catalog_into_mock_llm_actor() -> None:
             }
         )
     )
-    actor = next(c for c in robot.components if isinstance(c, MockLLMActor))
-    catalog = next(c for c in robot.components if isinstance(c, ModelCatalog))
-    assert actor._catalog is catalog  # type: ignore[attr-defined]
-
-
-def test_builder_skips_catalog_injection_for_actors_that_dont_take_it() -> None:
-    """An EchoActor has no ``catalog`` kwarg; injection must be silent."""
-    from src.actor.echo import EchoActor
-
-    robot = build_robot_from_config(
-        _cfg(
-            {
-                "utility": [{"name": "model-catalog"}],
-                "actor": {"name": "echo"},
-                "kernel": {"name": "base"},
-            }
-        )
-    )
-    # No crash + actor still constructed.
-    assert any(isinstance(c, EchoActor) for c in robot.components)
-
-
-def test_builder_explicit_actor_catalog_kwarg_wins_over_default_injection() -> None:
-    """A user-provided ``catalog: null`` opts out of injection.
-
-    Achievable today only by setting ``catalog: null`` -- proves the
-    builder leaves explicit values alone.
-    """
-    from src.actor.llm.mock_actor import MockLLMActor
-
-    robot = build_robot_from_config(
-        _cfg(
-            {
-                "utility": [{"name": "model-catalog"}],
-                "actor": {
-                    "name": "llm.mock",
-                    "catalog": None,  # opt out
-                },
-                "kernel": {"name": "base"},
-            }
-        )
-    )
-    actor = next(c for c in robot.components if isinstance(c, MockLLMActor))
-    assert actor._catalog is None  # type: ignore[attr-defined]
+    assert any(isinstance(c, MockLLMActor) for c in robot.components)
 
 
 def test_builder_utility_boots_before_actor() -> None:
-    """Robot.components is sorted by BOOT_PRIORITY; utility before actor."""
+    """Robot.components is sorted by BOOT_PRIORITY; utility before actor.
+
+    The catalog still needs to be online before the actor (the
+    future LLMKernel will read it during its own boot via the
+    catalog port). The ordering invariant matters even though the
+    actor itself does not consult the catalog.
+    """
     from src.actor.llm.mock_actor import MockLLMActor
     from src.utility.model_catalog import ModelCatalog
 
@@ -497,22 +503,6 @@ def test_builder_utility_boots_before_actor() -> None:
     )
     by_index = {type(c).__name__: i for i, c in enumerate(robot.components)}
     assert by_index[ModelCatalog.__name__] < by_index[MockLLMActor.__name__]
-
-
-def test_builder_mock_llm_actor_works_without_catalog() -> None:
-    """No utility section -> actor still constructs; catalog is None."""
-    from src.actor.llm.mock_actor import MockLLMActor
-
-    robot = build_robot_from_config(
-        _cfg(
-            {
-                "actor": {"name": "llm.mock"},
-                "kernel": {"name": "base"},
-            }
-        )
-    )
-    actor = next(c for c in robot.components if isinstance(c, MockLLMActor))
-    assert actor._catalog is None  # type: ignore[attr-defined]
 
 
 def test_builder_bus_utility_section_empty_today_but_accepted() -> None:

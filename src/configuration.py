@@ -153,18 +153,53 @@ def _dump_yaml(data: dict[str, Any], path: Path) -> None:
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    """Recursively merge ``override`` into ``base`` and return a new dict."""
+    """Recursively merge ``override`` into ``base`` and return a new dict.
+
+    Plain dicts are merged key-by-key with ``override`` winning on
+    leaves; nested dicts recurse. Lists and other scalars are replaced
+    wholesale.
+
+    **Discriminator rule**: a sub-dict is treated as a *component spec*
+    when both sides carry a ``name`` key. ``name`` identifies the
+    component class and therefore the constructor signature; if the
+    two ``name`` values differ, the sub-dicts describe two unrelated
+    components and merging them would produce a Frankenstein spec
+    (e.g. an ``LLMActorOpenAI`` with an orphan ``prefix`` field
+    inherited from an ``echo`` actor default). In that case the
+    override sub-dict replaces the base sub-dict wholesale -- only
+    fields the user explicitly wrote for the new component survive.
+    Sub-dicts that share the same ``name`` (or where one side omits
+    it) merge normally.
+    """
     merged = dict(base)
     for key, value in override.items():
         if (
             isinstance(value, dict)
             and key in merged
             and isinstance(merged[key], dict)
+            and not _component_identity_changed(merged[key], value)
         ):
             merged[key] = deep_merge(merged[key], value)
         else:
             merged[key] = value
     return merged
+
+
+def _component_identity_changed(
+    base: dict[str, Any], override: dict[str, Any]
+) -> bool:
+    """``True`` when both sides declare conflicting ``name`` values.
+
+    A ``name`` mismatch means the two specs target different
+    component classes; their other fields are not interchangeable.
+    """
+    base_name = base.get("name")
+    override_name = override.get("name")
+    return (
+        base_name is not None
+        and override_name is not None
+        and base_name != override_name
+    )
 
 
 # ---------------------------------------------------------------------------

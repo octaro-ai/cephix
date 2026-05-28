@@ -2,8 +2,12 @@
 
 The mock is the canonical end-to-end test driver. It must:
 
-- consult an injected catalog when present (real cost computation)
-- still work without a catalog (zero cost, but realistic tokens)
+- compute realistic token counts via its own ``count_tokens``
+- surface them on the ``ActorResponse.metadata`` exactly the way
+  the OpenAI driver surfaces SDK-reported usage
+- leave ``cost_usd`` at ``0.0`` (cost is the kernel's job, not the
+  driver's -- the kernel holds the model catalog and turns tokens
+  into money)
 - stream word-by-word
 - end-to-end work with the real :class:`AsyncioBus` +
   :class:`BaseKernel`
@@ -13,53 +17,11 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
-from src.actor.types import ActorResponse
 from src.bus import AsyncioBus, RobotEvent, RobotInput, RobotOutput
 from src.components import ComponentCategory
 from src.kernel.base import BaseKernel
 from src.actor.llm.mock_actor import MockLLMActor
-from src.actor.llm.types import ActorChunk, ChatMessage
-from src.utility.model_catalog import (
-    ModelCatalog,
-    ModelDataSource,
-    ModelPricing,
-    ModelSpec,
-)
-
-
-class _FakeSource(ModelDataSource):
-    def __init__(self, rows: dict[tuple[str, str], tuple]) -> None:
-        self._rows = rows
-
-    @property
-    def snapshot_id(self) -> str:
-        return "fake"
-
-    def load_spec(self, model_id, provider):  # noqa: ANN001
-        return self._rows.get((provider, model_id), (None, None))[0]
-
-    def load_pricing(self, model_id, provider):  # noqa: ANN001
-        return self._rows.get((provider, model_id), (None, None))[1]
-
-
-def _catalog_with(model_id: str, provider: str) -> ModelCatalog:
-    spec = ModelSpec(
-        model_id=model_id,
-        provider=provider,
-        context_window_tokens=8192,
-        max_output_tokens=4096,
-    )
-    pricing = ModelPricing(
-        model_id=model_id,
-        provider=provider,
-        input_cost_per_token=0.001,
-        output_cost_per_token=0.002,
-    )
-    return ModelCatalog(
-        source=_FakeSource({(provider, model_id): (spec, pricing)})
-    )
+from src.actor.llm.types import ActorChunk
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +59,8 @@ def test_mock_count_tokens_whitespace_words() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_mock_run_without_catalog_returns_zero_cost() -> None:
+async def test_mock_run_reports_tokens_and_zero_cost() -> None:
+    """Driver reports token counts; cost stays the kernel's concern."""
     a = MockLLMActor()
     response = await a.run({"message": "hello world"})
     assert response.status == "ok"
@@ -107,17 +70,8 @@ async def test_mock_run_without_catalog_returns_zero_cost() -> None:
     assert meta["model_id"] == "mock-echo"
     assert meta["tokens_in"] == 2  # "hello world"
     assert meta["tokens_out"] == 3  # "[mock-reply] hello world"
-    assert meta["cost_usd"] == 0.0  # no catalog
+    assert meta["cost_usd"] == 0.0
     assert meta["finish_reason"] == "stop"
-
-
-async def test_mock_run_with_catalog_computes_real_cost() -> None:
-    catalog = _catalog_with("mock-echo", "mock")
-    a = MockLLMActor(catalog=catalog)
-    response = await a.run({"message": "hello world"})
-    # input: 2 tokens * 0.001 + output: 3 * 0.002
-    expected = 2 * 0.001 + 3 * 0.002
-    assert response.metadata["cost_usd"] == pytest.approx(expected)
 
 
 async def test_mock_run_truncates_to_max_output_tokens() -> None:
@@ -175,7 +129,7 @@ async def test_mock_stream_groups_words_via_chunk_words() -> None:
 
 async def test_basekernel_with_mock_llm_actor_produces_output() -> None:
     bus = AsyncioBus()
-    actor = MockLLMActor(catalog=_catalog_with("mock-echo", "mock"))
+    actor = MockLLMActor()
     kernel = BaseKernel(actor=actor, actor_timeout=2.0)
 
     outputs: list[RobotOutput] = []
@@ -214,12 +168,18 @@ async def test_basekernel_with_mock_llm_actor_produces_output() -> None:
 
 
 async def test_basekernel_phase_event_carries_mock_metadata() -> None:
-    """The act-phase event surfaces provider, model and token counts."""
+    """The act-phase event surfaces provider, model and token counts.
+
+    ``cost_usd`` is left at ``0.0`` -- the BaseKernel does not (yet)
+    compute cost. When the LLMKernel lands it will look up pricing
+    via :class:`~src.utility.model_catalog.ports.ModelCatalogPort`
+    and override this value.
+    """
     from src.bus import KERNEL_PHASE_TOPIC, KernelPhase
     from src.kernel.run import RunPhase
 
     bus = AsyncioBus()
-    actor = MockLLMActor(catalog=_catalog_with("mock-echo", "mock"))
+    actor = MockLLMActor()
     kernel = BaseKernel(actor=actor, actor_timeout=2.0)
 
     phases: list[KernelPhase] = []
@@ -258,5 +218,6 @@ async def test_basekernel_phase_event_carries_mock_metadata() -> None:
     assert act["tokens_in"] == 1  # "hi"
     assert act["tokens_out"] == 2  # "[mock-reply] hi"
     assert act["finish_reason"] == "stop"
-    # Cost is computed from the catalog pricing.
-    assert act["cost_usd"] == pytest.approx(1 * 0.001 + 2 * 0.002)
+    # Cost stays at 0.0 -- catalog-driven cost computation is the
+    # future LLMKernel's job, not the BaseKernel's.
+    assert act["cost_usd"] == 0.0

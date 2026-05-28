@@ -51,7 +51,6 @@ from typing import Any
 
 from src.actor.llm.actor_base import LLMActorBase
 from src.actor.llm.types import ChatMessage, LLMDelta, LLMReply, LLMUsage
-from src.utility.model_catalog import ModelCatalogPort
 
 logger = logging.getLogger(__name__)
 
@@ -78,13 +77,16 @@ class LLMActorOpenAI(LLMActorBase):
       OpenAI-compatible endpoint.
     - ``organization`` / ``project`` -- optional OpenAI org/project
       identifiers; passed through to the SDK client.
-    - ``catalog`` -- optional :class:`ModelCatalogPort`. Today
-      stored only for forward compatibility with the future
-      ``LLMKernel``; the actor itself is a driver and does not
-      consult the catalog (cost reporting comes from the SDK's
-      ``usage`` block, not from the catalog).
     - ``default_system_prompt`` -- forwarded to
       :class:`LLMActorBase`.
+
+    The driver does **not** take a ``ModelCatalogPort``: the SDK's
+    ``usage`` block already carries real ``prompt_tokens`` /
+    ``completion_tokens`` per call, so token counts come from the
+    provider, not from a catalog lookup. Cost-per-token reasoning
+    (and any context-window-aware planning) lives in the future
+    :class:`LLMKernel`, which holds the catalog reference -- the
+    actor stays a thin driver.
     - ``timeout`` -- per-request timeout in seconds. Default 60.
     - ``max_retries`` -- the SDK's built-in retry count for
       transient network errors. Default 2 (the SDK default).
@@ -107,7 +109,6 @@ class LLMActorOpenAI(LLMActorBase):
         base_url: str | None = None,
         organization: str | None = None,
         project: str | None = None,
-        catalog: ModelCatalogPort | None = None,
         default_system_prompt: str = "",
         timeout: float = 60.0,
         max_retries: int = 2,
@@ -120,7 +121,7 @@ class LLMActorOpenAI(LLMActorBase):
         if not api_key:
             raise ValueError(
                 "LLMActorOpenAI requires a non-empty api_key; "
-                "the builder substitutes ${OPENAI_KEY} (or your "
+                "the builder substitutes ${OPENAI_API_KEY} (or your "
                 "named credential) before construction"
             )
         if timeout <= 0:
@@ -132,7 +133,6 @@ class LLMActorOpenAI(LLMActorBase):
         self._base_url = base_url
         self._organization = organization
         self._project = project
-        self._catalog = catalog
         self._timeout = timeout
         self._max_retries = max_retries
 

@@ -1,18 +1,29 @@
 """MockLLMActor: real-acting offline driver.
 
 Not a stub that returns a canned string. The mock is deliberately
-*real-acting*: it consults the same :class:`ModelCatalogPort` an
-LLM-aware kernel would, computes token counts via its own
-:meth:`count_tokens`, and assembles a realistic
-:class:`~src.actor.llm.types.LLMReply` (with usage *and* cost). Only the
-*content* generation is mocked: the mock either echoes the last
-user message or runs a configurable template against the input.
+*real-acting*: it computes realistic token counts via its own
+:meth:`count_tokens` and surfaces them in the
+:class:`~src.actor.llm.types.LLMReply` exactly the way the
+:class:`~src.actor.llm.openai_actor.LLMActorOpenAI` surfaces the
+SDK's ``usage`` block. Only the *content* generation is mocked: the
+mock either echoes the last user message or runs a configurable
+template against the input.
 
-Why bother: it lets the entire LLM stack -- actor, kernel, catalog,
-audit trail -- run end-to-end *under realistic load* in tests and
-CI, without a network call. When we add ``LLMActorOpenAI`` later,
-only the content-generation step changes; everything around it has
-been exercised against this driver.
+What the mock does **not** do: it does not consult a model catalog
+and it does not compute cost. Cost is the future ``LLMKernel``'s
+job -- the kernel holds the
+:class:`~src.utility.model_catalog.ports.ModelCatalogPort` and turns
+``(provider, model_id, tokens_in, tokens_out)`` into ``cost_usd``.
+Putting catalog access into the actor would collapse the kernel and
+the driver into one component; that's exactly what the bus-centric
+design is set up to keep apart.
+
+Why bother with a mock at all: it lets the entire LLM stack --
+actor, kernel, catalog, audit trail -- run end-to-end *under
+realistic load* in tests and CI, without a network call. When we
+add ``LLMActorOpenAI`` later, only the content-generation step
+changes; everything around it has been exercised against this
+driver.
 
 Streaming: native. Word-grouped chunks with configurable delay
 (default zero).
@@ -25,7 +36,6 @@ import asyncio
 
 from src.actor.llm.actor_base import LLMActorBase
 from src.actor.llm.types import ChatMessage, LLMDelta, LLMReply, LLMUsage
-from src.utility.model_catalog import ModelCatalogPort
 
 ResponseFn = Callable[[list[ChatMessage]], str]
 
@@ -48,12 +58,6 @@ class MockLLMActor(LLMActorBase):
       ``("mock-echo", "mock")`` so the mock does not collide with
       any real model id while still passing canonical-looking
       identity through the metadata.
-    - ``catalog`` -- optional :class:`ModelCatalogPort`. When
-      provided and the identity exists in the catalog, the mock
-      computes ``cost_usd`` from real pricing and surfaces the
-      catalog-recorded ``finish_reason`` semantics. Without a
-      catalog the cost is ``0.0`` and tokens are still counted
-      via the local heuristic.
     - ``default_system_prompt`` -- forwarded to
       :class:`LLMActorBase`.
     - ``responder`` -- pluggable callable that produces the reply
@@ -83,7 +87,6 @@ class MockLLMActor(LLMActorBase):
         *,
         model_id: str = "mock-echo",
         provider: str = "mock",
-        catalog: ModelCatalogPort | None = None,
         default_system_prompt: str = "",
         responder: ResponseFn | None = None,
         stream_delay_seconds: float = 0.0,
@@ -98,7 +101,6 @@ class MockLLMActor(LLMActorBase):
             raise ValueError("stream_delay_seconds must be >= 0")
         if chunk_words < 1:
             raise ValueError("chunk_words must be >= 1")
-        self._catalog = catalog
         self._responder = responder or _default_responder
         self._stream_delay = stream_delay_seconds
         self._chunk_words = chunk_words
@@ -180,20 +182,17 @@ class MockLLMActor(LLMActorBase):
     def _compute_usage(
         self, messages: list[ChatMessage], reply_text: str
     ) -> LLMUsage:
+        """Token counts only -- ``cost_usd`` stays at ``0.0``.
+
+        Mirrors what a real provider's ``usage`` block delivers:
+        prompt and completion counts, no money. Cost-per-token
+        reasoning happens upstream in the kernel that holds the
+        :class:`~src.utility.model_catalog.ports.ModelCatalogPort`.
+        """
         tokens_in = sum(self.count_tokens(m.content) for m in messages)
         tokens_out = self.count_tokens(reply_text)
-        cost = 0.0
-        if self._catalog is not None:
-            pricing = self._catalog.lookup_pricing(
-                self._model_id, self._provider
-            )
-            if pricing is not None:
-                cost = (
-                    tokens_in * pricing.input_cost_per_token
-                    + tokens_out * pricing.output_cost_per_token
-                )
         return LLMUsage(
             tokens_in=tokens_in,
             tokens_out=tokens_out,
-            cost_usd=cost,
+            cost_usd=0.0,
         )

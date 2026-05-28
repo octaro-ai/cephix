@@ -245,3 +245,95 @@ async def test_drops_outputs_for_unknown_run() -> None:
             await channel.stop()
     finally:
         await bus.stop()
+
+
+# ---------------------------------------------------------------------------
+# port_range fallback (analogous to the ControlPlane resolver)
+# ---------------------------------------------------------------------------
+
+
+def test_port_range_validation_rejects_inverted_range() -> None:
+    with pytest.raises(ValueError, match="low must be <= high"):
+        WebsocketChannel(host="127.0.0.1", port=0, port_range=[100, 50])
+
+
+def test_port_range_validation_rejects_wrong_arity() -> None:
+    with pytest.raises(ValueError, match="2-element sequence"):
+        WebsocketChannel(host="127.0.0.1", port=0, port_range=[100])
+
+
+def test_port_range_validation_rejects_negative_values() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        WebsocketChannel(host="127.0.0.1", port=0, port_range=[-1, 100])
+
+
+async def test_port_range_walks_to_next_free_port_when_preferred_busy() -> None:
+    """Conflict on the preferred port silently rolls forward in the range.
+
+    Boots two channels: the first claims the OS-picked port, the second
+    requests that exact port with a small range and must end up on the
+    second-best slot (or, ultimately, on port 0 via the OS fallback).
+    The point is that ``actual_port`` differs from the preferred one
+    and ``start()`` does not raise.
+    """
+    bus_a = AsyncioBus()
+    bus_b = AsyncioBus()
+    occupant = WebsocketChannel(host="127.0.0.1", port=0)
+    await bus_a.start()
+    try:
+        await occupant.start(bus_a)
+        try:
+            taken = occupant.actual_port
+            assert taken is not None
+
+            await bus_b.start()
+            try:
+                # Tiny range so the resolver definitely walks past
+                # ``taken`` either to the very next port or to ``0``.
+                second = WebsocketChannel(
+                    host="127.0.0.1",
+                    port=taken,
+                    port_range=[taken, taken + 5],
+                )
+                await second.start(bus_b)
+                try:
+                    assert second.actual_port is not None
+                    assert second.actual_port != taken
+                finally:
+                    await second.stop()
+            finally:
+                await bus_b.stop()
+        finally:
+            await occupant.stop()
+    finally:
+        await bus_a.stop()
+
+
+async def test_port_conflict_without_range_raises() -> None:
+    """Without a configured ``port_range`` a conflict surfaces loudly.
+
+    Backwards-compatible default: a fixed-port deployment that suddenly
+    finds its port in use should fail at ``start()`` rather than
+    silently switch -- the operator chose a fixed port for a reason.
+    """
+    bus_a = AsyncioBus()
+    bus_b = AsyncioBus()
+    occupant = WebsocketChannel(host="127.0.0.1", port=0)
+    await bus_a.start()
+    try:
+        await occupant.start(bus_a)
+        try:
+            taken = occupant.actual_port
+            assert taken is not None
+
+            await bus_b.start()
+            try:
+                second = WebsocketChannel(host="127.0.0.1", port=taken)
+                with pytest.raises(OSError):
+                    await second.start(bus_b)
+            finally:
+                await bus_b.stop()
+        finally:
+            await occupant.stop()
+    finally:
+        await bus_a.stop()

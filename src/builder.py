@@ -48,7 +48,6 @@ from src.credentials import (
     resolve_secrets,
 )
 from src.credentials.ports import CredentialStorePort
-from src.utility.model_catalog import ModelCatalog, ModelCatalogPort
 from src.kernel.ports import KernelPort
 from src.persistence.provider import JsonlPersistenceProvider, PersistenceProvider
 from src.registry import ConfigError, build
@@ -150,21 +149,16 @@ def build_robot_from_config(
         expected_category=ComponentCategory.BUS_UTILITY,
     )
 
-    # Pick the first utility-grade ModelCatalog (if any) so we can
-    # inject it into actors that accept a catalog kwarg. Pure
-    # convention: builders look up shared utilities by type. For the
-    # general case we'll grow a "named utility" lookup; for now one
-    # catalog per robot is the only pattern.
-    model_catalog: ModelCatalog | None = next(
-        (u for u in utilities if isinstance(u, ModelCatalog)),
-        None,
-    )
-
     # Order matters: the actor is a runtime dependency the kernel
     # holds a direct reference to, so it must exist before the kernel
     # is constructed. The robot's lifecycle still treats both as
     # peers; the kernel just receives the already-built actor through
     # constructor injection.
+    #
+    # No ``catalog`` injection here: the model catalog is the future
+    # ``LLMKernel``'s dependency, not the actor's. The actor is a
+    # driver -- it surfaces ``tokens_in`` / ``tokens_out`` and lets
+    # the kernel compute ``cost_usd`` against the catalog.
     actor_spec = cfg.get("actor")
     if not actor_spec:
         raise ConfigError(
@@ -173,7 +167,6 @@ def build_robot_from_config(
         )
     actor_built = _build_actor(
         actor_spec,
-        catalog=model_catalog,
         credentials=credentials,
     )
     if not isinstance(actor_built, ActorPort):
@@ -436,19 +429,21 @@ def _build_components_list(
 def _build_actor(
     actor_spec: Any,
     *,
-    catalog: ModelCatalogPort | None,
     credentials: CredentialProviderPort | None = None,
 ) -> ActorPort:
-    """Build the actor, injecting catalog/credentials by Convention-DI.
+    """Build the actor, injecting credentials by Convention-DI.
 
-    Any actor whose constructor declares a ``catalog`` keyword gets
-    the shared :class:`ModelCatalogPort`; any actor whose
-    constructor declares a ``credentials`` keyword gets the shared
-    :class:`CredentialProviderPort`. Both are silently skipped for
-    actors that don't declare the matching kwarg
-    (e.g. :class:`~src.actor.echo.EchoActor`). An explicit value in
-    the YAML spec wins over the auto-injection (used by tests that
-    pass ``catalog: null`` or a stub).
+    Any actor whose constructor declares a ``credentials`` keyword
+    gets the shared :class:`CredentialProviderPort`; actors that
+    don't declare it (e.g. :class:`~src.actor.echo.EchoActor`) are
+    untouched. An explicit value in the YAML spec wins over the
+    auto-injection.
+
+    Note: the model catalog is *not* injected into actors. Actors
+    are drivers -- they report token counts; the future
+    ``LLMKernel`` consults the catalog to compute cost. Catalog
+    injection happens at kernel construction (once the LLMKernel
+    lands), not here.
     """
     import inspect
 
@@ -463,13 +458,6 @@ def _build_actor(
         sig = None
 
     extras: dict[str, Any] = {}
-    if (
-        catalog is not None
-        and "catalog" not in actor_spec
-        and sig is not None
-        and "catalog" in sig.parameters
-    ):
-        extras["catalog"] = catalog
     if (
         credentials is not None
         and "credentials" not in actor_spec

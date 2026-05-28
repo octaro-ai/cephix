@@ -70,6 +70,14 @@ robot.
 Iteration 2 ships without authentication or transport encryption: the
 channel is bound to localhost by default and is intended for trusted
 local use.
+
+Auto-port resolution: ``port`` is the preferred port. If ``port_range``
+is set (``[low, high]``) and the preferred port is busy, the channel
+walks the range; ``port=0`` as a final fallback lets the OS pick any
+free port. The bound port is exposed via :attr:`actual_port` and
+logged at :meth:`start` time. Same mechanic as the ControlPlane, so
+multiple bots co-exist on the same host without conflicting on a
+fixed port.
 """
 
 from __future__ import annotations
@@ -78,6 +86,7 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import Sequence
 from typing import Any
 
 from aiohttp import WSMsgType, web
@@ -106,6 +115,36 @@ def _new_session_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
+def _normalise_port_range(
+    raw: Sequence[int] | None,
+) -> tuple[int, int] | None:
+    """Validate and tuple-ise an optional ``port_range`` argument.
+
+    Accepts ``None`` (no range), or any 2-element sequence of ints with
+    ``low <= high``. Raises :class:`ValueError` for malformed input so
+    a config error surfaces at construction time rather than during
+    the boot phase.
+    """
+    if raw is None:
+        return None
+    items = list(raw)
+    if len(items) != 2:
+        raise ValueError(
+            f"port_range must be a 2-element sequence [low, high], "
+            f"got {items!r}"
+        )
+    low, high = int(items[0]), int(items[1])
+    if low < 0 or high < 0:
+        raise ValueError(
+            f"port_range values must be non-negative, got [{low}, {high}]"
+        )
+    if low > high:
+        raise ValueError(
+            f"port_range: low must be <= high, got [{low}, {high}]"
+        )
+    return low, high
+
+
 class WebsocketChannel(ChannelPort):
     """aiohttp-based WebSocket bridge between bus and outside world."""
 
@@ -118,6 +157,7 @@ class WebsocketChannel(ChannelPort):
         *,
         host: str = "127.0.0.1",
         port: int = 8765,
+        port_range: Sequence[int] | None = None,
         path: str = "/ws",
         principal_template: str = "ws:{session}",
         input_topic: str = INPUT_TOPIC,
@@ -125,6 +165,9 @@ class WebsocketChannel(ChannelPort):
     ) -> None:
         self._host = host
         self._port = port
+        self._port_range: tuple[int, int] | None = _normalise_port_range(
+            port_range
+        )
         self._path = path
         self._principal_template = principal_template
         self._input_topic = input_topic
@@ -175,16 +218,72 @@ class WebsocketChannel(ChannelPort):
         self._runner = web.AppRunner(app)
         await self._runner.setup()
 
-        self._site = web.TCPSite(self._runner, self._host, self._port)
-        await self._site.start()
+        self._actual_port = await self._bind_with_resolution()
 
-        server = self._site._server  # type: ignore[attr-defined]
+        logger.info(
+            "WebsocketChannel listening on ws://%s:%s%s",
+            self._host,
+            self._actual_port,
+            self._path,
+        )
+
+    async def _bind_with_resolution(self) -> int:
+        """Try ``port``, then ``port_range``, then ``0`` as last resort.
+
+        If no ``port_range`` is configured, only the preferred ``port``
+        is tried -- a conflict surfaces as the ``OSError`` from
+        :meth:`aiohttp.web.TCPSite.start` so an unconfigured fixed-port
+        deployment fails loudly. With a range configured, conflicts are
+        resolved silently in favour of the next free port (with a log
+        line at INFO so the actual binding stays observable).
+        """
+        assert self._runner is not None
+
+        if self._port_range is None:
+            # Single-shot bind: let the OSError propagate so a fixed
+            # deployment fails loudly on a port conflict.
+            site = web.TCPSite(self._runner, self._host, self._port)
+            await site.start()
+            self._site = site
+            return self._extract_bound_port(site, self._port)
+
+        candidates: list[int] = [self._port]
+        low, high = self._port_range
+        for p in range(low, high + 1):
+            if p != self._port:
+                candidates.append(p)
+        candidates.append(0)  # OS picks; final fallback
+
+        last_error: OSError | None = None
+        for port in candidates:
+            try:
+                site = web.TCPSite(self._runner, self._host, port)
+                await site.start()
+            except OSError as exc:
+                last_error = exc
+                continue
+            self._site = site
+            bound = self._extract_bound_port(site, port)
+            if bound != self._port:
+                logger.info(
+                    "WebsocketChannel port %d unavailable, bound %d instead",
+                    self._port,
+                    bound,
+                )
+            return bound
+
+        raise RuntimeError(
+            f"WebsocketChannel could not bind on host {self._host!r}: "
+            f"{last_error}"
+        )
+
+    @staticmethod
+    def _extract_bound_port(site: web.TCPSite, fallback: int) -> int:
+        """Read the actually-bound port off the aiohttp site."""
+        server = site._server  # type: ignore[attr-defined]
         if server is not None and getattr(server, "sockets", None):
-            self._actual_port = server.sockets[0].getsockname()[1]
-        else:
-            self._actual_port = self._port
-
-        logger.info("WebsocketChannel listening on ws://%s:%s%s", self._host, self._actual_port, self._path)
+            return int(server.sockets[0].getsockname()[1])
+        return fallback
 
     async def stop(self) -> None:
         self._shutting_down = True

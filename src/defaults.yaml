@@ -51,6 +51,10 @@ defaults:
     - name: websocket
       host: 127.0.0.1
       port: 8765
+      # Tried in order if `port` is busy; final fallback is port 0
+      # (let the OS pick) so multiple bots co-exist by default. Same
+      # mechanic as the control plane above.
+      port_range: [8765, 8799]
       path: /ws
   # Robot-wide persistence layer. Components ask for sinks by channel
   # name (e.g. "telemetry", "audit", later "memory"); the provider

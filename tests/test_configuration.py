@@ -260,6 +260,44 @@ def test_deep_merge_preserves_originals() -> None:
     assert override == {"k": {"b": 2}}
 
 
+def test_deep_merge_replaces_subdict_when_name_discriminator_differs() -> None:
+    """Different ``name`` => different component => no field carry-over.
+
+    Concrete case: home defaults define ``actor: {name: echo, prefix: 'x'}``;
+    a robot.yaml overrides with ``actor: {name: llm.openai, model_id: y}``.
+    ``prefix`` belongs to ``EchoActor`` only and must not survive the merge,
+    or the registry rejects it as an unknown parameter.
+    """
+    base = {"actor": {"name": "echo", "prefix": "echo: "}}
+    override = {
+        "actor": {"name": "llm.openai", "model_id": "gpt-5.5", "api_key": "k"}
+    }
+    merged = deep_merge(base, override)
+    assert merged == {
+        "actor": {
+            "name": "llm.openai",
+            "model_id": "gpt-5.5",
+            "api_key": "k",
+        }
+    }
+
+
+def test_deep_merge_combines_subdict_when_name_matches() -> None:
+    """Same ``name`` => same component => fill missing fields from defaults."""
+    base = {"actor": {"name": "echo", "prefix": "echo: "}}
+    override = {"actor": {"name": "echo"}}
+    merged = deep_merge(base, override)
+    assert merged == {"actor": {"name": "echo", "prefix": "echo: "}}
+
+
+def test_deep_merge_combines_subdict_when_override_omits_name() -> None:
+    """Override without ``name`` => still the same component => merge fields."""
+    base = {"actor": {"name": "echo", "prefix": "echo: "}}
+    override = {"actor": {"prefix": "boom: "}}
+    merged = deep_merge(base, override)
+    assert merged == {"actor": {"name": "echo", "prefix": "boom: "}}
+
+
 # ---------------------------------------------------------------------------
 # .env handling (parser + writer come from python-dotenv)
 # ---------------------------------------------------------------------------
