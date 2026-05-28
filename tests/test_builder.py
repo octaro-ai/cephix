@@ -383,166 +383,152 @@ def test_builder_rejects_bad_port_range() -> None:
 
 
 # ---------------------------------------------------------------------------
-# LLM stack: governance + actor + provider injection
+# LLM stack: utility + actor with catalog injection
 # ---------------------------------------------------------------------------
 
 
-def test_builder_assembles_llm_stack() -> None:
-    """End-to-end assembly: governance + LLMActor + mock provider."""
-    from src.llm.actor import LLMActor
-    from src.llm.metadata_service import ModelMetadataService
-    from src.llm.providers.mock import MockLLMProvider
+def test_builder_assembles_utility_list() -> None:
+    """``utility:`` builds UTILITY-tier components into the robot."""
+    from src.llm.catalog import ModelCatalog
 
     robot = build_robot_from_config(
         _cfg(
             {
-                "governance": {"model_metadata": {"enabled": True}},
-                "actor": {
-                    "name": "llm",
-                    "default_system_prompt": "You are helpful.",
-                    "provider": {
-                        "name": "mock",
-                        "model_id": "echo",
-                        "provider": "mock",
-                    },
-                },
-                "kernel": {"name": "base"},
-            }
-        )
-    )
-    actor = next(c for c in robot.components if isinstance(c, LLMActor))
-    metadata = next(
-        c for c in robot.components if isinstance(c, ModelMetadataService)
-    )
-    assert metadata is not None
-    assert isinstance(actor._provider, MockLLMProvider)  # type: ignore[attr-defined]
-    assert actor._default_system_prompt == "You are helpful."  # type: ignore[attr-defined]
-    # Catalog was injected via governance.
-    assert actor._catalog is not None  # type: ignore[attr-defined]
-
-
-def test_builder_llm_actor_requires_provider_spec() -> None:
-    with pytest.raises(ConfigError, match="provider"):
-        build_robot_from_config(
-            _cfg(
-                {
-                    "governance": {"model_metadata": {"enabled": True}},
-                    "actor": {"name": "llm"},
-                    "kernel": {"name": "base"},
-                }
-            )
-        )
-
-
-def test_builder_rejects_unknown_llm_provider_name() -> None:
-    with pytest.raises(ConfigError, match="unknown llm provider"):
-        build_robot_from_config(
-            _cfg(
-                {
-                    "governance": {"model_metadata": {"enabled": True}},
-                    "actor": {
-                        "name": "llm",
-                        "provider": {"name": "made-up-name"},
-                    },
-                    "kernel": {"name": "base"},
-                }
-            )
-        )
-
-
-def test_builder_governance_disabled_omits_metadata_service() -> None:
-    """Without governance, the metadata service is absent.
-
-    The mock provider needs a catalog, so this configuration relies on
-    a different provider (here: dotted-path for documentation). The
-    builder should not error because of governance absence -- the
-    error must come from the provider's own validation.
-    """
-    from src.llm.metadata_service import ModelMetadataService
-
-    with pytest.raises(ConfigError, match="catalog"):
-        build_robot_from_config(
-            _cfg(
-                {
-                    "governance": {"model_metadata": {"enabled": False}},
-                    "actor": {
-                        "name": "llm",
-                        "provider": {
-                            "name": "mock",
-                            "model_id": "echo",
-                            "provider": "mock",
-                        },
-                    },
-                    "kernel": {"name": "base"},
-                }
-            )
-        )
-
-    # And confirm the *absence* path itself: with a provider that
-    # accepts catalog=None, governance off must produce a robot
-    # without a ModelMetadataService.
-    robot = build_robot_from_config(
-        _cfg(
-            {
+                "utility": [{"name": "model-catalog"}],
                 "actor": {"name": "echo"},
                 "kernel": {"name": "base"},
             }
         )
     )
-    assert not any(
-        isinstance(c, ModelMetadataService) for c in robot.components
-    )
+    catalogs = [c for c in robot.components if isinstance(c, ModelCatalog)]
+    assert len(catalogs) == 1
 
 
-def test_builder_provider_class_path_works() -> None:
-    """A dotted-path provider works alongside the registered names."""
-    from src.llm.actor import LLMActor
-    from src.llm.providers.mock import MockLLMProvider
+def test_builder_rejects_utility_section_with_wrong_category() -> None:
+    """A non-UTILITY component listed under ``utility:`` must error."""
+    with pytest.raises(ConfigError, match="expected utility"):
+        build_robot_from_config(
+            _cfg(
+                {
+                    "utility": [{"name": "echo"}],
+                    "kernel": {"name": "base"},
+                }
+            )
+        )
+
+
+def test_builder_injects_catalog_into_mock_llm_actor() -> None:
+    """When a ModelCatalog utility is present, MockLLMActor gets it."""
+    from src.llm.catalog import ModelCatalog
+    from src.llm.mock_actor import MockLLMActor
 
     robot = build_robot_from_config(
         _cfg(
             {
-                "governance": {"model_metadata": {"enabled": True}},
+                "utility": [{"name": "model-catalog"}],
                 "actor": {
-                    "name": "llm",
-                    "provider": {
-                        "class": "src.llm.providers.mock.MockLLMProvider",
-                        "model_id": "echo",
-                        "provider": "mock",
-                    },
+                    "name": "llm.mock",
+                    "model_id": "mock-echo",
+                    "provider": "mock",
                 },
                 "kernel": {"name": "base"},
             }
         )
     )
-    actor = next(c for c in robot.components if isinstance(c, LLMActor))
-    assert isinstance(actor._provider, MockLLMProvider)  # type: ignore[attr-defined]
+    actor = next(c for c in robot.components if isinstance(c, MockLLMActor))
+    catalog = next(c for c in robot.components if isinstance(c, ModelCatalog))
+    assert actor._catalog is catalog  # type: ignore[attr-defined]
 
 
-def test_builder_governance_metadata_service_boots_before_actor() -> None:
-    """Robot.components is sorted by BOOT_PRIORITY; metadata before actor."""
-    from src.llm.actor import LLMActor
-    from src.llm.metadata_service import ModelMetadataService
+def test_builder_skips_catalog_injection_for_actors_that_dont_take_it() -> None:
+    """An EchoActor has no ``catalog`` kwarg; injection must be silent."""
+    from src.actor.echo import EchoActor
 
     robot = build_robot_from_config(
         _cfg(
             {
-                "governance": {"model_metadata": {"enabled": True}},
+                "utility": [{"name": "model-catalog"}],
+                "actor": {"name": "echo"},
+                "kernel": {"name": "base"},
+            }
+        )
+    )
+    # No crash + actor still constructed.
+    assert any(isinstance(c, EchoActor) for c in robot.components)
+
+
+def test_builder_explicit_actor_catalog_kwarg_wins_over_default_injection() -> None:
+    """A user-provided ``catalog: null`` opts out of injection.
+
+    Achievable today only by setting ``catalog: null`` -- proves the
+    builder leaves explicit values alone.
+    """
+    from src.llm.mock_actor import MockLLMActor
+
+    robot = build_robot_from_config(
+        _cfg(
+            {
+                "utility": [{"name": "model-catalog"}],
                 "actor": {
-                    "name": "llm",
-                    "provider": {
-                        "name": "mock",
-                        "model_id": "echo",
-                        "provider": "mock",
-                    },
+                    "name": "llm.mock",
+                    "catalog": None,  # opt out
                 },
                 "kernel": {"name": "base"},
             }
         )
     )
-    # Find indices
+    actor = next(c for c in robot.components if isinstance(c, MockLLMActor))
+    assert actor._catalog is None  # type: ignore[attr-defined]
+
+
+def test_builder_utility_boots_before_actor() -> None:
+    """Robot.components is sorted by BOOT_PRIORITY; utility before actor."""
+    from src.llm.catalog import ModelCatalog
+    from src.llm.mock_actor import MockLLMActor
+
+    robot = build_robot_from_config(
+        _cfg(
+            {
+                "utility": [{"name": "model-catalog"}],
+                "actor": {"name": "llm.mock"},
+                "kernel": {"name": "base"},
+            }
+        )
+    )
     by_index = {type(c).__name__: i for i, c in enumerate(robot.components)}
-    assert (
-        by_index[ModelMetadataService.__name__]
-        < by_index[LLMActor.__name__]
+    assert by_index[ModelCatalog.__name__] < by_index[MockLLMActor.__name__]
+
+
+def test_builder_mock_llm_actor_works_without_catalog() -> None:
+    """No utility section -> actor still constructs; catalog is None."""
+    from src.llm.mock_actor import MockLLMActor
+
+    robot = build_robot_from_config(
+        _cfg(
+            {
+                "actor": {"name": "llm.mock"},
+                "kernel": {"name": "base"},
+            }
+        )
     )
+    actor = next(c for c in robot.components if isinstance(c, MockLLMActor))
+    assert actor._catalog is None  # type: ignore[attr-defined]
+
+
+def test_builder_bus_utility_section_empty_today_but_accepted() -> None:
+    """The ``bus_utility`` section is documented and parsed.
+
+    No built-in BUS_UTILITY component ships today, so an empty list
+    is the only valid value. Verifies the section is recognised and
+    the schema is forward-compatible.
+    """
+    robot = build_robot_from_config(
+        _cfg(
+            {
+                "bus_utility": [],
+                "actor": {"name": "echo"},
+                "kernel": {"name": "base"},
+            }
+        )
+    )
+    assert isinstance(robot, Robot)

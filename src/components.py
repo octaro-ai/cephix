@@ -106,42 +106,50 @@ class ComponentCategory(str, Enum):
     """Coarse role buckets used by the registry, the wizard and the
     robot's lifecycle ordering.
 
-    Four cross-cutting roles are distinguished from regular userspace:
+    Five cross-cutting roles are distinguished from regular userspace:
 
     - :attr:`TELEMETRY`: read-only observers that watch *everything*
-      that flows over the bus. The reference implementation is the
-      ``BusRecorder``; future telemetry components might emit metrics
-      or distributed traces.
+      that flows over the bus. Boots immediately after the bus so
+      it captures the full lifetime of every userspace component.
+      The reference implementation is the ``BusRecorder``.
     - :attr:`AUDIT`: subscribers that record curated, semantic notes
-      published via :meth:`RobotComponent.publish_audit`. The reference
-      implementation is the ``AuditNoteSink``.
-    - :attr:`GOVERNANCE`: shared infrastructure that other userspace
-      components consult synchronously: model catalog and pricing
-      services, future approval gates, future policy layers. Boots
-      after audit (so its own audit notes are captured) and before
-      actors and the kernel (so they can read it during ``start()``).
-      The reference implementation is the ``ModelMetadataService``.
+      published via :meth:`RobotComponent.publish_audit`. Boots right
+      after telemetry so audit notes are captured from the very
+      first userspace event. The reference implementation is the
+      ``AuditNoteSink``.
+    - :attr:`UTILITY`: off-bus helpers other components consult
+      synchronously during their own ``start()`` -- model catalogs,
+      tokenizers, pure data services, future credential stores
+      *before* they grow a bus interface. No bus dependency at all;
+      the robot owns their lifecycle and publishes
+      :class:`ComponentLifecycle` events on their behalf. Reference
+      implementation is the ``ModelCatalog``.
+    - :attr:`BUS_UTILITY`: bus-attached infrastructure that other
+      components share at runtime -- a future cost aggregator, a
+      future approval gate, a future credentials broker. Boots
+      between audit and the actor so it is online before any
+      consumer ``start()`` runs. None ship today; the slot is here
+      for the first concrete need.
     - :attr:`ACTOR`: the entity the kernel consults to turn a curated
       context into a reply. *Not* a bus participant: the kernel
       holds the actor as a direct in-process collaborator and calls
       its :meth:`ActorPort.run` method. Actors are still
       :class:`RobotComponent`s so the robot owns their lifecycle
-      (handy for subprocess actors, HTTP clients, ...). The
-      reference implementation is the ``EchoActor``; later iterations
-      add ``LLMActor``, ``HumanActor``, scripted ``MockActor``,
-      ``PlaywrightActor``.
+      (handy for subprocess actors, HTTP clients, ...). Reference
+      implementations: :class:`EchoActor`, :class:`MockLLMActor`;
+      later iterations add ``LLMActorOpenAI``, ``LLMActorAnthropic``,
+      ``HumanActor``, ``PlaywrightActor``.
 
-    Telemetry and audit boot right after the bus so they capture the
-    full lifetime of every userspace component. Governance follows
-    so its data is online before actors and kernels need it. Actors
-    boot before the kernel because the kernel constructor is handed
-    an already-running actor.
+    The full boot order is therefore:
+    bus -> telemetry -> audit -> utility -> bus_utility ->
+    actor -> kernel -> channels. Stop runs in the reverse order.
     """
 
     BUS = "bus"
     TELEMETRY = "telemetry"
     AUDIT = "audit"
-    GOVERNANCE = "governance"
+    UTILITY = "utility"
+    BUS_UTILITY = "bus_utility"
     ACTOR = "actor"
     KERNEL = "kernel"
     CHANNEL = "channel"
@@ -159,9 +167,10 @@ class ComponentCategory(str, Enum):
 # audit notes), and finally userspace.
 BOOT_PRIORITY: dict[ComponentCategory, int] = {
     ComponentCategory.BUS: 0,
-    ComponentCategory.TELEMETRY: 5,
-    ComponentCategory.AUDIT: 6,
-    ComponentCategory.GOVERNANCE: 7,
+    ComponentCategory.TELEMETRY: 1,
+    ComponentCategory.AUDIT: 2,
+    ComponentCategory.UTILITY: 5,
+    ComponentCategory.BUS_UTILITY: 7,
     ComponentCategory.ACTOR: 8,
     ComponentCategory.KERNEL: 10,
     ComponentCategory.CHANNEL: 20,

@@ -6,16 +6,14 @@ Three groups of types live here:
   static facts about a chat model. Both share the composite key
   ``(model_id, provider)``. Spec carries capabilities and limits,
   pricing carries cost-per-token. Different consumers, different
-  change cadences -- splitting them into two dataclasses keeps the
-  read-side concerns apart even though both come from the same
-  upstream JSON (LiteLLM / llmprice-kit).
+  change cadences -- splitting them keeps the read-side concerns
+  apart even though both come from the same upstream snapshot.
 
-- **Provider IO** (:class:`ChatMessage`, :class:`LLMReply`,
-  :class:`LLMDelta`, :class:`LLMUsage`): the in-process domain types
-  exchanged between :class:`~src.llm.actor.LLMActor` and the
-  :class:`~src.llm.ports.LLMProviderPort`. Stay independent of any
-  provider SDK: every provider adapter converts its native shape
-  into these types.
+- **Actor IO** (:class:`ChatMessage`, :class:`LLMReply`,
+  :class:`LLMDelta`, :class:`LLMUsage`): the in-process domain
+  types each :class:`~src.llm.actor_base.LLMActorBase` subclass
+  builds for itself. Stay independent of any provider SDK: each
+  driver subclass converts its native shape into these types.
 
 - **Stream output** (:class:`ActorChunk`): the chunks an
   :class:`~src.llm.ports.LLMActorPort` yields from its ``stream``
@@ -54,29 +52,23 @@ class ModelSpec:
 
     Fields:
 
-    - ``model_id`` -- the canonical model identifier (e.g.
-      ``"gpt-5"``, ``"claude-3-5-sonnet-20241022"``).
-    - ``provider`` -- the LiteLLM-style provider identifier
-      (``"openai"``, ``"anthropic"``, ``"openrouter"``,
-      ``"ollama"``, ...). Distinguishes the same model id served
-      through different vendors.
-    - ``context_window_tokens`` -- maximum number of input tokens the
-      model accepts in one request.
-    - ``max_output_tokens`` -- upper bound on completion tokens the
-      model can emit per request.
-    - ``supports_function_calling`` -- model can be invoked with
-      tools / function definitions.
+    - ``model_id`` -- canonical model identifier (e.g. ``"gpt-5"``,
+      ``"claude-sonnet-4-6"``).
+    - ``provider`` -- provider identifier (``"openai"``,
+      ``"anthropic"``, ``"openrouter"``, ``"ollama"``, ...).
+    - ``context_window_tokens`` -- maximum input tokens per request.
+    - ``max_output_tokens`` -- upper bound on completion tokens.
+    - ``supports_function_calling`` -- model accepts tool / function
+      definitions.
     - ``supports_vision`` -- model accepts image inputs.
     - ``supports_response_schema`` -- model honours JSON-Schema
       structured-output requests.
     - ``supports_system_messages`` -- model accepts a system role.
-      A few legacy models do not.
-    - ``extras`` -- pass-through dict for everything LiteLLM /
-      llmprice-kit expose that we don't yet model as a first-class
-      field (e.g. ``supports_prompt_caching``,
-      ``supports_reasoning``, ``cache_read_input_token_cost``,
-      ``output_cost_per_token_above_128k``). This is the open slot
-      so a new upstream column does not break the dataclass shape.
+    - ``extras`` -- pass-through for source-specific fields not yet
+      first-class (e.g. ``supports_prompt_caching``,
+      ``supports_reasoning``, ``supports_audio_input``,
+      ``deprecation_date``). Keeps the dataclass shape stable when
+      upstream adds new columns.
     """
 
     model_id: str
@@ -111,19 +103,18 @@ class ModelPricing:
     """Cost-per-token of a chat model.
 
     Same composite key ``(model_id, provider)`` as :class:`ModelSpec`.
-    Costs are in USD per token, matching the LiteLLM convention.
-    Components that compute estimated cost (cost calculators, billing
-    dashboards, limits monitors that gate on spend) consume this via
-    :class:`~src.llm.ports.PricingPort`.
+    Costs are in USD *per token*, even though most upstream sources
+    report per-million-tokens; the ``ModelDataSource`` adapter is
+    responsible for the unit conversion so consumers always see the
+    same scale.
 
-    Both ``input_cost_per_token`` and ``output_cost_per_token`` may
-    be ``0.0`` for free local models (Ollama, LM Studio) and for
-    self-hosted vLLM deployments.
+    Both costs may be ``0.0`` for free local models (Ollama, LM
+    Studio) and self-hosted vLLM deployments.
 
     ``extras`` mirrors the field on :class:`ModelSpec`: pass-through
-    for upstream-provided pricing nuances we don't yet first-class
-    (e.g. ``cache_read_input_token_cost``,
-    ``input_cost_per_token_above_128k_tokens``).
+    for upstream-provided pricing nuances we don't first-class
+    (``cache_read_cost_per_token``, ``cache_write_cost_per_token``,
+    ``input_cost_per_token_above_128k``).
     """
 
     model_id: str
@@ -150,16 +141,18 @@ class ModelPricing:
 
 
 # ---------------------------------------------------------------------------
-# Provider IO: messages, replies, deltas
+# Actor IO: chat messages, replies, deltas
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class ChatMessage:
-    """One message in a conversation handed to a provider.
+    """One message in a conversation handed to an LLM.
 
-    Provider-agnostic on purpose: every provider adapter converts
-    this to its native shape (OpenAI's ``{"role": ..., "content": ...}``,
+    SDK-agnostic on purpose: every concrete driver
+    (:class:`~src.llm.mock_actor.MockLLMActor`, future
+    ``LLMActorOpenAI``, ``LLMActorAnthropic``) converts this to its
+    native shape (OpenAI's ``{"role": ..., "content": ...}``,
     Anthropic's content blocks, ...).
 
     Roles follow the OpenAI convention:
@@ -183,12 +176,12 @@ class ChatMessage:
 
 @dataclass(frozen=True)
 class LLMUsage:
-    """Token counts and derived cost from one provider invocation.
+    """Token counts and derived cost from one model invocation.
 
-    All three numeric fields are non-negative integers / float in USD.
-    A provider that does not report a count leaves it at ``0`` rather
-    than raising -- consumers that need a guarantee should sanity-
-    check via :class:`ModelSpec` or fall back to a tokenizer-based
+    All three numeric fields are non-negative. A driver that does
+    not have a count from the SDK leaves it at ``0`` rather than
+    raising -- consumers that need a guarantee should sanity-check
+    via :class:`ModelSpec` or fall back to a tokenizer-based
     estimate.
     """
 
@@ -207,10 +200,11 @@ class LLMUsage:
 
 @dataclass(frozen=True)
 class LLMReply:
-    """Full response from a non-streaming provider call.
+    """Aggregated reply from a non-streaming call.
 
-    What :class:`~src.llm.ports.LLMProviderPort.chat` returns. The
-    actor turns it into an :class:`~src.actor.types.ActorResponse`.
+    What a driver subclass returns from
+    :meth:`LLMActorBase._chat_native`. The base actor turns it into
+    an :class:`~src.actor.types.ActorResponse`.
 
     Fields:
 
@@ -236,15 +230,14 @@ class LLMReply:
 
 @dataclass(frozen=True)
 class LLMDelta:
-    """One chunk from a streaming provider call.
+    """One chunk yielded by a driver's streaming path.
 
-    What :class:`~src.llm.ports.LLMProviderPort.stream_chat` yields
-    on each iteration. Most chunks carry just ``text`` -- the new
-    text piece since the previous chunk -- and trailing chunks may
-    carry token counts (some providers surface usage only on the
-    final SSE event).
+    What :meth:`LLMActorBase._stream_native` yields on each
+    iteration. Most chunks carry just ``text`` -- the new piece
+    since the previous chunk -- and trailing chunks may carry the
+    ``finish_reason`` / ``usage`` totals.
 
-    The actor accumulates the deltas into a final
+    The base actor accumulates deltas into a final
     :class:`LLMReply`-equivalent state and re-emits them as
     :class:`ActorChunk` objects to the kernel.
     """

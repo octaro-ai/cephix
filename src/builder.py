@@ -36,11 +36,10 @@ from src.configuration import (
     deep_merge,
     load_robot_env,
 )
+from src.components import ComponentCategory
 from src.kernel.ports import KernelPort
-from src.llm.actor import LLMActor
-from src.llm.metadata_service import ModelMetadataService
-from src.llm.ports import LLMProviderPort
-from src.llm.providers.mock import MockLLMProvider
+from src.llm.catalog import ModelCatalog
+from src.llm.ports import ModelCatalogPort
 from src.persistence.provider import JsonlPersistenceProvider, PersistenceProvider
 from src.registry import ConfigError, build
 from src.robot import ControlPlaneConfig, Robot, RobotIdentity
@@ -51,14 +50,6 @@ logger = logging.getLogger(__name__)
 _DEFAULT_BUS_SPEC: dict[str, Any] = {"name": "asyncio"}
 _DEFAULT_TELEMETRY_CHANNEL = "telemetry"
 _DEFAULT_AUDIT_CHANNEL = "audit"
-
-# Mini-registry for LLM provider classes. Providers are not full
-# RobotComponents (they have no component_name / category) and are
-# always wrapped by an actor that owns their lifecycle, so they live
-# here instead of in the main component registry.
-_LLM_PROVIDER_REGISTRY: dict[str, type[LLMProviderPort]] = {
-    "mock": MockLLMProvider,
-}
 
 
 def build_robot_from_config(
@@ -98,12 +89,31 @@ def build_robot_from_config(
             "RobotComponent"
         )
 
-    # Governance services are built before actors so an LLMActor
-    # can take a constructor-time reference to the catalog. The
-    # robot's boot order runs the service's start() first anyway
-    # (GOVERNANCE=7 < ACTOR=8), but the ports themselves are wired
-    # at construction time.
-    metadata_service = _build_governance_metadata(cfg.get("governance"))
+    # Utilities are built before actors so a future LLMKernel (or
+    # any other consumer) can hold a constructor-time reference to
+    # them. The robot's boot order runs them in their boot priority
+    # anyway (UTILITY=5 < ACTOR=8 < KERNEL=10), but their *ports* are
+    # wired at construction time. The same applies to bus utilities.
+    utilities = _build_components_list(
+        cfg.get("utility"),
+        section_name="utility",
+        expected_category=ComponentCategory.UTILITY,
+    )
+    bus_utilities = _build_components_list(
+        cfg.get("bus_utility"),
+        section_name="bus_utility",
+        expected_category=ComponentCategory.BUS_UTILITY,
+    )
+
+    # Pick the first utility-grade ModelCatalog (if any) so we can
+    # inject it into actors that accept a catalog kwarg. Pure
+    # convention: builders look up shared utilities by type. For the
+    # general case we'll grow a "named utility" lookup; for now one
+    # catalog per robot is the only pattern.
+    model_catalog: ModelCatalog | None = next(
+        (u for u in utilities if isinstance(u, ModelCatalog)),
+        None,
+    )
 
     # Order matters: the actor is a runtime dependency the kernel
     # holds a direct reference to, so it must exist before the kernel
@@ -116,7 +126,7 @@ def build_robot_from_config(
             "robot.yaml must declare an actor section; the kernel "
             "needs an actor to consult during its act phase"
         )
-    actor_built = _build_actor(actor_spec, metadata_service=metadata_service)
+    actor_built = _build_actor(actor_spec, catalog=model_catalog)
     if not isinstance(actor_built, ActorPort):
         raise ConfigError(
             f"actor component {type(actor_built).__name__} does not "
@@ -172,13 +182,18 @@ def build_robot_from_config(
         env = load_robot_env(workspace)
         control_plane_token = env.get(CONTROL_PLANE_TOKEN_ENV) or None
 
-    components: list[RobotComponent] = [bus, actor, kernel, *channels]
+    components: list[RobotComponent] = [
+        bus,
+        actor,
+        kernel,
+        *utilities,
+        *bus_utilities,
+        *channels,
+    ]
     if telemetry is not None:
         components.append(telemetry)
     if audit is not None:
         components.append(audit)
-    if metadata_service is not None:
-        components.append(metadata_service)
 
     return Robot(
         identity=identity,
@@ -188,62 +203,82 @@ def build_robot_from_config(
     )
 
 
-def _build_governance_metadata(spec: Any) -> ModelMetadataService | None:
-    """Build the :class:`ModelMetadataService` from ``governance.model_metadata``.
+def _build_components_list(
+    spec: Any,
+    *,
+    section_name: str,
+    expected_category: ComponentCategory,
+) -> list[RobotComponent]:
+    """Build a list of components from a category-keyed YAML section.
 
-    Layout::
+    Layout (Variant A from the design discussion)::
 
-        governance:
-          model_metadata:
-            enabled: true       # default true if the block exists
-            # (future: source / refresh-on-boot / ...)
+        utility:
+          - name: model-catalog
+          - name: tokenizer-cache  # future
+        bus_utility:
+          - name: cost-aggregator  # future
+          - name: credentials-broker  # future
 
-    Returns ``None`` when the block is absent or explicitly
-    disabled. The service exposes the bundled snapshot by default;
-    custom sources arrive once the llmprice-kit-backed source ships.
+    Each entry is a regular component spec (resolved via
+    :func:`build`). The builder verifies the resulting component's
+    category matches the section so a misconfigured channel can't
+    sneak into the utility list and vice versa.
     """
     if spec is None:
-        return None
-    if not isinstance(spec, dict):
-        raise ConfigError("robot.yaml#governance must be a mapping")
-    metadata_spec = spec.get("model_metadata")
-    if metadata_spec is None:
-        return None
-    if not isinstance(metadata_spec, dict):
+        return []
+    if not isinstance(spec, list):
         raise ConfigError(
-            "robot.yaml#governance.model_metadata must be a mapping"
+            f"robot.yaml#{section_name} must be a list of component specs"
         )
-    if not bool(metadata_spec.get("enabled", True)):
-        return None
-    # Drop the well-known keys the builder handles itself; pass the
-    # rest as constructor kwargs (forward-compatible with future
-    # ``source: ...`` entries).
-    metadata_spec = dict(metadata_spec)
-    metadata_spec.pop("enabled", None)
-    return build({"name": "model-metadata", **metadata_spec})
+    out: list[RobotComponent] = []
+    for index, item in enumerate(spec):
+        component = build(item)
+        if not isinstance(component, RobotComponent):
+            raise ConfigError(
+                f"{section_name}#{index} ({type(component).__name__}) "
+                f"does not implement RobotComponent"
+            )
+        if component.component_category is not expected_category:
+            raise ConfigError(
+                f"{section_name}#{index} resolved to "
+                f"{type(component).__name__} with category "
+                f"{component.component_category.value}; expected "
+                f"{expected_category.value}"
+            )
+        out.append(component)
+    return out
 
 
 def _build_actor(
     actor_spec: Any,
     *,
-    metadata_service: ModelMetadataService | None,
+    catalog: ModelCatalogPort | None,
 ) -> ActorPort:
-    """Build the actor with optional LLM-stack dependency injection.
+    """Build the actor, injecting the catalog where the constructor takes it.
 
-    Recognised special case: when the spec resolves to
-    :class:`LLMActor`, the builder also constructs the nested
-    ``provider:`` sub-spec and injects ``catalog`` / ``pricing``
-    from the governance metadata service when available. Other
-    actors are built unchanged.
+    The convention is light-touch: any actor whose constructor
+    accepts a ``catalog`` keyword argument gets the shared
+    :class:`ModelCatalogPort` injected if one is configured. The
+    :class:`MockLLMActor` and the future ``LLMActorOpenAI`` both
+    use this pattern. Plain :class:`EchoActor` does not declare
+    ``catalog``, so the injection is silently skipped for it.
     """
+    import inspect
+
     if not isinstance(actor_spec, dict):
         raise ConfigError("robot.yaml#actor must be a mapping")
-
     actor_spec = dict(actor_spec)
+
     cls = _resolve_actor_class(actor_spec)
 
-    if cls is LLMActor:
-        return _build_llm_actor(actor_spec, metadata_service=metadata_service)
+    if catalog is not None and "catalog" not in actor_spec:
+        try:
+            sig = inspect.signature(cls)
+        except (ValueError, TypeError):
+            sig = None
+        if sig is not None and "catalog" in sig.parameters:
+            return build(actor_spec, catalog=catalog)
 
     return build(actor_spec)
 
@@ -267,101 +302,6 @@ def _resolve_actor_class(spec: dict[str, Any]) -> type:
     raise ConfigError(
         "robot.yaml#actor needs either a 'name' or a 'class' key"
     )
-
-
-def _build_llm_actor(
-    spec: dict[str, Any],
-    *,
-    metadata_service: ModelMetadataService | None,
-) -> ActorPort:
-    """Construct an :class:`LLMActor` and inject its dependencies."""
-    provider_spec = spec.pop("provider", None)
-    if provider_spec is None:
-        raise ConfigError(
-            "LLMActor requires a 'provider' sub-mapping in the actor "
-            "spec, e.g. provider: {name: mock, model_id: echo, "
-            "provider: mock}"
-        )
-
-    provider = _build_llm_provider(
-        provider_spec,
-        metadata_service=metadata_service,
-    )
-
-    extras: dict[str, Any] = {"provider": provider}
-    if metadata_service is not None and "catalog" not in spec:
-        extras["catalog"] = metadata_service.as_catalog_port()
-
-    return build(spec, **extras)
-
-
-def _build_llm_provider(
-    spec: Any,
-    *,
-    metadata_service: ModelMetadataService | None,
-) -> LLMProviderPort:
-    """Build an :class:`LLMProviderPort` from a YAML sub-mapping.
-
-    Two ways to specify a provider, mirroring the main registry:
-
-    1. By registered name (``name: mock``).
-    2. By dotted Python path (``class: my.pkg.MyProvider``).
-
-    The builder injects ``catalog`` and ``pricing`` keyword arguments
-    from the metadata service when the provider's constructor
-    accepts them.
-    """
-    import inspect
-
-    if not isinstance(spec, dict):
-        raise ConfigError("provider spec must be a mapping")
-    spec = dict(spec)
-
-    cls: type[LLMProviderPort]
-    if "class" in spec:
-        from src.registry import _import_class  # type: ignore[attr-defined]
-
-        cls_path = spec.pop("class")
-        if not isinstance(cls_path, str) or "." not in cls_path:
-            raise ConfigError(
-                f"'class' must be a dotted path, got {cls_path!r}"
-            )
-        cls = _import_class(cls_path)
-    elif "name" in spec:
-        name = spec.pop("name")
-        if not isinstance(name, str):
-            raise ConfigError(f"'name' must be a string, got {name!r}")
-        try:
-            cls = _LLM_PROVIDER_REGISTRY[name]
-        except KeyError as exc:
-            known = ", ".join(sorted(_LLM_PROVIDER_REGISTRY)) or "(none)"
-            raise ConfigError(
-                f"unknown llm provider {name!r}; known: {known}"
-            ) from exc
-    else:
-        raise ConfigError(
-            "provider spec needs either a 'name' or a 'class' key"
-        )
-
-    if metadata_service is not None:
-        sig = inspect.signature(cls)
-        params = sig.parameters
-        if "catalog" in params and "catalog" not in spec:
-            spec["catalog"] = metadata_service.as_catalog_port()
-        if "pricing" in params and "pricing" not in spec:
-            spec["pricing"] = metadata_service.as_pricing_port()
-
-    try:
-        instance = cls(**spec)
-    except TypeError as exc:
-        raise ConfigError(
-            f"failed to construct provider {cls.__name__}: {exc}"
-        ) from exc
-    if not isinstance(instance, LLMProviderPort):
-        raise ConfigError(
-            f"provider {cls.__name__} does not implement LLMProviderPort"
-        )
-    return instance
 
 
 def _build_persistence_provider(

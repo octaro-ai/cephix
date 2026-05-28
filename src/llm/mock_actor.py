@@ -1,119 +1,124 @@
-"""MockLLMProvider: a real-acting fake.
+"""MockLLMActor: real-acting offline driver.
 
 Not a stub that returns a canned string. The mock is deliberately
-*real-acting*: it consults the same :class:`~src.llm.ports.ModelCatalogPort`
-and :class:`~src.llm.ports.PricingPort` that an OpenAI- or Anthropic-
-backed provider would, computes token counts via its own
+*real-acting*: it consults the same :class:`ModelCatalogPort` an
+LLM-aware kernel would, computes token counts via its own
 :meth:`count_tokens`, and assembles a realistic
 :class:`~src.llm.types.LLMReply` (with usage *and* cost). Only the
 *content* generation is mocked: the mock either echoes the last
 user message or runs a configurable template against the input.
 
-Why bother: it lets the entire LLM stack -- actor, kernel,
-metadata service, audit trail -- run end-to-end *under realistic
-load* in tests and CI, without a network call. When we add
-:class:`OpenAICompatProvider` later, only the content-generation
-step changes; everything around it has been exercised against the
-mock.
+Why bother: it lets the entire LLM stack -- actor, kernel, catalog,
+audit trail -- run end-to-end *under realistic load* in tests and
+CI, without a network call. When we add ``LLMActorOpenAI`` later,
+only the content-generation step changes; everything around it has
+been exercised against this driver.
 
-Streaming: the mock supports it natively. It tokenises the reply
-into word-sized chunks and yields them with a configurable delay
+Streaming: native. Word-grouped chunks with configurable delay
 (default zero).
 """
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator, Callable
-from typing import Any
+import asyncio
 
-from src.llm.ports import ModelCatalogPort, PricingPort
-from src.llm.providers.base import BaseLLMProvider
+from src.llm.actor_base import LLMActorBase
+from src.llm.ports import ModelCatalogPort
 from src.llm.types import ChatMessage, LLMDelta, LLMReply, LLMUsage
 
 ResponseFn = Callable[[list[ChatMessage]], str]
 
 
 def _default_responder(messages: list[ChatMessage]) -> str:
-    """Default mock response: echo the last user message with a prefix."""
+    """Default mock response: echo the last user message."""
     for msg in reversed(messages):
         if msg.role == "user":
             return f"[mock-reply] {msg.content}"
     return "[mock-reply] (no user message)"
 
 
-class MockLLMProvider(BaseLLMProvider):
-    """Catalog-aware mock that returns real metadata.
+class MockLLMActor(LLMActorBase):
+    """Catalog-aware mock LLM driver.
 
-    Constructor arguments:
+    Constructor:
 
     - ``model_id`` / ``provider`` -- the (potentially fictitious)
-      identity this mock pretends to be. Default: ``("echo", "mock")``,
-      which matches the entry in the bundled
-      :file:`src/llm/data/models.json`.
-    - ``catalog`` -- read-only :class:`ModelCatalogPort`. Used to
-      validate that the model identity exists during ``open`` and to
-      look up the spec on every call so the reply carries realistic
-      metadata.
-    - ``pricing`` -- optional :class:`PricingPort`. When provided,
-      the reply's :attr:`LLMReply.usage.cost_usd` is computed from
-      the actual token counts and pricing snapshot.
+      identity this driver pretends to be. Default
+      ``("mock-echo", "mock")`` so the mock does not collide with
+      any real model id while still passing canonical-looking
+      identity through the metadata.
+    - ``catalog`` -- optional :class:`ModelCatalogPort`. When
+      provided and the identity exists in the catalog, the mock
+      computes ``cost_usd`` from real pricing and surfaces the
+      catalog-recorded ``finish_reason`` semantics. Without a
+      catalog the cost is ``0.0`` and tokens are still counted
+      via the local heuristic.
+    - ``default_system_prompt`` -- forwarded to
+      :class:`LLMActorBase`.
     - ``responder`` -- pluggable callable that produces the reply
       content from the message list. Default: echo the last user
       message.
     - ``stream_delay_seconds`` -- async sleep between streamed
-      chunks. Useful for stream-handling tests; default 0 (no
-      sleep).
-    - ``chunk_words`` -- how many whitespace-separated tokens to
-      emit per stream chunk. Default 1 (word-by-word).
+      chunks. Useful for stream-handling tests; default 0.
+    - ``chunk_words`` -- whitespace-separated tokens per stream
+      chunk. Default 1 (word-by-word).
 
-    The mock implements both ``_chat_impl`` and ``_stream_impl``
-    natively so the run-by-collect-stream / stream-by-yield-chat
-    adapters in :class:`BaseLLMProvider` can each be exercised by
-    their own dedicated tests against a different provider.
+    Both :meth:`_chat_native` and :meth:`_stream_native` are
+    implemented natively so the run-by-collect-stream and
+    stream-by-yield-chat adapters in :class:`LLMActorBase` can
+    each be exercised by their own dedicated tests against a
+    different driver.
     """
+
+    component_name = "llm.mock"
+    component_description = (
+        "Mock LLM driver. Real-acting (consults the model catalog "
+        "for realistic token counts and cost); content generation "
+        "is templated. The default end-to-end test driver."
+    )
 
     def __init__(
         self,
         *,
-        catalog: ModelCatalogPort,
-        pricing: PricingPort | None = None,
-        model_id: str = "echo",
+        model_id: str = "mock-echo",
         provider: str = "mock",
+        catalog: ModelCatalogPort | None = None,
+        default_system_prompt: str = "",
         responder: ResponseFn | None = None,
         stream_delay_seconds: float = 0.0,
         chunk_words: int = 1,
     ) -> None:
-        super().__init__(model_id=model_id, provider=provider)
+        super().__init__(
+            model_id=model_id,
+            provider=provider,
+            default_system_prompt=default_system_prompt,
+        )
         if stream_delay_seconds < 0:
             raise ValueError("stream_delay_seconds must be >= 0")
         if chunk_words < 1:
             raise ValueError("chunk_words must be >= 1")
         self._catalog = catalog
-        self._pricing = pricing
         self._responder = responder or _default_responder
         self._stream_delay = stream_delay_seconds
         self._chunk_words = chunk_words
 
-    async def open(self) -> None:
-        """Validate that ``(model_id, provider)`` exists in the catalog."""
-        spec = self._catalog.lookup(self._model_id, self._provider)
-        if spec is None:
-            raise LookupError(
-                f"MockLLMProvider: model "
-                f"{self._provider}/{self._model_id} not found in catalog. "
-                f"Either register it in the bundled snapshot or pick an "
-                f"existing identity."
-            )
-        await super().open()
+    def count_tokens(self, text: str) -> int:
+        """Whitespace word count, minimum 1 for non-empty.
 
-    async def _chat_impl(
+        Deterministic and easy to reason about in tests. Real
+        drivers override with their tokenizer.
+        """
+        if not text:
+            return 0
+        return max(1, len(text.split()))
+
+    async def _chat_native(
         self,
         messages: list[ChatMessage],
         *,
         max_output_tokens: int | None = None,
         temperature: float | None = None,
-        extra: dict[str, Any] | None = None,
     ) -> LLMReply:
         text = self._responder(messages)
         text = self._truncate_to_max_tokens(text, max_output_tokens)
@@ -126,13 +131,12 @@ class MockLLMProvider(BaseLLMProvider):
             extras={"mock": True},
         )
 
-    async def _stream_impl(
+    async def _stream_native(
         self,
         messages: list[ChatMessage],
         *,
         max_output_tokens: int | None = None,
         temperature: float | None = None,
-        extra: dict[str, Any] | None = None,
     ) -> AsyncIterator[LLMDelta]:
         text = self._responder(messages)
         text = self._truncate_to_max_tokens(text, max_output_tokens)
@@ -146,8 +150,6 @@ class MockLLMProvider(BaseLLMProvider):
             )
             return
 
-        # Stream word-grouped chunks. Spaces re-introduced so the
-        # concatenation reconstructs the original text exactly.
         for i in range(0, len(words), self._chunk_words):
             group = words[i : i + self._chunk_words]
             chunk_text = " ".join(group)
@@ -156,24 +158,12 @@ class MockLLMProvider(BaseLLMProvider):
             if self._stream_delay:
                 await asyncio.sleep(self._stream_delay)
             yield LLMDelta(text=chunk_text)
-        # Closing delta carries usage + finish_reason.
         yield LLMDelta(
             text="",
             finish_reason="stop",
             usage=self._compute_usage(messages, text),
             extras={"mock": True},
         )
-
-    def count_tokens(self, text: str) -> int:
-        """Override: simple whitespace word count, minimum 1 for non-empty.
-
-        Deterministic and easy to reason about in tests. Real
-        providers override with their tokenizer; the mock keeps
-        the heuristic transparent.
-        """
-        if not text:
-            return 0
-        return max(1, len(text.split()))
 
     # ---- internals --------------------------------------------------------
 
@@ -193,8 +183,10 @@ class MockLLMProvider(BaseLLMProvider):
         tokens_in = sum(self.count_tokens(m.content) for m in messages)
         tokens_out = self.count_tokens(reply_text)
         cost = 0.0
-        if self._pricing is not None:
-            pricing = self._pricing.lookup(self._model_id, self._provider)
+        if self._catalog is not None:
+            pricing = self._catalog.lookup_pricing(
+                self._model_id, self._provider
+            )
             if pricing is not None:
                 cost = (
                     tokens_in * pricing.input_cost_per_token

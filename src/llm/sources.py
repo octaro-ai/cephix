@@ -1,125 +1,174 @@
 """Concrete :class:`~src.llm.ports.ModelDataSource` implementations.
 
-Today: only :class:`BundledLiteLLMSource`, which loads a JSON
-snapshot shipped with cephix. Offline, deterministic, audit-silent.
+Today: :class:`LLMPriceKitSource`, a thin adapter over the
+``llmprice`` lib (pip package: ``llmprice-kit``) that converts
+its :class:`llmprice.ModelPrice` value type into our internal
+:class:`~src.llm.types.ModelSpec` and
+:class:`~src.llm.types.ModelPricing`.
 
-Tomorrow: a :class:`LLMPriceKitSource` that wraps the llmprice-kit
-library and refreshes from upstream LiteLLM. The refresh path will
-publish a :class:`~src.bus.messages.RobotAuditNote` on every
-successful fetch (audit-loud). That source lives behind the same
-:class:`~src.llm.ports.ModelDataSource` interface, so the metadata
-service stays unchanged.
+Two reasons we wrap the lib instead of using its types directly:
+
+- **Domain isolation**: nothing in cephix outside this file should
+  import ``llmprice``. If we ever swap to a different upstream
+  (LiteLLM JSON parsed by hand, an internal mirror) the rest of
+  the codebase doesn't change.
+- **Unit normalisation**: ``llmprice`` reports cost
+  per-million-tokens, our :class:`ModelPricing` is per-token. The
+  conversion happens once, at the boundary.
+
+The lib is offline-first: the bundled snapshot ships with the
+package, no network call needed. ``auto_update=True`` flips on a
+24h refresh against the upstream LiteLLM-style mirror -- we expose
+that as a constructor flag and audit the refresh through the
+catalog (Iteration 1b will wire that audit path).
 """
 
 from __future__ import annotations
 
-import json
 import logging
-from importlib import resources
-from pathlib import Path
 from typing import Any
+
+from src.llm.types import ModelPricing, ModelSpec
 
 logger = logging.getLogger(__name__)
 
 
-class BundledLiteLLMSource:
-    """Loads a LiteLLM-shaped JSON snapshot bundled with cephix.
+# Conversion factor: ``llmprice`` reports cost per 1M tokens, we
+# store cost per token. Centralised here so the unit boundary is
+# unambiguous.
+_PER_MILLION = 1_000_000.0
 
-    The bundled file lives at ``src/llm/data/models.json``. It is a
-    manually curated subset of the LiteLLM
-    ``model_prices_and_context_window.json`` format -- enough models
-    to demonstrate spec/pricing semantics, exercise the metadata
-    service, and run offline tests without network access.
 
-    Output shape: ``{(provider, model_id): raw_row_dict}``. The raw
-    row dict matches the LiteLLM JSON schema (with ``model_id`` /
-    ``provider`` injected so the metadata service can build the
-    composite key without splitting strings).
+class LLMPriceKitSource:
+    """Adapter over the ``llmprice`` lib.
 
-    Why not just ship the upstream JSON file: that file is ~1 MB
-    with 700+ models, most of which we don't need offline. The
-    bundled snapshot stays small and human-readable; the upstream
-    refresh path (Iteration 1b via llmprice-kit) is opt-in.
+    Constructor:
+
+    - ``auto_update`` -- forwarded to :class:`llmprice.LLMPrice`.
+      ``False`` (default): use bundled data, never touch the
+      network. ``True``: refresh upstream when the bundled copy is
+      older than 24h. We default to ``False`` so a vanilla cephix
+      boot is fully offline; auto-refresh is a deliberate opt-in
+      that the catalog audits when it happens.
+    - ``data_path`` -- forwarded to :class:`llmprice.LLMPrice`. Lets
+      tests pin a known snapshot file.
+
+    Lookups:
+
+    The lib indexes models by their canonical name alone (e.g.
+    ``"gpt-4o-mini"``, ``"claude-sonnet-4-6"``); the upstream entry
+    carries a ``provider`` field that we cross-check. If the caller
+    asks for a ``(model_id, provider)`` pair where the provider
+    doesn't match the lib's record, we treat that as not-found
+    rather than silently returning the wrong row.
+
+    The lib raises :class:`KeyError` on unknown models; we catch
+    and translate to ``None`` so the port contract holds.
     """
 
-    def __init__(self, *, file_path: Path | None = None) -> None:
-        """Construct a source.
+    def __init__(
+        self,
+        *,
+        auto_update: bool = False,
+        data_path: str | None = None,
+    ) -> None:
+        # Imported lazily so cephix doesn't hard-fail at module load
+        # if the lib isn't installed in some minimal environment.
+        from llmprice import LLMPrice  # type: ignore[import-not-found]
 
-        ``file_path`` overrides the default bundled location. Useful
-        for tests that want a tightly-scoped fixture, and for
-        operators that want to ship a project-local catalog
-        alongside their ``robot.yaml``.
-        """
-        self._file_path = file_path
-        self._snapshot_id: str = ""
+        self._client = LLMPrice(auto_update=auto_update, data_path=data_path)
+        self._auto_update = auto_update
+        self._data_path = data_path
 
     @property
     def snapshot_id(self) -> str:
-        """Snapshot identifier from the JSON's ``_snapshot_id`` field."""
-        return self._snapshot_id
+        """Lib-reported snapshot age plus a stable component prefix."""
+        # The lib doesn't expose a hash; use ``data_age`` text plus
+        # total_models as a poor-man's snapshot id.  Audit notes
+        # only need to detect *change*, not be cryptographically
+        # robust.
+        return f"llmprice:{self._client.total_models}:{self._client.data_age()}"
 
-    async def load(self) -> dict[tuple[str, str], dict[str, Any]]:
-        """Read the JSON file and parse it into the canonical shape."""
-        raw = self._read_raw()
-        snapshot_id = raw.get("_snapshot_id", "")
-        if not isinstance(snapshot_id, str):
-            raise ValueError(
-                f"BundledLiteLLMSource: '_snapshot_id' must be a string, "
-                f"got {type(snapshot_id).__name__}"
-            )
-        self._snapshot_id = snapshot_id
+    def load_spec(self, model_id: str, provider: str) -> ModelSpec | None:
+        row = self._lookup_row(model_id, provider)
+        if row is None:
+            return None
+        extras = self._extras(row)
+        return ModelSpec(
+            model_id=row.name,
+            provider=row.provider,
+            context_window_tokens=int(row.max_input_tokens),
+            max_output_tokens=int(row.max_output_tokens),
+            supports_function_calling=bool(row.supports_function_calling),
+            supports_vision=bool(row.supports_vision),
+            supports_response_schema=bool(row.supports_response_schema),
+            # ``llmprice`` doesn't track ``supports_system_messages``;
+            # default True (almost every modern chat model does).
+            supports_system_messages=True,
+            extras=extras,
+        )
 
-        models_raw = raw.get("models")
-        if not isinstance(models_raw, dict):
-            raise ValueError(
-                "BundledLiteLLMSource: missing or malformed 'models' "
-                "object at the JSON root"
-            )
+    def load_pricing(
+        self, model_id: str, provider: str
+    ) -> ModelPricing | None:
+        row = self._lookup_row(model_id, provider)
+        if row is None:
+            return None
+        return ModelPricing(
+            model_id=row.name,
+            provider=row.provider,
+            input_cost_per_token=float(row.input_cost_per_1m) / _PER_MILLION,
+            output_cost_per_token=float(row.output_cost_per_1m) / _PER_MILLION,
+            extras={
+                "cache_read_cost_per_token": (
+                    float(row.cache_read_cost_per_1m) / _PER_MILLION
+                ),
+                "cache_write_cost_per_token": (
+                    float(row.cache_write_cost_per_1m) / _PER_MILLION
+                ),
+            },
+        )
 
-        result: dict[tuple[str, str], dict[str, Any]] = {}
-        for key, row in models_raw.items():
-            if not isinstance(row, dict):
-                logger.warning(
-                    "BundledLiteLLMSource: skipping non-dict row at %r", key
-                )
-                continue
-            model_id = row.get("model_id")
-            provider = row.get("provider")
-            if not isinstance(model_id, str) or not model_id:
-                logger.warning(
-                    "BundledLiteLLMSource: row %r has no model_id; skipping",
-                    key,
-                )
-                continue
-            if not isinstance(provider, str) or not provider:
-                logger.warning(
-                    "BundledLiteLLMSource: row %r has no provider; skipping",
-                    key,
-                )
-                continue
-            result[(provider, model_id)] = dict(row)
-        return result
+    def refresh(self) -> None:
+        """Fetch the latest pricing data from upstream.
 
-    def _read_raw(self) -> dict[str, Any]:
-        if self._file_path is not None:
-            text = self._file_path.read_text(encoding="utf-8")
-        else:
-            # importlib.resources keeps the file lookup robust across
-            # source checkouts, wheels and editable installs.
-            text = (
-                resources.files("src.llm.data")
-                .joinpath("models.json")
-                .read_text(encoding="utf-8")
-            )
+        Forwarded to :meth:`llmprice.LLMPrice.update`. Synchronous
+        network IO -- the catalog wraps this in an audit-tracked
+        path. Iteration 1b makes that path bus-emitting.
+        """
+        self._client.update()
+
+    # ---- internals --------------------------------------------------------
+
+    def _lookup_row(self, model_id: str, provider: str) -> Any:
         try:
-            data = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"BundledLiteLLMSource: failed to parse JSON ({exc})"
-            ) from exc
-        if not isinstance(data, dict):
-            raise ValueError(
-                f"BundledLiteLLMSource: JSON root must be an object, "
-                f"got {type(data).__name__}"
+            row = self._client.get(model_id)
+        except KeyError:
+            logger.debug(
+                "LLMPriceKitSource: model %r not found in upstream snapshot",
+                model_id,
             )
-        return data
+            return None
+        if provider and row.provider != provider:
+            logger.debug(
+                "LLMPriceKitSource: provider mismatch for %r: "
+                "asked %r, snapshot says %r",
+                model_id,
+                provider,
+                row.provider,
+            )
+            return None
+        return row
+
+    @staticmethod
+    def _extras(row: Any) -> dict[str, Any]:
+        """Pass-through capabilities the spec doesn't first-class."""
+        return {
+            "mode": row.mode,
+            "supports_prompt_caching": bool(row.supports_prompt_caching),
+            "supports_reasoning": bool(row.supports_reasoning),
+            "supports_audio_input": bool(row.supports_audio_input),
+            "supports_audio_output": bool(row.supports_audio_output),
+            "supports_web_search": bool(row.supports_web_search),
+            "deprecation_date": row.deprecation_date,
+        }
