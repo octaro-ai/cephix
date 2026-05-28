@@ -106,7 +106,7 @@ class ComponentCategory(str, Enum):
     """Coarse role buckets used by the registry, the wizard and the
     robot's lifecycle ordering.
 
-    Three cross-cutting roles are distinguished from regular userspace:
+    Four cross-cutting roles are distinguished from regular userspace:
 
     - :attr:`TELEMETRY`: read-only observers that watch *everything*
       that flows over the bus. The reference implementation is the
@@ -115,6 +115,12 @@ class ComponentCategory(str, Enum):
     - :attr:`AUDIT`: subscribers that record curated, semantic notes
       published via :meth:`RobotComponent.publish_audit`. The reference
       implementation is the ``AuditNoteSink``.
+    - :attr:`GOVERNANCE`: shared infrastructure that other userspace
+      components consult synchronously: model catalog and pricing
+      services, future approval gates, future policy layers. Boots
+      after audit (so its own audit notes are captured) and before
+      actors and the kernel (so they can read it during ``start()``).
+      The reference implementation is the ``ModelMetadataService``.
     - :attr:`ACTOR`: the entity the kernel consults to turn a curated
       context into a reply. *Not* a bus participant: the kernel
       holds the actor as a direct in-process collaborator and calls
@@ -126,18 +132,20 @@ class ComponentCategory(str, Enum):
       ``PlaywrightActor``.
 
     Telemetry and audit boot right after the bus so they capture the
-    full lifetime of every userspace component. Actors boot before
-    the kernel because the kernel constructor is handed an
-    already-running actor.
+    full lifetime of every userspace component. Governance follows
+    so its data is online before actors and kernels need it. Actors
+    boot before the kernel because the kernel constructor is handed
+    an already-running actor.
     """
 
     BUS = "bus"
     TELEMETRY = "telemetry"
     AUDIT = "audit"
+    GOVERNANCE = "governance"
     ACTOR = "actor"
     KERNEL = "kernel"
     CHANNEL = "channel"
-    # Future categories: GOVERNANCE, TOOL, ...
+    # Future categories: TOOL, ...
 
 
 # Boot order, lower number = earlier. The robot uses this to sort its
@@ -153,9 +161,9 @@ BOOT_PRIORITY: dict[ComponentCategory, int] = {
     ComponentCategory.BUS: 0,
     ComponentCategory.TELEMETRY: 5,
     ComponentCategory.AUDIT: 6,
+    ComponentCategory.GOVERNANCE: 7,
     ComponentCategory.ACTOR: 8,
     ComponentCategory.KERNEL: 10,
-    # ComponentCategory.GOVERNANCE: 15,  # policy layer between kernel and channels
     ComponentCategory.CHANNEL: 20,
 }
 

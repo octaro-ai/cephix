@@ -196,10 +196,14 @@ def _register_builtins() -> None:
     from src.bus.asyncio_bus import AsyncioBus
     from src.channels.websocket import WebsocketChannel
     from src.kernel.base import BaseKernel
+    from src.llm.actor import LLMActor
+    from src.llm.metadata_service import ModelMetadataService
 
     register(AsyncioBus)
     register(BaseKernel)
     register(EchoActor)
+    register(LLMActor)
+    register(ModelMetadataService)
     register(WebsocketChannel)
 
 

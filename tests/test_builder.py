@@ -380,3 +380,169 @@ def test_builder_rejects_bad_port_range() -> None:
                 "control_plane": {"port_range": [9999, 1000]},
             }
         )
+
+
+# ---------------------------------------------------------------------------
+# LLM stack: governance + actor + provider injection
+# ---------------------------------------------------------------------------
+
+
+def test_builder_assembles_llm_stack() -> None:
+    """End-to-end assembly: governance + LLMActor + mock provider."""
+    from src.llm.actor import LLMActor
+    from src.llm.metadata_service import ModelMetadataService
+    from src.llm.providers.mock import MockLLMProvider
+
+    robot = build_robot_from_config(
+        _cfg(
+            {
+                "governance": {"model_metadata": {"enabled": True}},
+                "actor": {
+                    "name": "llm",
+                    "default_system_prompt": "You are helpful.",
+                    "provider": {
+                        "name": "mock",
+                        "model_id": "echo",
+                        "provider": "mock",
+                    },
+                },
+                "kernel": {"name": "base"},
+            }
+        )
+    )
+    actor = next(c for c in robot.components if isinstance(c, LLMActor))
+    metadata = next(
+        c for c in robot.components if isinstance(c, ModelMetadataService)
+    )
+    assert metadata is not None
+    assert isinstance(actor._provider, MockLLMProvider)  # type: ignore[attr-defined]
+    assert actor._default_system_prompt == "You are helpful."  # type: ignore[attr-defined]
+    # Catalog was injected via governance.
+    assert actor._catalog is not None  # type: ignore[attr-defined]
+
+
+def test_builder_llm_actor_requires_provider_spec() -> None:
+    with pytest.raises(ConfigError, match="provider"):
+        build_robot_from_config(
+            _cfg(
+                {
+                    "governance": {"model_metadata": {"enabled": True}},
+                    "actor": {"name": "llm"},
+                    "kernel": {"name": "base"},
+                }
+            )
+        )
+
+
+def test_builder_rejects_unknown_llm_provider_name() -> None:
+    with pytest.raises(ConfigError, match="unknown llm provider"):
+        build_robot_from_config(
+            _cfg(
+                {
+                    "governance": {"model_metadata": {"enabled": True}},
+                    "actor": {
+                        "name": "llm",
+                        "provider": {"name": "made-up-name"},
+                    },
+                    "kernel": {"name": "base"},
+                }
+            )
+        )
+
+
+def test_builder_governance_disabled_omits_metadata_service() -> None:
+    """Without governance, the metadata service is absent.
+
+    The mock provider needs a catalog, so this configuration relies on
+    a different provider (here: dotted-path for documentation). The
+    builder should not error because of governance absence -- the
+    error must come from the provider's own validation.
+    """
+    from src.llm.metadata_service import ModelMetadataService
+
+    with pytest.raises(ConfigError, match="catalog"):
+        build_robot_from_config(
+            _cfg(
+                {
+                    "governance": {"model_metadata": {"enabled": False}},
+                    "actor": {
+                        "name": "llm",
+                        "provider": {
+                            "name": "mock",
+                            "model_id": "echo",
+                            "provider": "mock",
+                        },
+                    },
+                    "kernel": {"name": "base"},
+                }
+            )
+        )
+
+    # And confirm the *absence* path itself: with a provider that
+    # accepts catalog=None, governance off must produce a robot
+    # without a ModelMetadataService.
+    robot = build_robot_from_config(
+        _cfg(
+            {
+                "actor": {"name": "echo"},
+                "kernel": {"name": "base"},
+            }
+        )
+    )
+    assert not any(
+        isinstance(c, ModelMetadataService) for c in robot.components
+    )
+
+
+def test_builder_provider_class_path_works() -> None:
+    """A dotted-path provider works alongside the registered names."""
+    from src.llm.actor import LLMActor
+    from src.llm.providers.mock import MockLLMProvider
+
+    robot = build_robot_from_config(
+        _cfg(
+            {
+                "governance": {"model_metadata": {"enabled": True}},
+                "actor": {
+                    "name": "llm",
+                    "provider": {
+                        "class": "src.llm.providers.mock.MockLLMProvider",
+                        "model_id": "echo",
+                        "provider": "mock",
+                    },
+                },
+                "kernel": {"name": "base"},
+            }
+        )
+    )
+    actor = next(c for c in robot.components if isinstance(c, LLMActor))
+    assert isinstance(actor._provider, MockLLMProvider)  # type: ignore[attr-defined]
+
+
+def test_builder_governance_metadata_service_boots_before_actor() -> None:
+    """Robot.components is sorted by BOOT_PRIORITY; metadata before actor."""
+    from src.llm.actor import LLMActor
+    from src.llm.metadata_service import ModelMetadataService
+
+    robot = build_robot_from_config(
+        _cfg(
+            {
+                "governance": {"model_metadata": {"enabled": True}},
+                "actor": {
+                    "name": "llm",
+                    "provider": {
+                        "name": "mock",
+                        "model_id": "echo",
+                        "provider": "mock",
+                    },
+                },
+                "kernel": {"name": "base"},
+            }
+        )
+    )
+    # Find indices
+    by_index = {type(c).__name__: i for i, c in enumerate(robot.components)}
+    assert (
+        by_index[ModelMetadataService.__name__]
+        < by_index[LLMActor.__name__]
+    )

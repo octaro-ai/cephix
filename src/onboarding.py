@@ -467,10 +467,16 @@ def _register_builtin_wizard_fields() -> None:
     from src.bus.asyncio_bus import AsyncioBus
     from src.channels.websocket import WebsocketChannel
     from src.kernel.base import BaseKernel
+    from src.llm.actor import LLMActor
+    from src.llm.metadata_service import ModelMetadataService
 
     register_wizard_fields(AsyncioBus, ())
     register_wizard_fields(BaseKernel, ("input_topic", "output_topic", "actor_timeout"))
     register_wizard_fields(EchoActor, ("prefix",))
+    # LLMActor needs a provider injected by the builder; the wizard
+    # only asks for the user-facing system-prompt knob.
+    register_wizard_fields(LLMActor, ("default_system_prompt",))
+    register_wizard_fields(ModelMetadataService, ())
     register_wizard_fields(WebsocketChannel, ("host", "port"))
 
 

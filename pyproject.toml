@@ -24,6 +24,7 @@ exclude = ["_reference*", "_reference.*"]
 
 [tool.setuptools.package-data]
 "src" = ["defaults.yaml"]
+"src.llm.data" = ["*.json"]
 
 [build-system]
 requires = ["setuptools>=68"]
