@@ -464,15 +464,22 @@ def register_wizard_fields(
 def _register_builtin_wizard_fields() -> None:
     """Wizard allow-lists for the components that ship with cephix."""
     from src.actor.echo import EchoActor
+    from src.actor.llm.mock_actor import MockLLMActor
+    from src.actor.llm.openai_actor import LLMActorOpenAI
+    from src.utility.model_catalog import ModelCatalog
     from src.bus.asyncio_bus import AsyncioBus
     from src.channels.websocket import WebsocketChannel
+    from src.credentials.provider import CredentialProvider
     from src.kernel.base import BaseKernel
-    from src.llm.catalog import ModelCatalog
-    from src.llm.mock_actor import MockLLMActor
 
     register_wizard_fields(AsyncioBus, ())
     register_wizard_fields(BaseKernel, ("input_topic", "output_topic", "actor_timeout"))
+    register_wizard_fields(CredentialProvider, ())
     register_wizard_fields(EchoActor, ("prefix",))
+    register_wizard_fields(
+        LLMActorOpenAI,
+        ("model_id", "api_key", "provider", "base_url", "default_system_prompt"),
+    )
     register_wizard_fields(
         MockLLMActor,
         ("model_id", "provider", "default_system_prompt"),

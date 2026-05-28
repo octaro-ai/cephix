@@ -389,7 +389,7 @@ def test_builder_rejects_bad_port_range() -> None:
 
 def test_builder_assembles_utility_list() -> None:
     """``utility:`` builds UTILITY-tier components into the robot."""
-    from src.llm.catalog import ModelCatalog
+    from src.utility.model_catalog import ModelCatalog
 
     robot = build_robot_from_config(
         _cfg(
@@ -419,8 +419,8 @@ def test_builder_rejects_utility_section_with_wrong_category() -> None:
 
 def test_builder_injects_catalog_into_mock_llm_actor() -> None:
     """When a ModelCatalog utility is present, MockLLMActor gets it."""
-    from src.llm.catalog import ModelCatalog
-    from src.llm.mock_actor import MockLLMActor
+    from src.actor.llm.mock_actor import MockLLMActor
+    from src.utility.model_catalog import ModelCatalog
 
     robot = build_robot_from_config(
         _cfg(
@@ -463,7 +463,7 @@ def test_builder_explicit_actor_catalog_kwarg_wins_over_default_injection() -> N
     Achievable today only by setting ``catalog: null`` -- proves the
     builder leaves explicit values alone.
     """
-    from src.llm.mock_actor import MockLLMActor
+    from src.actor.llm.mock_actor import MockLLMActor
 
     robot = build_robot_from_config(
         _cfg(
@@ -483,8 +483,8 @@ def test_builder_explicit_actor_catalog_kwarg_wins_over_default_injection() -> N
 
 def test_builder_utility_boots_before_actor() -> None:
     """Robot.components is sorted by BOOT_PRIORITY; utility before actor."""
-    from src.llm.catalog import ModelCatalog
-    from src.llm.mock_actor import MockLLMActor
+    from src.actor.llm.mock_actor import MockLLMActor
+    from src.utility.model_catalog import ModelCatalog
 
     robot = build_robot_from_config(
         _cfg(
@@ -501,7 +501,7 @@ def test_builder_utility_boots_before_actor() -> None:
 
 def test_builder_mock_llm_actor_works_without_catalog() -> None:
     """No utility section -> actor still constructs; catalog is None."""
-    from src.llm.mock_actor import MockLLMActor
+    from src.actor.llm.mock_actor import MockLLMActor
 
     robot = build_robot_from_config(
         _cfg(
@@ -532,3 +532,331 @@ def test_builder_bus_utility_section_empty_today_but_accepted() -> None:
         )
     )
     assert isinstance(robot, Robot)
+
+
+# ---------------------------------------------------------------------------
+# Credential subsystem: substitution, fail-fast, provider injection
+# ---------------------------------------------------------------------------
+
+
+class TestBuilderCredentials:
+    """Substitution, default store chain, and CredentialProvider injection."""
+
+    def test_default_chain_includes_credential_provider(
+        self, tmp_path: Path
+    ) -> None:
+        """Even without a ``credentials:`` section, a provider is built."""
+        from src.credentials.provider import CredentialProvider
+
+        robot = build_robot_from_config(
+            _cfg({"kernel": {"name": "base"}}),
+            workspace=tmp_path,
+        )
+        providers = [
+            c for c in robot.components if isinstance(c, CredentialProvider)
+        ]
+        assert len(providers) == 1
+
+    def test_substitutes_secret_in_actor_block(self, tmp_path: Path) -> None:
+        """A ``${KEY}`` reference in actor.api_key is resolved before construction."""
+        (tmp_path / ".env").write_text(
+            "OPENAI_KEY=sk-substituted\n", encoding="utf-8"
+        )
+        from src.actor.llm.openai_actor import LLMActorOpenAI
+
+        robot = build_robot_from_config(
+            _cfg(
+                {
+                    "actor": {
+                        "name": "llm.openai",
+                        "model_id": "gpt-4o-mini",
+                        "api_key": "${OPENAI_KEY}",
+                    },
+                    "kernel": {"name": "base"},
+                }
+            ),
+            workspace=tmp_path,
+        )
+        actor = next(
+            c for c in robot.components if isinstance(c, LLMActorOpenAI)
+        )
+        assert actor._api_key == "sk-substituted"  # type: ignore[attr-defined]
+
+    def test_missing_secret_raises_and_aborts_build(
+        self, tmp_path: Path
+    ) -> None:
+        """A reference that no store can resolve aborts with CredentialNotFound."""
+        from src.credentials.exceptions import CredentialNotFound
+
+        with pytest.raises(CredentialNotFound) as excinfo:
+            build_robot_from_config(
+                _cfg(
+                    {
+                        "actor": {
+                            "name": "llm.openai",
+                            "model_id": "gpt-4o-mini",
+                            "api_key": "${MISSING_KEY}",
+                        },
+                        "kernel": {"name": "base"},
+                    }
+                ),
+                workspace=tmp_path,
+            )
+        assert excinfo.value.key == "MISSING_KEY"
+        assert excinfo.value.requester == "builder"
+
+    def test_substitutes_in_nested_structures(self, tmp_path: Path) -> None:
+        """Substitution walks lists and nested dicts."""
+        (tmp_path / ".env").write_text(
+            "OPENAI_KEY=sk-deep\nHOST=api.openai.com\n", encoding="utf-8"
+        )
+        from src.actor.llm.openai_actor import LLMActorOpenAI
+
+        robot = build_robot_from_config(
+            _cfg(
+                {
+                    "actor": {
+                        "name": "llm.openai",
+                        "model_id": "gpt-4o-mini",
+                        "api_key": "${OPENAI_KEY}",
+                        "base_url": "https://${HOST}/v1",
+                    },
+                    "kernel": {"name": "base"},
+                }
+            ),
+            workspace=tmp_path,
+        )
+        actor = next(
+            c for c in robot.components if isinstance(c, LLMActorOpenAI)
+        )
+        assert actor._api_key == "sk-deep"  # type: ignore[attr-defined]
+        assert actor._base_url == "https://api.openai.com/v1"  # type: ignore[attr-defined]
+
+    def test_explicit_credentials_section_replaces_default_chain(
+        self, tmp_path: Path
+    ) -> None:
+        """``credentials.stores`` overrides the default chain."""
+        store_file = tmp_path / "custom.env"
+        store_file.write_text("OPENAI_KEY=sk-custom\n", encoding="utf-8")
+        # Default chain would also work because tmp_path contains no .env;
+        # the test is about *replacement*. A bot-local .env that holds a
+        # different value would shadow the explicit store; verify it does
+        # NOT, because the explicit list replaces the default chain.
+        (tmp_path / ".env").write_text(
+            "OPENAI_KEY=should-not-win\n", encoding="utf-8"
+        )
+        from src.actor.llm.openai_actor import LLMActorOpenAI
+
+        robot = build_robot_from_config(
+            _cfg(
+                {
+                    "credentials": {
+                        "stores": [
+                            {
+                                "type": "env",
+                                "path": str(store_file),
+                                "name": "explicit",
+                            }
+                        ]
+                    },
+                    "actor": {
+                        "name": "llm.openai",
+                        "model_id": "gpt-4o-mini",
+                        "api_key": "${OPENAI_KEY}",
+                    },
+                    "kernel": {"name": "base"},
+                }
+            ),
+            workspace=tmp_path,
+        )
+        actor = next(
+            c for c in robot.components if isinstance(c, LLMActorOpenAI)
+        )
+        assert actor._api_key == "sk-custom"  # type: ignore[attr-defined]
+
+    def test_first_store_wins(self, tmp_path: Path) -> None:
+        """Resolution order: first store with the key wins."""
+        first = tmp_path / "first.env"
+        first.write_text("OPENAI_KEY=from-first\n", encoding="utf-8")
+        second = tmp_path / "second.env"
+        second.write_text("OPENAI_KEY=from-second\n", encoding="utf-8")
+        from src.actor.llm.openai_actor import LLMActorOpenAI
+
+        robot = build_robot_from_config(
+            _cfg(
+                {
+                    "credentials": {
+                        "stores": [
+                            {"type": "env", "path": str(first)},
+                            {"type": "env", "path": str(second)},
+                        ]
+                    },
+                    "actor": {
+                        "name": "llm.openai",
+                        "model_id": "gpt-4o-mini",
+                        "api_key": "${OPENAI_KEY}",
+                    },
+                    "kernel": {"name": "base"},
+                }
+            ),
+            workspace=tmp_path,
+        )
+        actor = next(
+            c for c in robot.components if isinstance(c, LLMActorOpenAI)
+        )
+        assert actor._api_key == "from-first"  # type: ignore[attr-defined]
+
+    def test_dollar_dollar_escape_produces_literal(
+        self, tmp_path: Path
+    ) -> None:
+        """``$$`` collapses to a literal ``$`` and avoids substitution."""
+        from src.actor.echo import EchoActor
+
+        robot = build_robot_from_config(
+            _cfg(
+                {
+                    "actor": {
+                        "name": "echo",
+                        "prefix": "$${OPENAI_KEY}: ",
+                    },
+                    "kernel": {"name": "base"},
+                }
+            ),
+            workspace=tmp_path,
+        )
+        actor = next(c for c in robot.components if isinstance(c, EchoActor))
+        assert actor._prefix == "${OPENAI_KEY}: "  # type: ignore[attr-defined]
+
+    def test_lowercase_keys_are_not_substituted(
+        self, tmp_path: Path
+    ) -> None:
+        """``${log.level}``-style strings are not credential references."""
+        from src.actor.echo import EchoActor
+
+        robot = build_robot_from_config(
+            _cfg(
+                {
+                    "actor": {
+                        "name": "echo",
+                        "prefix": "${log.level}",
+                    },
+                    "kernel": {"name": "base"},
+                }
+            ),
+            workspace=tmp_path,
+        )
+        actor = next(c for c in robot.components if isinstance(c, EchoActor))
+        assert actor._prefix == "${log.level}"  # type: ignore[attr-defined]
+
+    def test_credential_provider_is_injected_into_compatible_actor(
+        self, tmp_path: Path
+    ) -> None:
+        """An actor whose constructor takes ``credentials`` gets the provider."""
+        from src.credentials.provider import CredentialProvider
+
+        # Custom actor class to verify the injection convention without
+        # needing a real LLM. Lives only in this test.
+        from src.actor.ports import ActorPort
+        from src.actor.types import ActorResponse
+        from src.components import ComponentCategory
+        from src.registry import register
+
+        class CredentialProbingActor(ActorPort):
+            component_name = "test.credential-probe"
+            component_category = ComponentCategory.ACTOR
+            component_description = "test-only"
+
+            def __init__(self, *, credentials: CredentialProvider) -> None:
+                self.credentials = credentials
+
+            async def run(self, actor_context):  # type: ignore[override]
+                return ActorResponse(message=None, status="ok")
+
+        try:
+            register(CredentialProbingActor)
+        except Exception:  # noqa: BLE001 -- already registered
+            pass
+
+        robot = build_robot_from_config(
+            _cfg(
+                {
+                    "actor": {"name": "test.credential-probe"},
+                    "kernel": {"name": "base"},
+                }
+            ),
+            workspace=tmp_path,
+        )
+        probe = next(
+            c for c in robot.components if isinstance(c, CredentialProbingActor)
+        )
+        provider = next(
+            c for c in robot.components if isinstance(c, CredentialProvider)
+        )
+        assert probe.credentials is provider
+
+    def test_rejects_unknown_store_type(self, tmp_path: Path) -> None:
+        with pytest.raises(ConfigError, match="unknown type"):
+            build_robot_from_config(
+                _cfg(
+                    {
+                        "credentials": {
+                            "stores": [{"type": "vault"}]
+                        },
+                        "actor": {"name": "echo"},
+                        "kernel": {"name": "base"},
+                    }
+                ),
+                workspace=tmp_path,
+            )
+
+    def test_rejects_env_store_without_path(self, tmp_path: Path) -> None:
+        with pytest.raises(ConfigError, match="path"):
+            build_robot_from_config(
+                _cfg(
+                    {
+                        "credentials": {
+                            "stores": [{"type": "env"}]
+                        },
+                        "actor": {"name": "echo"},
+                        "kernel": {"name": "base"},
+                    }
+                ),
+                workspace=tmp_path,
+            )
+
+    def test_credentials_section_is_not_substituted(
+        self, tmp_path: Path
+    ) -> None:
+        """The ``credentials:`` block itself is consumed before substitution.
+
+        Otherwise we'd hit a chicken-and-egg: substituting ``${X}``
+        inside the very block that defines how to look up ``X``.
+        Verifies the builder pops ``credentials:`` *before* the
+        substitution pass.
+        """
+        from src.actor.echo import EchoActor
+
+        # The ``credentials.stores[0].path`` value contains a literal
+        # ${...}-looking string. If substitution ran on the
+        # credentials block, it would explode here. Path resolution
+        # uses it verbatim; the file doesn't need to exist.
+        robot = build_robot_from_config(
+            _cfg(
+                {
+                    "credentials": {
+                        "stores": [
+                            {
+                                "type": "env",
+                                "path": str(tmp_path / "nope-${UNRESOLVED}.env"),
+                            }
+                        ]
+                    },
+                    "actor": {"name": "echo"},
+                    "kernel": {"name": "base"},
+                }
+            ),
+            workspace=tmp_path,
+        )
+        # Build succeeded; the literal ${UNRESOLVED} was tolerated as
+        # a path component (the file is missing, which is fine).
+        assert any(isinstance(c, EchoActor) for c in robot.components)

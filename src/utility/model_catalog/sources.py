@@ -1,10 +1,11 @@
-"""Concrete :class:`~src.llm.ports.ModelDataSource` implementations.
+"""Concrete :class:`~src.utility.model_catalog.ports.ModelDataSource`
+implementations.
 
 Today: :class:`LLMPriceKitSource`, a thin adapter over the
 ``llmprice`` lib (pip package: ``llmprice-kit``) that converts
 its :class:`llmprice.ModelPrice` value type into our internal
-:class:`~src.llm.types.ModelSpec` and
-:class:`~src.llm.types.ModelPricing`.
+:class:`~src.utility.model_catalog.types.ModelSpec` and
+:class:`~src.utility.model_catalog.types.ModelPricing`.
 
 Two reasons we wrap the lib instead of using its types directly:
 
@@ -28,7 +29,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from src.actor.llm.types import ModelPricing, ModelSpec
+from src.utility.model_catalog.ports import ModelDataSource
+from src.utility.model_catalog.types import ModelPricing, ModelSpec
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +41,7 @@ logger = logging.getLogger(__name__)
 _PER_MILLION = 1_000_000.0
 
 
-class LLMPriceKitSource:
+class LLMPriceKitSource(ModelDataSource):
     """Adapter over the ``llmprice`` lib.
 
     Constructor:

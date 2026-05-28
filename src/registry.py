@@ -193,15 +193,19 @@ def _instantiate(cls: type, kwargs: dict[str, Any]) -> Any:
 def _register_builtins() -> None:
     """Register the components that ship with cephix."""
     from src.actor.echo import EchoActor
+    from src.actor.llm.mock_actor import MockLLMActor
+    from src.actor.llm.openai_actor import LLMActorOpenAI
+    from src.utility.model_catalog import ModelCatalog
     from src.bus.asyncio_bus import AsyncioBus
     from src.channels.websocket import WebsocketChannel
+    from src.credentials.provider import CredentialProvider
     from src.kernel.base import BaseKernel
-    from src.llm.catalog import ModelCatalog
-    from src.llm.mock_actor import MockLLMActor
 
     register(AsyncioBus)
     register(BaseKernel)
+    register(CredentialProvider)
     register(EchoActor)
+    register(LLMActorOpenAI)
     register(MockLLMActor)
     register(ModelCatalog)
     register(WebsocketChannel)

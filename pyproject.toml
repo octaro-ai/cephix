@@ -10,6 +10,7 @@ dependencies = [
     "python-slugify>=8.0",
     "python-dotenv>=1.0",
     "llmprice-kit>=2026.4",
+    "openai>=1.0",
 ]
 
 [project.optional-dependencies]

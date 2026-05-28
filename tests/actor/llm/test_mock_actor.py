@@ -19,12 +19,17 @@ from src.actor.types import ActorResponse
 from src.bus import AsyncioBus, RobotEvent, RobotInput, RobotOutput
 from src.components import ComponentCategory
 from src.kernel.base import BaseKernel
-from src.actor.llm.catalog import ModelCatalog
 from src.actor.llm.mock_actor import MockLLMActor
-from src.actor.llm.types import ActorChunk, ChatMessage, ModelPricing, ModelSpec
+from src.actor.llm.types import ActorChunk, ChatMessage
+from src.utility.model_catalog import (
+    ModelCatalog,
+    ModelDataSource,
+    ModelPricing,
+    ModelSpec,
+)
 
 
-class _FakeSource:
+class _FakeSource(ModelDataSource):
     def __init__(self, rows: dict[tuple[str, str], tuple]) -> None:
         self._rows = rows
 

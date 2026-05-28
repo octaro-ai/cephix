@@ -4,7 +4,7 @@ Not a stub that returns a canned string. The mock is deliberately
 *real-acting*: it consults the same :class:`ModelCatalogPort` an
 LLM-aware kernel would, computes token counts via its own
 :meth:`count_tokens`, and assembles a realistic
-:class:`~src.llm.types.LLMReply` (with usage *and* cost). Only the
+:class:`~src.actor.llm.types.LLMReply` (with usage *and* cost). Only the
 *content* generation is mocked: the mock either echoes the last
 user message or runs a configurable template against the input.
 
@@ -24,8 +24,8 @@ from collections.abc import AsyncIterator, Callable
 import asyncio
 
 from src.actor.llm.actor_base import LLMActorBase
-from src.actor.llm.ports import ModelCatalogPort
 from src.actor.llm.types import ChatMessage, LLMDelta, LLMReply, LLMUsage
+from src.utility.model_catalog import ModelCatalogPort
 
 ResponseFn = Callable[[list[ChatMessage]], str]
 

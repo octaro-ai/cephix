@@ -1,22 +1,16 @@
-"""LLM subsystem: catalog, ports, types, drivers.
+"""LLM actor subsystem: drivers + actor IO types.
 
-The LLM stack is laid out along two axes:
+LLM-side actor stack laid out as drivers around a shared base. All
+boot at :attr:`~src.components.ComponentCategory.ACTOR` (boot
+priority 8).
 
-**Off-bus utilities** (boot priority :attr:`UTILITY` = 5):
-
-- :class:`ModelCatalog` -- the read-side view of model specs and
-  pricing. Plain :class:`RobotComponent`, no bus interaction. Backed
-  by a :class:`ModelDataSource`. The future ``LLMKernel`` (Phase 2)
-  takes this as a constructor argument; today it is a one-consumer
-  utility that runs at the side and is consulted on demand.
-
-**Drivers** (boot priority :attr:`ACTOR` = 8):
+**Drivers**:
 
 - :class:`LLMActorBase` -- shared scaffolding. Handles context
   shaping (curated dict -> :class:`ChatMessage` list), run/stream
   symmetry (subclasses override one direction, the other is
-  synthesised), :class:`ActorResponse` / :class:`ActorChunk`
-  assembly, and provider-error translation.
+  synthesised), :class:`~src.actor.types.ActorResponse` /
+  :class:`ActorChunk` assembly, and provider-error translation.
 - :class:`MockLLMActor` -- catalog-aware offline driver. Real-acting:
   computes real token counts and (with a catalog) real cost; only
   the content generation is templated.
@@ -25,31 +19,26 @@ The LLM stack is laid out along two axes:
   Groq, Together, vLLM, Ollama and other OpenAI-shaped servers.
 - Future: ``LLMActorAnthropic`` (Anthropic SDK), ...
 
-**Sources** (private to the catalog):
+**Actor IO types**: :class:`ChatMessage`, :class:`LLMReply`,
+:class:`LLMDelta`, :class:`LLMUsage`, :class:`ActorChunk`. SDK-
+agnostic, every driver converts its native shape to these.
 
-- :class:`LLMPriceKitSource` -- adapter over the ``llmprice`` lib
-  (pip: ``llmprice-kit``). The default, offline by default,
-  optional 24h auto-refresh against upstream LiteLLM mirror.
+Catalog-side concerns (model spec / pricing / data source) live in
+:mod:`src.utility.model_catalog`; drivers consume the catalog
+through that package's
+:class:`~src.utility.model_catalog.ports.ModelCatalogPort`.
 """
 
 from src.actor.llm.actor_base import LLMActorBase
-from src.actor.llm.catalog import ModelCatalog
 from src.actor.llm.mock_actor import MockLLMActor
 from src.actor.llm.openai_actor import LLMActorOpenAI
-from src.actor.llm.ports import (
-    LLMActorPort,
-    ModelCatalogPort,
-    ModelDataSource,
-)
-from src.actor.llm.sources import LLMPriceKitSource
+from src.actor.llm.ports import LLMActorPort
 from src.actor.llm.types import (
     ActorChunk,
     ChatMessage,
     LLMDelta,
     LLMReply,
     LLMUsage,
-    ModelPricing,
-    ModelSpec,
 )
 
 __all__ = [
@@ -59,13 +48,7 @@ __all__ = [
     "LLMActorOpenAI",
     "LLMActorPort",
     "LLMDelta",
-    "LLMPriceKitSource",
     "LLMReply",
     "LLMUsage",
     "MockLLMActor",
-    "ModelCatalog",
-    "ModelCatalogPort",
-    "ModelDataSource",
-    "ModelPricing",
-    "ModelSpec",
 ]

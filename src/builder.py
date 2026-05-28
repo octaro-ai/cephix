@@ -33,13 +33,23 @@ from src.channels.ports import ChannelPort
 from src.components import RobotComponent
 from src.configuration import (
     CONTROL_PLANE_TOKEN_ENV,
+    HOME_ENV_FILENAME,
+    ROBOT_ENV_FILENAME,
     deep_merge,
+    home_dir,
     load_robot_env,
 )
 from src.components import ComponentCategory
+from src.credentials import (
+    CredentialProvider,
+    CredentialProviderPort,
+    EnvCredentialStore,
+    ProcessEnvCredentialStore,
+    resolve_secrets,
+)
+from src.credentials.ports import CredentialStorePort
+from src.utility.model_catalog import ModelCatalog, ModelCatalogPort
 from src.kernel.ports import KernelPort
-from src.llm.catalog import ModelCatalog
-from src.llm.ports import ModelCatalogPort
 from src.persistence.provider import JsonlPersistenceProvider, PersistenceProvider
 from src.registry import ConfigError, build
 from src.robot import ControlPlaneConfig, Robot, RobotIdentity
@@ -67,9 +77,26 @@ def build_robot_from_config(
     it fully replaces the default list.
 
     ``workspace`` is the bot's directory (where ``robot.yaml`` lives).
-    Used to locate the ``.env`` file for the control-plane token. If
+    Used to locate the ``.env`` file for the control-plane token *and*
+    as the default first store for the credential subsystem. If
     omitted, no ``.env`` is read and the control plane refuses to
     start (deny-by-default).
+
+    The build runs in three phases:
+
+    1. **Credential stores** are constructed from ``credentials:`` (or
+       a default chain anchored at ``workspace/.env`` and
+       ``~/.cephix/.env``) and a :class:`CredentialProvider` is built
+       around them.
+    2. The remaining configuration is run through
+       :func:`~src.credentials.substitution.resolve_secrets` so every
+       ``${KEY}`` reference is replaced before any component
+       constructor sees it. A missing key raises
+       :class:`~src.credentials.exceptions.CredentialNotFound`, which
+       aborts the build -- no half-constructed robot.
+    3. Components are instantiated in dependency order. Actors whose
+       constructors declare a ``catalog`` or ``credentials`` kwarg
+       receive the shared instances automatically (Convention-DI).
     """
     if not isinstance(robot_yaml, dict):
         raise ConfigError("robot.yaml must be a mapping at the top level")
@@ -77,6 +104,24 @@ def build_robot_from_config(
     base = dict(defaults or {})
     cfg = deep_merge(base, dict(robot_yaml))
 
+    # Phase 1: credentials. Constructed before any other component so
+    # the substitution pass below can resolve ${KEY} references.
+    credentials_spec = cfg.pop("credentials", None)
+    credentials = _build_credential_provider(
+        credentials_spec,
+        workspace=workspace,
+    )
+
+    # Phase 2: substitution. Walks every remaining section and
+    # replaces ``${KEY}`` references with their resolved values.
+    # Fail-fast: a missing key raises CredentialNotFound here, the
+    # builder propagates it, and no robot is ever born.
+    cfg = resolve_secrets(
+        cfg,
+        lambda key: credentials.resolve_sync(key, requester="builder"),
+    )
+
+    # Phase 3: assemble the rest of the robot.
     bus_spec = cfg.get("bus") or _DEFAULT_BUS_SPEC
     bus = build(bus_spec)
     if not isinstance(bus, BusPort):
@@ -126,7 +171,11 @@ def build_robot_from_config(
             "robot.yaml must declare an actor section; the kernel "
             "needs an actor to consult during its act phase"
         )
-    actor_built = _build_actor(actor_spec, catalog=model_catalog)
+    actor_built = _build_actor(
+        actor_spec,
+        catalog=model_catalog,
+        credentials=credentials,
+    )
     if not isinstance(actor_built, ActorPort):
         raise ConfigError(
             f"actor component {type(actor_built).__name__} does not "
@@ -184,6 +233,7 @@ def build_robot_from_config(
 
     components: list[RobotComponent] = [
         bus,
+        credentials,
         actor,
         kernel,
         *utilities,
@@ -200,6 +250,139 @@ def build_robot_from_config(
         components=components,
         control_plane_config=control_plane_config,
         control_plane_token=control_plane_token,
+    )
+
+
+def _build_credential_provider(
+    spec: Any,
+    *,
+    workspace: str | Path | None,
+) -> CredentialProvider:
+    """Build the :class:`CredentialProvider` and its store chain.
+
+    Two cases:
+
+    - **No ``credentials:`` section** -- the default chain is
+      ``robot-workspace/.env`` (if a workspace is provided),
+      ``~/.cephix/.env`` (if it exists) and ``process-env``. This
+      preserves the pre-credentials behaviour of cephix where a
+      bot-local ``.env`` was implicitly read.
+    - **An explicit ``credentials:`` section** -- the user lists
+      stores in resolution order. Each entry is a mapping with at
+      least ``type:``; supported types today are ``env`` (with a
+      ``path:``) and ``process-env``.
+
+    The provider is registered as a :class:`RobotComponent` and
+    will be started by the robot during the ``BUS_UTILITY`` boot
+    phase. The builder uses it synchronously *now*, before the
+    robot lifecycle even runs, so substitution can fail loud and
+    early.
+    """
+    stores: list[CredentialStorePort] = []
+    if spec is None:
+        stores.extend(_default_credential_stores(workspace))
+    else:
+        if not isinstance(spec, dict):
+            raise ConfigError(
+                "robot.yaml#credentials must be a mapping with a "
+                "'stores' list"
+            )
+        store_specs = spec.get("stores")
+        if store_specs is None:
+            stores.extend(_default_credential_stores(workspace))
+        else:
+            if not isinstance(store_specs, list):
+                raise ConfigError(
+                    "robot.yaml#credentials.stores must be a list"
+                )
+            for index, store_spec in enumerate(store_specs):
+                stores.append(
+                    _build_credential_store(
+                        store_spec, index=index, workspace=workspace
+                    )
+                )
+    return CredentialProvider(stores=stores)
+
+
+def _default_credential_stores(
+    workspace: str | Path | None,
+) -> list[CredentialStorePort]:
+    """The default store chain when no ``credentials:`` section exists.
+
+    Order: bot-local ``.env`` -> global ``~/.cephix/.env`` ->
+    ``os.environ``. Missing files are tolerated; the global home
+    is created on demand by :func:`home_dir` so the global store
+    always has a path even if the file is empty.
+    """
+    out: list[CredentialStorePort] = []
+    if workspace is not None:
+        out.append(
+            EnvCredentialStore(
+                Path(workspace) / ROBOT_ENV_FILENAME,
+                name="env:robot",
+            )
+        )
+    out.append(
+        EnvCredentialStore(
+            home_dir() / HOME_ENV_FILENAME,
+            name="env:cephix-home",
+        )
+    )
+    out.append(ProcessEnvCredentialStore())
+    return out
+
+
+def _build_credential_store(
+    spec: Any,
+    *,
+    index: int,
+    workspace: str | Path | None,
+) -> CredentialStorePort:
+    """Build one :class:`CredentialStorePort` from a YAML entry."""
+    if not isinstance(spec, dict):
+        raise ConfigError(
+            f"robot.yaml#credentials.stores[{index}] must be a mapping"
+        )
+    spec = dict(spec)
+    kind = spec.pop("type", None)
+    if not isinstance(kind, str):
+        raise ConfigError(
+            f"robot.yaml#credentials.stores[{index}] needs a 'type' string"
+        )
+    name_override = spec.pop("name", None)
+
+    if kind == "env":
+        path_raw = spec.pop("path", None)
+        if not isinstance(path_raw, str) or not path_raw:
+            raise ConfigError(
+                f"credentials.stores[{index}] (env) requires a non-empty "
+                "'path'"
+            )
+        path = Path(path_raw).expanduser()
+        if not path.is_absolute() and workspace is not None:
+            path = Path(workspace) / path
+        if spec:
+            raise ConfigError(
+                f"credentials.stores[{index}] (env): unknown keys "
+                f"{sorted(spec)}"
+            )
+        return EnvCredentialStore(path, name=name_override)
+
+    if kind == "process-env":
+        snapshot = bool(spec.pop("snapshot", True))
+        if spec:
+            raise ConfigError(
+                f"credentials.stores[{index}] (process-env): unknown "
+                f"keys {sorted(spec)}"
+            )
+        return ProcessEnvCredentialStore(
+            snapshot=snapshot,
+            name=name_override or "process-env",
+        )
+
+    raise ConfigError(
+        f"credentials.stores[{index}] has unknown type {kind!r}; "
+        "supported types: env, process-env"
     )
 
 
@@ -254,15 +437,18 @@ def _build_actor(
     actor_spec: Any,
     *,
     catalog: ModelCatalogPort | None,
+    credentials: CredentialProviderPort | None = None,
 ) -> ActorPort:
-    """Build the actor, injecting the catalog where the constructor takes it.
+    """Build the actor, injecting catalog/credentials by Convention-DI.
 
-    The convention is light-touch: any actor whose constructor
-    accepts a ``catalog`` keyword argument gets the shared
-    :class:`ModelCatalogPort` injected if one is configured. The
-    :class:`MockLLMActor` and the future ``LLMActorOpenAI`` both
-    use this pattern. Plain :class:`EchoActor` does not declare
-    ``catalog``, so the injection is silently skipped for it.
+    Any actor whose constructor declares a ``catalog`` keyword gets
+    the shared :class:`ModelCatalogPort`; any actor whose
+    constructor declares a ``credentials`` keyword gets the shared
+    :class:`CredentialProviderPort`. Both are silently skipped for
+    actors that don't declare the matching kwarg
+    (e.g. :class:`~src.actor.echo.EchoActor`). An explicit value in
+    the YAML spec wins over the auto-injection (used by tests that
+    pass ``catalog: null`` or a stub).
     """
     import inspect
 
@@ -271,16 +457,28 @@ def _build_actor(
     actor_spec = dict(actor_spec)
 
     cls = _resolve_actor_class(actor_spec)
+    try:
+        sig = inspect.signature(cls)
+    except (ValueError, TypeError):
+        sig = None
 
-    if catalog is not None and "catalog" not in actor_spec:
-        try:
-            sig = inspect.signature(cls)
-        except (ValueError, TypeError):
-            sig = None
-        if sig is not None and "catalog" in sig.parameters:
-            return build(actor_spec, catalog=catalog)
+    extras: dict[str, Any] = {}
+    if (
+        catalog is not None
+        and "catalog" not in actor_spec
+        and sig is not None
+        and "catalog" in sig.parameters
+    ):
+        extras["catalog"] = catalog
+    if (
+        credentials is not None
+        and "credentials" not in actor_spec
+        and sig is not None
+        and "credentials" in sig.parameters
+    ):
+        extras["credentials"] = credentials
 
-    return build(actor_spec)
+    return build(actor_spec, **extras)
 
 
 def _resolve_actor_class(spec: dict[str, Any]) -> type:

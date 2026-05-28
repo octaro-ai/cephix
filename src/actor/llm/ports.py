@@ -1,20 +1,6 @@
-"""Ports for the LLM subsystem.
+"""Ports for the LLM actor subsystem.
 
-Three interfaces, each with one current consumer:
-
-- :class:`ModelDataSource` -- where the model metadata snapshot
-  comes from. The :class:`~src.llm.catalog.ModelCatalog` consumes
-  this. Concrete implementations:
-  :class:`~src.llm.sources.LLMPriceKitSource` (default, wraps the
-  ``llmprice`` lib) and -- for tests -- in-memory fakes.
-
-- :class:`ModelCatalogPort` -- read-side of model **specifications**
-  (capabilities and limits) plus the optional **pricing** for the
-  same key. Consumed today by no production code; the future
-  :class:`LLMKernel` (Phase 2) takes one of these as a constructor
-  argument so it can plan context-window-aware. Building it now
-  prevents the ``LLMKernel`` from later hard-binding to a concrete
-  catalog implementation: the port is the architectural seam.
+One interface lives here:
 
 - :class:`LLMActorPort` -- the LLM-aware extension of
   :class:`~src.actor.ports.ActorPort`. Adds streaming as a
@@ -22,101 +8,22 @@ Three interfaces, each with one current consumer:
   ``count_tokens`` so the kernel can identify the actor and reason
   about token budgets without inspecting return values.
 
-A note on the symmetry: the ``LLMKernel`` will hold *both* an
-:class:`LLMActorPort` (the driver) and a :class:`ModelCatalogPort`
-(the spec source). That mirrors the OS-driver pattern: the driver
-knows how to drive the device, the kernel knows the device's
-characteristics from a separate registry. The actor itself never
-talks to the catalog -- responsibility separation is enforced at
-the type system level.
+Catalog-side ports (:class:`ModelCatalogPort`,
+:class:`ModelDataSource`) live with the catalog itself in
+:mod:`src.utility.model_catalog.ports`. The LLM actor never imports
+them at runtime; drivers that accept a catalog reference type-hint
+against the port from the utility package, mirroring the OS-driver
+pattern: the driver knows how to drive the device, the catalog
+(a separate utility) knows the device's characteristics.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 from src.actor.ports import ActorPort
-from src.actor.llm.types import (
-    ActorChunk,
-    ModelPricing,
-    ModelSpec,
-)
-
-
-# ---------------------------------------------------------------------------
-# Source: where the metadata snapshot comes from
-# ---------------------------------------------------------------------------
-
-
-@runtime_checkable
-class ModelDataSource(Protocol):
-    """Provides the raw model metadata snapshot to the catalog.
-
-    Two methods:
-
-    - :meth:`load_spec` -- look up capabilities / limits.
-    - :meth:`load_pricing` -- look up cost-per-token.
-
-    The catalog asks the source per-model, lazily; sources cache
-    upstream snapshots in-process so the lookups are sync. Both
-    methods return ``None`` for unknown models.
-
-    ``snapshot_id`` is an opaque identifier (lib version, file hash,
-    upstream SHA) the catalog includes in audit notes so a refresh
-    is traceable.
-    """
-
-    @property
-    def snapshot_id(self) -> str:
-        ...
-
-    def load_spec(self, model_id: str, provider: str) -> ModelSpec | None:
-        ...
-
-    def load_pricing(
-        self, model_id: str, provider: str
-    ) -> ModelPricing | None:
-        ...
-
-
-# ---------------------------------------------------------------------------
-# Catalog: the public read side
-# ---------------------------------------------------------------------------
-
-
-@runtime_checkable
-class ModelCatalogPort(Protocol):
-    """Read-side of model metadata.
-
-    A single port that exposes both spec and pricing lookups. The
-    two are conceptually separate (different change cadences,
-    different consumers), but in the current design every consumer
-    that wants pricing also wants the spec, so combining them into
-    one port keeps the wiring minimal.
-
-    If a future consumer wants only pricing (a dedicated cost
-    aggregator listening on the bus, say), that consumer can
-    subscribe to :class:`~src.bus.messages.RobotAuditNote` events
-    that already carry ``cost_usd`` per actor call -- no second port
-    needed.
-
-    Returns ``None`` for unknown ``(model_id, provider)`` keys; the
-    caller decides whether to warn, fall back, or refuse to start.
-    """
-
-    def lookup_spec(self, model_id: str, provider: str) -> ModelSpec | None:
-        ...
-
-    def lookup_pricing(
-        self, model_id: str, provider: str
-    ) -> ModelPricing | None:
-        ...
-
-
-# ---------------------------------------------------------------------------
-# LLM actor port
-# ---------------------------------------------------------------------------
+from src.actor.llm.types import ActorChunk
 
 
 class LLMActorPort(ActorPort):
@@ -127,7 +34,7 @@ class LLMActorPort(ActorPort):
     1. **Streaming as a mandatory capability**: every LLM actor
        implements :meth:`stream`. A non-streaming SDK still yields
        a single final chunk (via the
-       :class:`~src.llm.actor_base.LLMActorBase` adapter).
+       :class:`~src.actor.llm.actor_base.LLMActorBase` adapter).
     2. **Identity properties** (``model_id``, ``provider``) so a
        caller can route, audit and look up specs without inspecting
        a returned response.
@@ -141,7 +48,7 @@ class LLMActorPort(ActorPort):
     ``ActorPort`` in its constructor, making the LLM dependency
     explicit at the type-system level. The plain
     :class:`~src.kernel.base.BaseKernel` happily accepts any
-    ``ActorPort``, so a :class:`~src.llm.mock_actor.MockLLMActor`
+    ``ActorPort``, so a :class:`~src.actor.llm.mock_actor.MockLLMActor`
     works end-to-end with the base kernel today.
 
     Audit attribution stays the kernel's job: actors do not publish

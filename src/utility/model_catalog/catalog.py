@@ -14,9 +14,11 @@ aggregator listening for everyone's spend, a credentials broker
 shared across actors -- the right move is *that* component on the
 bus, while the catalog stays a sync-callable utility.
 
-Lifecycle: the catalog asks its :class:`ModelDataSource` for data
+Lifecycle: the catalog asks its
+:class:`~src.utility.model_catalog.ports.ModelDataSource` for data
 on every lookup, but the source typically caches an in-memory
-snapshot (see :class:`~src.llm.sources.LLMPriceKitSource`). The
+snapshot (see
+:class:`~src.utility.model_catalog.sources.LLMPriceKitSource`). The
 catalog itself doesn't manage a cache layer -- pushing that into
 the source keeps the catalog's responsibility narrow:
 "port-fronted view of a data source".
@@ -35,9 +37,9 @@ from __future__ import annotations
 import logging
 
 from src.components import ComponentCategory, RobotComponent
-from src.llm.ports import ModelCatalogPort, ModelDataSource
-from src.llm.sources import LLMPriceKitSource
-from src.llm.types import ModelPricing, ModelSpec
+from src.utility.model_catalog.ports import ModelCatalogPort, ModelDataSource
+from src.utility.model_catalog.sources import LLMPriceKitSource
+from src.utility.model_catalog.types import ModelPricing, ModelSpec
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +50,9 @@ class ModelCatalog(RobotComponent, ModelCatalogPort):
     Constructor:
 
     - ``source`` -- a :class:`ModelDataSource`. Default:
-      :class:`~src.llm.sources.LLMPriceKitSource` with offline-only
-      mode (``auto_update=False``). Tests inject in-memory fakes.
+      :class:`~src.utility.model_catalog.sources.LLMPriceKitSource`
+      with offline-only mode (``auto_update=False``). Tests inject
+      in-memory fakes.
 
     Lifecycle hooks are no-ops: the source is constructed eagerly
     (the lib loads its bundled snapshot in __init__), so ``start``

@@ -11,15 +11,15 @@ What this base provides:
 
 - **Context shaping**: the kernel hands in a curated ``actor_context``
   dict; the base turns it into a list of
-  :class:`~src.llm.types.ChatMessage` (system, history, user). The
+  :class:`~src.actor.llm.types.ChatMessage` (system, history, user). The
   driver never sees the dict.
 - **Run/stream symmetry**: drivers implement *at least one* of
   :meth:`_chat_native` and :meth:`_stream_native`. The base
   synthesises the missing direction (collect-stream-into-reply, or
   yield-single-final-delta).
 - **ActorResponse / ActorChunk assembly**: the base bundles the
-  driver's :class:`~src.llm.types.LLMReply` /
-  :class:`~src.llm.types.LLMDelta` into the actor-system value
+  driver's :class:`~src.actor.llm.types.LLMReply` /
+  :class:`~src.actor.llm.types.LLMDelta` into the actor-system value
   types, attaches identity metadata (provider, model, tokens, cost)
   and the right :class:`Failable` status.
 - **Error translation**: any exception from the driver becomes

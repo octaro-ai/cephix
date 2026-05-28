@@ -10,10 +10,14 @@ from __future__ import annotations
 import pytest
 
 from src.components import ComponentCategory, RobotComponent
-from src.llm.catalog import ModelCatalog
-from src.llm.ports import ModelCatalogPort, ModelDataSource
-from src.llm.sources import LLMPriceKitSource
-from src.llm.types import ModelPricing, ModelSpec
+from src.utility.model_catalog import (
+    LLMPriceKitSource,
+    ModelCatalog,
+    ModelCatalogPort,
+    ModelDataSource,
+    ModelPricing,
+    ModelSpec,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +55,7 @@ async def test_model_catalog_lifecycle_is_noop() -> None:
 # ---------------------------------------------------------------------------
 
 
-class _FakeSource:
+class _FakeSource(ModelDataSource):
     """Minimal :class:`ModelDataSource` for tests."""
 
     def __init__(
@@ -76,7 +80,7 @@ class _FakeSource:
         return self._rows.get((provider, model_id), (None, None))[1]
 
 
-def test_fake_source_satisfies_protocol() -> None:
+def test_fake_source_inherits_data_source_abc() -> None:
     source = _FakeSource({})
     assert isinstance(source, ModelDataSource)
 
@@ -115,6 +119,11 @@ def test_catalog_snapshot_id_forwards_source() -> None:
 # ---------------------------------------------------------------------------
 # LLMPriceKitSource: real lib, well-known models
 # ---------------------------------------------------------------------------
+
+
+def test_llmprice_kit_source_inherits_data_source_abc() -> None:
+    source = LLMPriceKitSource()
+    assert isinstance(source, ModelDataSource)
 
 
 def test_llmprice_kit_source_resolves_known_openai_model() -> None:
