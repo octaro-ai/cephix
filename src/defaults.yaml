@@ -8,6 +8,29 @@
 #
 # Per-bot overrides live in ~/.cephix/robots/<id>/robot.yaml.
 #
+# How the three-stage resolution works
+# ------------------------------------
+# A robot's configuration is built in three layers, in this order:
+#
+#   1. TEMPLATE      A robot.yaml with `template: <name>` selects a named
+#                    blueprint from `defaults.templates`. The blueprint
+#                    declares which slots the robot has (bus, kernel,
+#                    persistence, ...) and the default `name:` for each.
+#                    Without `template:` no template layer is applied --
+#                    the robot.yaml must declare every slot it wants.
+#
+#   2. INSTANCE      The robot.yaml itself overrides slots on the template.
+#                    Slot-by-slot semantics:
+#                      * `<slot>: null` removes the slot entirely;
+#                      * a different `name:` replaces the slot wholesale
+#                        (no field bleed from the previous component);
+#                      * the same `name:` (or no `name:`) merges fields,
+#                        with the instance winning per field.
+#
+#   3. LIBRARY       Each remaining component is filled with its default
+#                    fields from `defaults.components.<category>` indexed
+#                    by `name:`. Explicit fields always win.
+#
 # Vocabulary: every component block carries a `name:` discriminator that
 # selects the registered implementation in that block's role/category
 # (the *type* in the OO sense is the class itself; `name:` says *which*
@@ -15,71 +38,110 @@
 # to a class and pass the remaining fields as constructor kwargs.
 
 defaults:
-  bus:
-    name: asyncio
-  # Out-of-band maintenance hatch. Not connected to the bus -- if the
-  # bus wedges, the control plane is still reachable so an operator
-  # can inspect and stop the robot. Token is taken from the bot-local
-  # .env file (key: CEPHIX_CONTROL_PLANE_TOKEN).
-  control_plane:
-    enabled: true
-    host: 127.0.0.1
-    port: 9876
-    # Tried in order if `port` is busy; final fallback is port 0
-    # (let the OS pick) so multiple bots co-exist by default.
-    port_range: [9876, 9999]
-    path: /control
-  # Default kernel: the actor-driven five-phase BaseKernel. The
-  # builder injects the configured actor (see `actor:` below) into
-  # the kernel at construction; the kernel then calls
-  # `actor.run(actor_context)` directly during its act phase --
-  # actors are not on the bus. Specializing kernels (ChatKernel,
-  # LLMKernel, ...) inherit from BaseKernel and override the phases
-  # they care about.
-  kernel:
-    name: base
-    input_topic: input.message
-    output_topic: output.message
-    actor_timeout: 30.0
-  # Default actor: a trivial echo actor that mirrors the input text
-  # back. Replace with `name: llm` once that exists; the actor block
-  # is required (the kernel always runs *some* actor).
-  actor:
-    name: echo
-    prefix: "echo: "
-  channels:
-    - name: websocket
-      host: 127.0.0.1
-      port: 8765
-      # Tried in order if `port` is busy; final fallback is port 0
-      # (let the OS pick) so multiple bots co-exist by default. Same
-      # mechanic as the control plane above.
-      port_range: [8765, 8799]
-      path: /ws
-  # Robot-wide persistence layer. Components ask for sinks by channel
-  # name (e.g. "telemetry", "audit", later "memory"); the provider
-  # decides how each channel lands. Default: one .jsonl file per
-  # channel inside the bot's `logs/` directory, alongside the
-  # operational console log (`logs/cephix.log`). Set `enabled: false`
-  # to turn the whole layer off; replace `name:` with another backend
-  # (sqlite, supabase, ...) once those exist. Channel names with a
-  # slash become subdirectories on disk -- handy once rotation or
-  # per-run sharding lands (e.g. `telemetry/2026-05-26`).
-  persistence:
-    enabled: true
-    name: jsonl
-    path: logs      # relative paths anchor on the workspace; absolute paths win.
-  # Cross-cutting observers. Both default to on; the channel name
-  # selects which file/table/row inside the persistence layer is
-  # written.
-  telemetry:
-    enabled: true
-    name: bus_recorder
-    channel: telemetry
-  audit:
-    enabled: true
-    name: audit_note_sink
-    channel: audit
+
+  # --------------------------------------------------------------------
+  # Templates: named robot blueprints. A robot.yaml references one with
+  # `template: <name>`; if the robot.yaml does not name a template, no
+  # template layer is applied and the robot.yaml must declare every slot
+  # it wants.
+  # --------------------------------------------------------------------
+  templates:
+
+    # The standard cephix robot: bus + kernel + echo actor + WebSocket
+    # channel + the full observability stack (persistence, telemetry,
+    # audit, control_plane).
+    default:
+      bus: {name: asyncio}
+      persistence: {name: jsonl}
+      telemetry: {name: bus_recorder}
+      audit: {name: audit_note_sink}
+      control_plane: {name: control_plane}
+      kernel:
+        name: base
+        actor: {name: echo}
+      channels:
+        - {name: websocket}
+
+    # Minimal robot for tests and lightweight bots: bus + kernel + echo,
+    # nothing else. Set `template: bare` if you do not want the
+    # observability stack.
+    bare:
+      bus: {name: asyncio}
+      kernel:
+        name: base
+        actor: {name: echo}
+
+    # Blueprint for LLM-driven bots. Same observability as `default`,
+    # but the actor is `llm.openai` (the robot.yaml supplies model_id
+    # and api_key).
+    chatbot:
+      bus: {name: asyncio}
+      persistence: {name: jsonl}
+      telemetry: {name: bus_recorder}
+      audit: {name: audit_note_sink}
+      control_plane: {name: control_plane}
+      kernel:
+        name: base
+        actor: {name: llm.openai}
+      channels:
+        - {name: websocket}
+
+  # --------------------------------------------------------------------
+  # Component library: default fields per (category, name). Consulted
+  # by the builder after the template/instance merge to fill missing
+  # constructor kwargs. Explicitly set fields always win.
+  # --------------------------------------------------------------------
+  components:
+
+    bus:
+      - {name: asyncio}
+
+    kernel:
+      - name: base
+        input_topic: input.message
+        output_topic: output.message
+        actor_timeout: 30.0
+
+    actor:
+      - {name: echo, prefix: "echo: "}
+      - {name: llm.openai, provider: openai, timeout: 60.0, max_retries: 2}
+
+    channel:
+      - name: websocket
+        host: 127.0.0.1
+        port: 8765
+        # Tried in order if `port` is busy; final fallback is port 0
+        # (let the OS pick) so multiple bots co-exist by default.
+        port_range: [8765, 8799]
+        path: /ws
+
+    persistence:
+      # Robot-wide persistence layer. Components ask for sinks by
+      # channel name (telemetry, audit, future memory, ...); the
+      # provider decides how each channel lands. Default: one .jsonl
+      # file per channel inside the bot's `logs/` directory. Channel
+      # names with a slash become subdirectories on disk.
+      - {name: jsonl, path: logs}
+
+    telemetry:
+      - {name: bus_recorder, channel: telemetry}
+
+    audit:
+      - {name: audit_note_sink, channel: audit}
+
+    control_plane:
+      # Out-of-band maintenance hatch. Not connected to the bus -- if
+      # the bus wedges, the control plane is still reachable so an
+      # operator can inspect and stop the robot. Token comes from the
+      # bot-local .env (key: CEPHIX_CONTROL_PLANE_TOKEN).
+      - name: control_plane
+        host: 127.0.0.1
+        port: 9876
+        # Tried in order if `port` is busy; final fallback is port 0
+        # (let the OS pick) so multiple bots co-exist by default. Same
+        # mechanic as the websocket channel above.
+        port_range: [9876, 9999]
+        path: /control
 
 # Optional list of bots whose workspace lives outside the convention
 # (~/.cephix/robots/<id>/). Bots inside the convention are auto-discovered

@@ -157,19 +157,13 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
 
     Plain dicts are merged key-by-key with ``override`` winning on
     leaves; nested dicts recurse. Lists and other scalars are replaced
-    wholesale.
+    wholesale. Originals are not mutated.
 
-    **Discriminator rule**: a sub-dict is treated as a *component spec*
-    when both sides carry a ``name`` key. ``name`` identifies the
-    component class and therefore the constructor signature; if the
-    two ``name`` values differ, the sub-dicts describe two unrelated
-    components and merging them would produce a Frankenstein spec
-    (e.g. an ``LLMActorOpenAI`` with an orphan ``prefix`` field
-    inherited from an ``echo`` actor default). In that case the
-    override sub-dict replaces the base sub-dict wholesale -- only
-    fields the user explicitly wrote for the new component survive.
-    Sub-dicts that share the same ``name`` (or where one side omits
-    it) merge normally.
+    The merge is intentionally generic. Configuration-specific concerns
+    (component-name discriminators, ``null`` -> "delete this slot",
+    template selection) are NOT handled here -- they live in the
+    builder, which understands the schema. ``deep_merge`` stays a
+    primitive that any layer of the stack can rely on.
     """
     merged = dict(base)
     for key, value in override.items():
@@ -177,7 +171,6 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
             isinstance(value, dict)
             and key in merged
             and isinstance(merged[key], dict)
-            and not _component_identity_changed(merged[key], value)
         ):
             merged[key] = deep_merge(merged[key], value)
         else:
@@ -185,21 +178,96 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
     return merged
 
 
-def _component_identity_changed(
-    base: dict[str, Any], override: dict[str, Any]
-) -> bool:
-    """``True`` when both sides declare conflicting ``name`` values.
+# ---------------------------------------------------------------------------
+# Component library: per-(category, name) field defaults
+# ---------------------------------------------------------------------------
 
-    A ``name`` mismatch means the two specs target different
-    component classes; their other fields are not interchangeable.
+
+class ComponentLibrary:
+    """Index of default constructor fields per ``(category, name)``.
+
+    The library is the second layer in the three-stage build pipeline
+    (template -> instance -> library). Each entry says: "if the user
+    picks an *X*-category component named *Y*, here are the field
+    defaults you should fill in unless the user already set them
+    explicitly."
+
+    Wire format under ``cephix.yaml#defaults.components``::
+
+        components:
+          actor:
+            - {name: echo, prefix: "echo: "}
+            - {name: llm.openai, provider: openai, timeout: 60.0}
+          kernel:
+            - {name: base, input_topic: input.message,
+               actor_timeout: 30.0}
+          channel:
+            - {name: websocket, host: 127.0.0.1, port: 8765}
+
+    Each entry is a regular component spec minus the ``name:``
+    discriminator (which is consumed as the index key and stripped
+    from the stored field map).
+
+    Validation at construction time:
+
+    - Each entry must be a mapping with a non-empty string ``name:``.
+    - Within a category, ``name:`` must be unique. Two entries with
+      the same name would silently shadow each other; we raise
+      :class:`ValueError` instead.
     """
-    base_name = base.get("name")
-    override_name = override.get("name")
-    return (
-        base_name is not None
-        and override_name is not None
-        and base_name != override_name
-    )
+
+    def __init__(self, raw: dict[str, Any] | None) -> None:
+        self._index: dict[tuple[str, str], dict[str, Any]] = {}
+        if raw is None:
+            return
+        if not isinstance(raw, dict):
+            raise ValueError(
+                "defaults.components must be a mapping of "
+                "category -> [entries]"
+            )
+        for category, entries in raw.items():
+            if entries is None:
+                continue
+            if not isinstance(entries, list):
+                raise ValueError(
+                    f"defaults.components.{category} must be a list of "
+                    "component-default entries"
+                )
+            for index, entry in enumerate(entries):
+                if not isinstance(entry, dict):
+                    raise ValueError(
+                        f"defaults.components.{category}[{index}] must "
+                        "be a mapping"
+                    )
+                name = entry.get("name")
+                if not isinstance(name, str) or not name:
+                    raise ValueError(
+                        f"defaults.components.{category}[{index}] is "
+                        "missing a non-empty 'name'"
+                    )
+                key = (category, name)
+                if key in self._index:
+                    raise ValueError(
+                        f"defaults.components.{category}: duplicate "
+                        f"entry for name={name!r}"
+                    )
+                self._index[key] = {
+                    k: v for k, v in entry.items() if k != "name"
+                }
+
+    def defaults_for(self, category: str, name: str) -> dict[str, Any]:
+        """Return a fresh dict of default fields for ``(category, name)``.
+
+        Returns an empty dict if no library entry exists -- the
+        component just builds from whatever the spec already carries.
+        """
+        return dict(self._index.get((category, name), {}))
+
+    def has_entry(self, category: str, name: str) -> bool:
+        return (category, name) in self._index
+
+    def __contains__(self, item: tuple[str, str]) -> bool:
+        return item in self._index
 
 
 # ---------------------------------------------------------------------------

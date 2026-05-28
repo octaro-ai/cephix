@@ -91,28 +91,40 @@ def run_wizard(
 
     defaults = home_defaults(home_override)
 
+    # Walk the slots that the user can pick. Defaults come from the
+    # selected template (today: ``default``) so the wizard reflects the
+    # blueprint the robot will actually be built from. The template
+    # name itself is recorded in robot.yaml so the build pipeline
+    # falls back to its slots whenever the instance is silent.
+    template_name = "default"
+    blueprint = _resolve_blueprint(defaults, template_name)
+
     bus_spec = _pick_component(
-        console, ComponentCategory.BUS, defaults.get("bus") or {"name": "asyncio"}
+        console, ComponentCategory.BUS, blueprint.get("bus") or {"name": "asyncio"}
     )
+    kernel_blueprint = dict(blueprint.get("kernel") or {"name": "base"})
+    actor_default = dict(kernel_blueprint.pop("actor", None) or {"name": "echo"})
     kernel_spec = _pick_component(
-        console, ComponentCategory.KERNEL, defaults.get("kernel") or {"name": "base"}
+        console, ComponentCategory.KERNEL, kernel_blueprint
     )
     actor_spec = _pick_component(
-        console, ComponentCategory.ACTOR, defaults.get("actor") or {"name": "echo"}
+        console, ComponentCategory.ACTOR, actor_default
     )
-    channel_specs = _pick_channels(console, defaults.get("channels") or [])
+    channel_specs = _pick_channels(console, blueprint.get("channels") or [])
+
+    if kernel_spec is not None and actor_spec is not None:
+        kernel_spec["actor"] = actor_spec
 
     robot_yaml: dict[str, Any] = {
         "id": slug,
         "name": name,
         "enabled": True,
+        "template": template_name,
     }
     if bus_spec is not None:
         robot_yaml["bus"] = bus_spec
     if kernel_spec is not None:
         robot_yaml["kernel"] = kernel_spec
-    if actor_spec is not None:
-        robot_yaml["actor"] = actor_spec
     if channel_specs is not None:
         robot_yaml["channels"] = channel_specs
 
@@ -169,28 +181,49 @@ def reconfigure(
     )
 
     defaults = home_defaults(home_override)
+    # The robot's template selection is preserved across reconfigures.
+    # Existing robots that pre-date the template system get the
+    # ``default`` template assigned -- their slot-by-slot config is
+    # still respected; the template merely supplies fallbacks for
+    # anything they did not declare explicitly.
+    template_name = str(current.get("template") or "default")
+    blueprint = _resolve_blueprint(defaults, template_name)
 
-    bus_default = current.get("bus") or defaults.get("bus") or {"name": "asyncio"}
-    kernel_default = current.get("kernel") or defaults.get("kernel") or {"name": "base"}
-    actor_default = current.get("actor") or defaults.get("actor") or {"name": "echo"}
-    channels_default = current.get("channels") or defaults.get("channels") or []
+    bus_default = current.get("bus") or blueprint.get("bus") or {"name": "asyncio"}
+    current_kernel = dict(current.get("kernel") or {})
+    blueprint_kernel = dict(blueprint.get("kernel") or {"name": "base"})
+    kernel_default = {**blueprint_kernel, **current_kernel}
+    # Actor lives under kernel.actor; legacy top-level actor: from older
+    # files is read as a migration fallback so reconfigure doesn't lose
+    # the user's previous choice.
+    actor_default = dict(
+        kernel_default.pop("actor", None)
+        or current.get("actor")
+        or blueprint_kernel.get("actor")
+        or {"name": "echo"}
+    )
+    channels_default = (
+        current.get("channels") or blueprint.get("channels") or []
+    )
 
     bus_spec = _pick_component(console, ComponentCategory.BUS, bus_default)
     kernel_spec = _pick_component(console, ComponentCategory.KERNEL, kernel_default)
     actor_spec = _pick_component(console, ComponentCategory.ACTOR, actor_default)
     channel_specs = _pick_channels(console, channels_default)
 
+    if kernel_spec is not None and actor_spec is not None:
+        kernel_spec["actor"] = actor_spec
+
     new_yaml: dict[str, Any] = {
         "id": instance.id,
         "name": name,
         "enabled": enabled,
+        "template": template_name,
     }
     if bus_spec is not None:
         new_yaml["bus"] = bus_spec
     if kernel_spec is not None:
         new_yaml["kernel"] = kernel_spec
-    if actor_spec is not None:
-        new_yaml["actor"] = actor_spec
     if channel_specs is not None:
         new_yaml["channels"] = channel_specs
 
@@ -204,6 +237,26 @@ def reconfigure(
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+
+def _resolve_blueprint(
+    defaults: dict[str, Any], template_name: str
+) -> dict[str, Any]:
+    """Look up ``template_name`` in ``defaults.templates`` (or fall back).
+
+    The wizard treats the blueprint as a *display-only* helper: it
+    seeds prompts with the template's slot defaults so the
+    interactive flow matches what the build pipeline will produce.
+    A missing template triggers a graceful fallback to an empty
+    blueprint (the wizard's hard-coded fallbacks then apply).
+    """
+    templates = defaults.get("templates")
+    if not isinstance(templates, dict):
+        return {}
+    blueprint = templates.get(template_name)
+    if not isinstance(blueprint, dict):
+        return {}
+    return blueprint
 
 
 def _existing_slugs(home_override: str | Path | None) -> set[str]:

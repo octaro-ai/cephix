@@ -1,23 +1,31 @@
 """Assemble a :class:`Robot` from a ``robot.yaml`` mapping.
 
-The builder is the bridge between configuration and runtime:
+The builder is the bridge between configuration and runtime. Its
+backbone is a *three-stage* resolution pipeline:
 
-- It deep-merges global defaults from ``cephix.yaml#defaults`` with the
-  bot-specific ``robot.yaml`` (bot wins).
-- It resolves the ``bus``, ``kernel``, ``actor`` and ``channels`` blocks
-  via the component registry. The cross-cutting persistence layer is
-  built *once* from the top-level ``persistence:`` block and shared by
-  every component that needs an :class:`EventSink`; observer components
-  (``telemetry:``, ``audit:``) only declare ``enabled`` and an
-  optional ``channel`` name.
-- It hands identity, the control-plane configuration and the
-  components straight to the :class:`Robot` constructor. The
-  control-plane token is taken from the bot-local ``.env`` (key
-  ``CEPHIX_CONTROL_PLANE_TOKEN``) so it never lives inside the YAML.
+1. **Template** -- if ``robot.yaml`` carries ``template: <name>``, the
+   matching blueprint from ``cephix.yaml#defaults.templates`` is
+   loaded as a starting point. Without ``template:`` the build starts
+   from an empty mapping; the robot.yaml must declare every slot it
+   wants.
+2. **Slot-merge** -- the robot.yaml is merged onto the template
+   slot-by-slot. ``null`` deletes a slot, a different ``name:``
+   replaces a component spec wholesale (no field bleed), the same
+   ``name:`` (or no ``name:``) merges fields with the instance
+   winning.
+3. **Library-fill** -- when a component is finally constructed, any
+   missing fields are filled from
+   ``cephix.yaml#defaults.components.<category>`` indexed by ``name:``.
+   Explicit fields always win.
 
-The ``enabled`` flag stays out of the builder: it's a CLI-layer
-filter for the smart-default and the future ``--all`` filter, and has
-no runtime meaning once a bot is actually being started.
+The builder also resolves credentials, runs ``${KEY}`` substitution
+on the rest of the config, and hands identity, the control-plane
+config and the components straight to the :class:`Robot` constructor.
+
+Top-level ``id``, ``name``, ``enabled`` and ``template`` are not
+slots -- they are robot identity / wiring metadata. The ``enabled``
+flag stays out of the runtime: it's a CLI-layer filter for the
+smart-default and the future ``--all`` filter.
 """
 
 from __future__ import annotations
@@ -30,16 +38,15 @@ from src.actor.ports import ActorPort
 from src.audit.note_sink import AuditNoteSink
 from src.bus.ports import BusPort
 from src.channels.ports import ChannelPort
-from src.components import RobotComponent
+from src.components import ComponentCategory, RobotComponent
 from src.configuration import (
     CONTROL_PLANE_TOKEN_ENV,
     HOME_ENV_FILENAME,
     ROBOT_ENV_FILENAME,
-    deep_merge,
+    ComponentLibrary,
     home_dir,
     load_robot_env,
 )
-from src.components import ComponentCategory
 from src.credentials import (
     CredentialProvider,
     CredentialProviderPort,
@@ -56,9 +63,28 @@ from src.telemetry.bus_recorder import BusRecorder
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_BUS_SPEC: dict[str, Any] = {"name": "asyncio"}
 _DEFAULT_TELEMETRY_CHANNEL = "telemetry"
 _DEFAULT_AUDIT_CHANNEL = "audit"
+
+# Top-level keys in ``robot.yaml`` that are NOT component slots:
+# they are robot-level metadata (identity, CLI filter, template
+# selector). Everything else is a slot subject to template merging.
+_NON_SLOT_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
+    {"id", "name", "enabled", "template"}
+)
+
+# Singular/plural slot pairs. The robot.yaml may use either form for
+# a given slot, but never both at once. The plural form always
+# normalises to a list internally.
+_SINGULAR_PLURAL_PAIRS: dict[str, str] = {
+    "kernel": "kernels",
+    "channel": "channels",
+}
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
 
 
 def build_robot_from_config(
@@ -70,146 +96,127 @@ def build_robot_from_config(
     """Build a :class:`Robot` from a parsed ``robot.yaml`` mapping.
 
     ``defaults`` typically comes from
-    :func:`src.configuration.home_defaults`. The merge is deep, with
-    ``robot_yaml`` winning on conflicts. Channel lists are not merged
-    element-by-element: if ``robot_yaml`` provides a ``channels`` list,
-    it fully replaces the default list.
+    :func:`src.configuration.home_defaults`. It is split into a
+    ``templates:`` section (named blueprints) and a ``components:``
+    section (per-name field defaults); the builder consults both.
+    Legacy callers that pass a flat dict (without ``templates:``
+    /``components:``) get only the lookup paths they provide.
 
-    ``workspace`` is the bot's directory (where ``robot.yaml`` lives).
-    Used to locate the ``.env`` file for the control-plane token *and*
-    as the default first store for the credential subsystem. If
-    omitted, no ``.env`` is read and the control plane refuses to
-    start (deny-by-default).
+    ``workspace`` is the bot's directory (where ``robot.yaml``
+    lives). Used to locate the ``.env`` file for the control-plane
+    token *and* as the default first store for the credential
+    subsystem. If omitted, no ``.env`` is read and the control plane
+    refuses to start (deny-by-default).
 
-    The build runs in three phases:
+    Build order:
 
-    1. **Credential stores** are constructed from ``credentials:`` (or
-       a default chain anchored at ``workspace/.env`` and
-       ``~/.cephix/.env``) and a :class:`CredentialProvider` is built
-       around them.
-    2. The remaining configuration is run through
+    1. **Template + slot-merge** produces the resolved configuration.
+    2. **Credentials** are constructed from the ``credentials:``
+       section (or a default chain anchored at workspace/.env and
+       ``~/.cephix/.env``).
+    3. The remaining configuration is run through
        :func:`~src.credentials.substitution.resolve_secrets` so every
        ``${KEY}`` reference is replaced before any component
        constructor sees it. A missing key raises
-       :class:`~src.credentials.exceptions.CredentialNotFound`, which
-       aborts the build -- no half-constructed robot.
-    3. Components are instantiated in dependency order. Actors whose
-       constructors declare a ``catalog`` or ``credentials`` kwarg
-       receive the shared instances automatically (Convention-DI).
+       :class:`~src.credentials.exceptions.CredentialNotFound`,
+       aborting the build -- no half-constructed robot.
+    4. Components are instantiated in dependency order. The actor
+       lives **under** the kernel (``kernel.actor``) and is
+       constructed first; the kernel receives it via constructor
+       injection. Actors whose constructors declare a ``credentials``
+       kwarg receive the shared provider automatically (Convention-DI).
     """
     if not isinstance(robot_yaml, dict):
         raise ConfigError("robot.yaml must be a mapping at the top level")
 
-    base = dict(defaults or {})
-    cfg = deep_merge(base, dict(robot_yaml))
+    defaults_block = dict(defaults or {})
+    templates_block = defaults_block.get("templates")
+    if templates_block is not None and not isinstance(templates_block, dict):
+        raise ConfigError(
+            "cephix.yaml#defaults.templates must be a mapping of "
+            "template-name -> blueprint"
+        )
+    components_block = defaults_block.get("components")
+    library = ComponentLibrary(components_block)
 
-    # Phase 1: credentials. Constructed before any other component so
-    # the substitution pass below can resolve ${KEY} references.
+    # Phase 1: template + slot-merge.
+    template_block = _resolve_template(robot_yaml, templates_block or {})
+    cfg = _merge_slots(template_block, dict(robot_yaml))
+
+    # Top-level guard: the legacy flat ``actor:`` slot is no longer
+    # accepted. The actor lives under ``kernel.actor`` because it is
+    # the kernel's runtime dependency. Catch this here so the user
+    # sees a precise migration hint instead of a vague ConfigError
+    # later.
+    if "actor" in cfg:
+        raise ConfigError(
+            "robot.yaml#actor on the top level is no longer supported; "
+            "move the actor block under kernel: (the actor is the "
+            "kernel's runtime dependency, not a sibling). Example:\n"
+            "  kernel:\n"
+            "    name: base\n"
+            "    actor:\n"
+            "      name: echo"
+        )
+
+    # Phase 2: credentials. Constructed before the substitution pass so
+    # ${KEY} references in the rest of the config can resolve.
     credentials_spec = cfg.pop("credentials", None)
     credentials = _build_credential_provider(
         credentials_spec,
         workspace=workspace,
     )
 
-    # Phase 2: substitution. Walks every remaining section and
+    # Phase 3: substitution. Walks every remaining section and
     # replaces ``${KEY}`` references with their resolved values.
-    # Fail-fast: a missing key raises CredentialNotFound here, the
-    # builder propagates it, and no robot is ever born.
     cfg = resolve_secrets(
         cfg,
         lambda key: credentials.resolve_sync(key, requester="builder"),
     )
 
-    # Phase 3: assemble the rest of the robot.
-    bus_spec = cfg.get("bus") or _DEFAULT_BUS_SPEC
-    bus = build(bus_spec)
-    if not isinstance(bus, BusPort):
-        raise ConfigError(
-            f"bus component {type(bus).__name__} does not implement BusPort"
-        )
-    if not isinstance(bus, RobotComponent):
-        raise ConfigError(
-            f"bus component {type(bus).__name__} does not implement "
-            "RobotComponent"
-        )
+    # Phase 4: assemble components.
+    bus = _build_bus(cfg.get("bus"), library=library)
 
-    # Utilities are built before actors so a future LLMKernel (or
-    # any other consumer) can hold a constructor-time reference to
-    # them. The robot's boot order runs them in their boot priority
-    # anyway (UTILITY=5 < ACTOR=8 < KERNEL=10), but their *ports* are
-    # wired at construction time. The same applies to bus utilities.
     utilities = _build_components_list(
         cfg.get("utility"),
         section_name="utility",
         expected_category=ComponentCategory.UTILITY,
+        library=library,
     )
     bus_utilities = _build_components_list(
         cfg.get("bus_utility"),
         section_name="bus_utility",
         expected_category=ComponentCategory.BUS_UTILITY,
+        library=library,
     )
 
-    # Order matters: the actor is a runtime dependency the kernel
-    # holds a direct reference to, so it must exist before the kernel
-    # is constructed. The robot's lifecycle still treats both as
-    # peers; the kernel just receives the already-built actor through
-    # constructor injection.
-    #
-    # No ``catalog`` injection here: the model catalog is the future
-    # ``LLMKernel``'s dependency, not the actor's. The actor is a
-    # driver -- it surfaces ``tokens_in`` / ``tokens_out`` and lets
-    # the kernel compute ``cost_usd`` against the catalog.
-    actor_spec = cfg.get("actor")
-    if not actor_spec:
-        raise ConfigError(
-            "robot.yaml must declare an actor section; the kernel "
-            "needs an actor to consult during its act phase"
-        )
-    actor_built = _build_actor(
-        actor_spec,
-        credentials=credentials,
+    # Kernels (singular or plural form). Each kernel owns a nested
+    # ``actor:`` mapping, built and injected into the kernel.
+    kernel_specs = _normalize_singular_or_list(
+        cfg, singular="kernel", plural="kernels"
     )
-    if not isinstance(actor_built, ActorPort):
+    if not kernel_specs:
         raise ConfigError(
-            f"actor component {type(actor_built).__name__} does not "
-            "implement ActorPort"
+            "robot.yaml requires a kernel (use 'kernel:' for one or "
+            "'kernels:' for several)"
         )
-    actor = actor_built
+    actors, kernels = _build_kernels(
+        kernel_specs, library=library, credentials=credentials
+    )
 
-    kernel_spec = cfg.get("kernel")
-    if not kernel_spec:
-        raise ConfigError("robot.yaml must declare a kernel section")
-    kernel = build(kernel_spec, actor=actor)
-    if not isinstance(kernel, KernelPort):
-        raise ConfigError(
-            f"kernel component {type(kernel).__name__} does not implement KernelPort"
-        )
-    if not isinstance(kernel, RobotComponent):
-        raise ConfigError(
-            f"kernel component {type(kernel).__name__} does not implement "
-            "RobotComponent"
-        )
+    # Channels (singular or plural form).
+    channel_specs = _normalize_singular_or_list(
+        cfg, singular="channel", plural="channels"
+    )
+    channels = _build_channels(channel_specs, library=library)
 
-    channel_specs = cfg.get("channels") or []
-    if not isinstance(channel_specs, list):
-        raise ConfigError("robot.yaml#channels must be a list")
-    channels: list[ChannelPort] = []
-    for index, spec in enumerate(channel_specs):
-        component = build(spec)
-        if not isinstance(component, ChannelPort):
-            raise ConfigError(
-                f"channel #{index} ({type(component).__name__}) does not implement ChannelPort"
-            )
-        if not isinstance(component, RobotComponent):
-            raise ConfigError(
-                f"channel #{index} ({type(component).__name__}) does not "
-                "implement RobotComponent"
-            )
-        channels.append(component)
-
-    persistence = _build_persistence_provider(cfg.get("persistence"), workspace)
-    telemetry = _build_telemetry(cfg.get("telemetry"), persistence)
-    audit = _build_audit(cfg.get("audit"), persistence)
+    persistence = _build_persistence_provider(
+        cfg.get("persistence"), workspace, library=library
+    )
+    telemetry = _build_telemetry(
+        cfg.get("telemetry"), persistence, library=library
+    )
+    audit = _build_audit(cfg.get("audit"), persistence, library=library)
 
     robot_id_raw = robot_yaml.get("id")
     robot_name_raw = robot_yaml.get("name")
@@ -218,7 +225,9 @@ def build_robot_from_config(
         name=str(robot_name_raw) if robot_name_raw else None,
     )
 
-    control_plane_config = _control_plane_config(cfg.get("control_plane"))
+    control_plane_config = _control_plane_config(
+        cfg.get("control_plane"), library=library
+    )
     control_plane_token: str | None = None
     if workspace is not None:
         env = load_robot_env(workspace)
@@ -227,8 +236,8 @@ def build_robot_from_config(
     components: list[RobotComponent] = [
         bus,
         credentials,
-        actor,
-        kernel,
+        *actors,
+        *kernels,
         *utilities,
         *bus_utilities,
         *channels,
@@ -244,6 +253,461 @@ def build_robot_from_config(
         control_plane_config=control_plane_config,
         control_plane_token=control_plane_token,
     )
+
+
+# ---------------------------------------------------------------------------
+# Stage 1: template resolution + slot-merge
+# ---------------------------------------------------------------------------
+
+
+def _resolve_template(
+    robot_yaml: dict[str, Any], templates: dict[str, Any]
+) -> dict[str, Any]:
+    """Return a copy of the named template, or an empty dict.
+
+    ``robot.yaml#template: <name>`` selects one of the blueprints in
+    ``cephix.yaml#defaults.templates``. A missing ``template:`` key (or
+    an explicit ``null``) means "no template layer" -- the robot.yaml
+    must declare every slot it wants. An unknown template name aborts
+    the build with the list of available templates so the typo is
+    immediately obvious.
+    """
+    name = robot_yaml.get("template")
+    if name is None:
+        return {}
+    if not isinstance(name, str) or not name:
+        raise ConfigError(
+            "robot.yaml#template must be a non-empty string naming a "
+            "template under cephix.yaml#defaults.templates"
+        )
+    if name not in templates:
+        available = sorted(templates.keys())
+        raise ConfigError(
+            f"robot.yaml#template: unknown template {name!r}; "
+            f"available templates: {available or '(none defined)'}"
+        )
+    blueprint = templates[name]
+    if not isinstance(blueprint, dict):
+        raise ConfigError(
+            f"defaults.templates.{name} must be a mapping of slot -> "
+            "component spec"
+        )
+    return _deep_copy(blueprint)
+
+
+def _merge_slots(
+    template: dict[str, Any], instance: dict[str, Any]
+) -> dict[str, Any]:
+    """Slot-by-slot merge of ``instance`` onto ``template``.
+
+    Rules per slot:
+
+    - **Identity / wiring keys** (``id``, ``name``, ``enabled``,
+      ``template``): instance wins; not subject to component-merge
+      rules.
+    - **Slot is ``null`` in instance**: the slot is removed entirely
+      (the user opted out of that component).
+    - **Slot exists in both as a dict**: descend into
+      :func:`_merge_component_dict` which respects the ``name:``
+      discriminator.
+    - **Slot is a list / scalar in instance**: replaces the template
+      value wholesale (no element-wise list merge).
+    - **Slot only in template / only in instance**: copied through.
+    """
+    result: dict[str, Any] = {}
+    for slot, value in template.items():
+        result[slot] = _deep_copy(value)
+
+    for slot, value in instance.items():
+        if slot in _NON_SLOT_TOP_LEVEL_KEYS:
+            result[slot] = value
+            continue
+        if value is None:
+            result.pop(slot, None)
+            continue
+        if (
+            slot in result
+            and isinstance(result[slot], dict)
+            and isinstance(value, dict)
+        ):
+            result[slot] = _merge_component_dict(result[slot], value)
+        else:
+            # list-or-scalar wholesale replace; deep-copy the instance
+            # value so later mutations on the merged dict don't leak
+            # back into the caller's robot.yaml.
+            result[slot] = _deep_copy(value)
+    return result
+
+
+def _merge_component_dict(
+    template_d: dict[str, Any], instance_d: dict[str, Any]
+) -> dict[str, Any]:
+    """Recursive merge with ``name:`` discriminator semantics.
+
+    Used both for top-level slot dicts (``bus``, ``kernel``,
+    ``persistence``, ...) and for nested component-shaped sub-dicts
+    such as ``kernel.actor``.
+
+    - Different ``name:`` values mean "two different component
+      classes"; merging their fields would Frankenstein the spec
+      (e.g. an :class:`LLMActorOpenAI` carrying a ``prefix`` from a
+      template :class:`EchoActor`). The instance wins wholesale.
+    - Same ``name:`` (or instance without ``name:``) means "same
+      component, fill missing fields"; we recurse.
+    """
+    t_name = template_d.get("name")
+    i_name = instance_d.get("name")
+    if i_name is not None and t_name is not None and i_name != t_name:
+        return _deep_copy(instance_d)
+
+    merged = _deep_copy(template_d)
+    for key, value in instance_d.items():
+        if value is None:
+            merged.pop(key, None)
+            continue
+        if (
+            key in merged
+            and isinstance(merged[key], dict)
+            and isinstance(value, dict)
+        ):
+            merged[key] = _merge_component_dict(merged[key], value)
+        else:
+            merged[key] = _deep_copy(value)
+    return merged
+
+
+def _deep_copy(value: Any) -> Any:
+    """Cheap recursive copy for plain YAML structures (dict/list/scalar)."""
+    if isinstance(value, dict):
+        return {k: _deep_copy(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_deep_copy(v) for v in value]
+    return value
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: singular/plural slot normalisation
+# ---------------------------------------------------------------------------
+
+
+def _normalize_singular_or_list(
+    cfg: dict[str, Any], *, singular: str, plural: str
+) -> list[dict[str, Any]]:
+    """Read ``singular``/``plural`` from ``cfg`` and return a list.
+
+    The two forms exist so the common single-component case stays
+    readable (``kernel: {...}``) while the rare multi-component case
+    is still expressible (``kernels: [{...}, {...}]``). Both forms at
+    once are a configuration error -- the ambiguity ("does the list
+    extend or replace the single?") is not worth the surprise.
+    """
+    has_singular = singular in cfg and cfg[singular] is not None
+    has_plural = plural in cfg and cfg[plural] is not None
+    if has_singular and has_plural:
+        raise ConfigError(
+            f"robot.yaml#{singular} and robot.yaml#{plural} are mutually "
+            f"exclusive; pick one form (use {plural}: as a list when you "
+            "need more than one)"
+        )
+    if has_singular:
+        value = cfg[singular]
+        if not isinstance(value, dict):
+            raise ConfigError(
+                f"robot.yaml#{singular} must be a mapping"
+            )
+        return [value]
+    if has_plural:
+        value = cfg[plural]
+        if not isinstance(value, list):
+            raise ConfigError(
+                f"robot.yaml#{plural} must be a list of component specs"
+            )
+        for index, entry in enumerate(value):
+            if not isinstance(entry, dict):
+                raise ConfigError(
+                    f"robot.yaml#{plural}[{index}] must be a mapping"
+                )
+        return list(value)
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: library-aware component construction
+# ---------------------------------------------------------------------------
+
+
+def _build_with_library(
+    spec: dict[str, Any],
+    *,
+    category: str,
+    library: ComponentLibrary,
+    **extra_kwargs: Any,
+) -> RobotComponent:
+    """Build a component, filling missing fields from the library.
+
+    Library lookup is keyed by ``(category, spec['name'])``. A spec
+    without ``name:`` (e.g. one using ``class:``) skips the library --
+    third-party plugins reach the registry directly.
+    """
+    if not isinstance(spec, dict):
+        raise ConfigError(
+            f"{category} spec must be a mapping, got {type(spec).__name__}"
+        )
+    enriched = _apply_library_defaults(spec, category=category, library=library)
+    return build(enriched, **extra_kwargs)
+
+
+def _apply_library_defaults(
+    spec: dict[str, Any],
+    *,
+    category: str,
+    library: ComponentLibrary,
+) -> dict[str, Any]:
+    """Return a copy of ``spec`` with library defaults filled in.
+
+    Explicit fields in ``spec`` always win. The ``name:`` key is what
+    selects the library entry; without it we cannot look up defaults
+    and pass the spec through unchanged.
+    """
+    name = spec.get("name")
+    if not isinstance(name, str) or not name:
+        return dict(spec)
+    defaults_dict = library.defaults_for(category, name)
+    if not defaults_dict:
+        return dict(spec)
+    merged = dict(defaults_dict)
+    for key, value in spec.items():
+        merged[key] = value
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Component-specific builders
+# ---------------------------------------------------------------------------
+
+
+def _build_bus(spec: Any, *, library: ComponentLibrary) -> BusPort:
+    if spec is None:
+        raise ConfigError(
+            "robot.yaml requires a bus (set 'template: default' or "
+            "declare 'bus:' explicitly)"
+        )
+    if not isinstance(spec, dict):
+        raise ConfigError("robot.yaml#bus must be a mapping")
+    component = _build_with_library(spec, category="bus", library=library)
+    if not isinstance(component, BusPort):
+        raise ConfigError(
+            f"bus component {type(component).__name__} does not implement "
+            "BusPort"
+        )
+    if not isinstance(component, RobotComponent):
+        raise ConfigError(
+            f"bus component {type(component).__name__} does not implement "
+            "RobotComponent"
+        )
+    return component
+
+
+def _build_kernels(
+    kernel_specs: list[dict[str, Any]],
+    *,
+    library: ComponentLibrary,
+    credentials: CredentialProviderPort | None,
+) -> tuple[list[ActorPort], list[RobotComponent]]:
+    """Build every kernel together with its nested actor.
+
+    The actor lives under the kernel because it is a constructor-time
+    dependency, not a peer. Both end up as separate
+    :class:`RobotComponent`s in the robot's component list -- the
+    runtime lifecycle treats them independently, the kernel just
+    holds a reference for its act phase.
+    """
+    actors: list[ActorPort] = []
+    kernels: list[RobotComponent] = []
+    for index, raw in enumerate(kernel_specs):
+        kspec = dict(raw)
+        actor_spec = kspec.pop("actor", None)
+        if not actor_spec:
+            label = "robot.yaml#kernel.actor" if len(kernel_specs) == 1 else (
+                f"robot.yaml#kernels[{index}].actor"
+            )
+            raise ConfigError(
+                f"{label} is required -- the kernel needs an actor "
+                "to consult during its act phase"
+            )
+        if not isinstance(actor_spec, dict):
+            raise ConfigError(
+                "kernel.actor must be a mapping (component spec)"
+            )
+
+        actor = _build_actor(
+            actor_spec, library=library, credentials=credentials
+        )
+        if not isinstance(actor, ActorPort):
+            raise ConfigError(
+                f"actor component {type(actor).__name__} does not "
+                "implement ActorPort"
+            )
+        if not isinstance(actor, RobotComponent):
+            raise ConfigError(
+                f"actor component {type(actor).__name__} does not "
+                "implement RobotComponent"
+            )
+
+        kernel = _build_with_library(
+            kspec, category="kernel", library=library, actor=actor
+        )
+        if not isinstance(kernel, KernelPort):
+            raise ConfigError(
+                f"kernel component {type(kernel).__name__} does not "
+                "implement KernelPort"
+            )
+        if not isinstance(kernel, RobotComponent):
+            raise ConfigError(
+                f"kernel component {type(kernel).__name__} does not "
+                "implement RobotComponent"
+            )
+        actors.append(actor)
+        kernels.append(kernel)
+    return actors, kernels
+
+
+def _build_actor(
+    actor_spec: dict[str, Any],
+    *,
+    library: ComponentLibrary,
+    credentials: CredentialProviderPort | None,
+) -> ActorPort:
+    """Build an actor with library-fill and Convention-DI.
+
+    Any actor whose constructor declares a ``credentials`` keyword
+    gets the shared :class:`CredentialProviderPort`; actors that
+    don't declare it (e.g. :class:`~src.actor.echo.EchoActor`) are
+    untouched. An explicit value in the spec wins over the
+    auto-injection.
+
+    Note: the model catalog is *not* injected into actors. Actors
+    are drivers -- they report token counts; the future ``LLMKernel``
+    consults the catalog to compute cost.
+    """
+    import inspect
+
+    enriched = _apply_library_defaults(
+        actor_spec, category="actor", library=library
+    )
+
+    cls = _resolve_actor_class(enriched)
+    try:
+        sig = inspect.signature(cls)
+    except (ValueError, TypeError):
+        sig = None
+
+    extras: dict[str, Any] = {}
+    if (
+        credentials is not None
+        and "credentials" not in enriched
+        and sig is not None
+        and "credentials" in sig.parameters
+    ):
+        extras["credentials"] = credentials
+
+    return build(enriched, **extras)
+
+
+def _resolve_actor_class(spec: dict[str, Any]) -> type:
+    """Peek the registered/imported class without consuming the spec."""
+    from src.registry import _import_class, get  # type: ignore[attr-defined]
+
+    if "class" in spec:
+        cls_path = spec["class"]
+        if not isinstance(cls_path, str):
+            raise ConfigError(
+                "actor.class must be a dotted path string"
+            )
+        return _import_class(cls_path)
+    if "name" in spec:
+        name = spec["name"]
+        if not isinstance(name, str):
+            raise ConfigError("actor.name must be a string")
+        return get(name)
+    raise ConfigError(
+        "actor needs either a 'name' or a 'class' key"
+    )
+
+
+def _build_channels(
+    channel_specs: list[dict[str, Any]],
+    *,
+    library: ComponentLibrary,
+) -> list[ChannelPort]:
+    out: list[ChannelPort] = []
+    for index, spec in enumerate(channel_specs):
+        component = _build_with_library(
+            spec, category="channel", library=library
+        )
+        if not isinstance(component, ChannelPort):
+            raise ConfigError(
+                f"channel #{index} ({type(component).__name__}) does "
+                "not implement ChannelPort"
+            )
+        if not isinstance(component, RobotComponent):
+            raise ConfigError(
+                f"channel #{index} ({type(component).__name__}) does "
+                "not implement RobotComponent"
+            )
+        out.append(component)
+    return out
+
+
+def _build_components_list(
+    spec: Any,
+    *,
+    section_name: str,
+    expected_category: ComponentCategory,
+    library: ComponentLibrary,
+) -> list[RobotComponent]:
+    """Build a list of components from a category-keyed YAML section.
+
+    Used for ``utility:`` and ``bus_utility:``. Each entry is a
+    regular component spec (resolved via :func:`build` with library
+    defaults). The builder verifies the resulting component's
+    category matches the section so a misconfigured channel can't
+    sneak into the utility list and vice versa.
+    """
+    if spec is None:
+        return []
+    if not isinstance(spec, list):
+        raise ConfigError(
+            f"robot.yaml#{section_name} must be a list of component specs"
+        )
+    out: list[RobotComponent] = []
+    for index, item in enumerate(spec):
+        if not isinstance(item, dict):
+            raise ConfigError(
+                f"robot.yaml#{section_name}[{index}] must be a mapping"
+            )
+        component = _build_with_library(
+            item, category=section_name, library=library
+        )
+        if not isinstance(component, RobotComponent):
+            raise ConfigError(
+                f"{section_name}#{index} ({type(component).__name__}) "
+                f"does not implement RobotComponent"
+            )
+        if component.component_category is not expected_category:
+            raise ConfigError(
+                f"{section_name}#{index} resolved to "
+                f"{type(component).__name__} with category "
+                f"{component.component_category.value}; expected "
+                f"{expected_category.value}"
+            )
+        out.append(component)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Credentials
+# ---------------------------------------------------------------------------
 
 
 def _build_credential_provider(
@@ -265,11 +729,10 @@ def _build_credential_provider(
       least ``type:``; supported types today are ``env`` (with a
       ``path:``) and ``process-env``.
 
-    The provider is registered as a :class:`RobotComponent` and
-    will be started by the robot during the ``BUS_UTILITY`` boot
-    phase. The builder uses it synchronously *now*, before the
-    robot lifecycle even runs, so substitution can fail loud and
-    early.
+    The provider is registered as a :class:`RobotComponent` and will
+    be started by the robot during the ``BUS_UTILITY`` boot phase.
+    The builder uses it synchronously *now*, before the robot
+    lifecycle even runs, so substitution can fail loud and early.
     """
     stores: list[CredentialStorePort] = []
     if spec is None:
@@ -303,9 +766,9 @@ def _default_credential_stores(
     """The default store chain when no ``credentials:`` section exists.
 
     Order: bot-local ``.env`` -> global ``~/.cephix/.env`` ->
-    ``os.environ``. Missing files are tolerated; the global home
-    is created on demand by :func:`home_dir` so the global store
-    always has a path even if the file is empty.
+    ``os.environ``. Missing files are tolerated; the global home is
+    created on demand by :func:`home_dir` so the global store always
+    has a path even if the file is empty.
     """
     out: list[CredentialStorePort] = []
     if workspace is not None:
@@ -379,144 +842,45 @@ def _build_credential_store(
     )
 
 
-def _build_components_list(
-    spec: Any,
-    *,
-    section_name: str,
-    expected_category: ComponentCategory,
-) -> list[RobotComponent]:
-    """Build a list of components from a category-keyed YAML section.
-
-    Layout (Variant A from the design discussion)::
-
-        utility:
-          - name: model-catalog
-          - name: tokenizer-cache  # future
-        bus_utility:
-          - name: cost-aggregator  # future
-          - name: credentials-broker  # future
-
-    Each entry is a regular component spec (resolved via
-    :func:`build`). The builder verifies the resulting component's
-    category matches the section so a misconfigured channel can't
-    sneak into the utility list and vice versa.
-    """
-    if spec is None:
-        return []
-    if not isinstance(spec, list):
-        raise ConfigError(
-            f"robot.yaml#{section_name} must be a list of component specs"
-        )
-    out: list[RobotComponent] = []
-    for index, item in enumerate(spec):
-        component = build(item)
-        if not isinstance(component, RobotComponent):
-            raise ConfigError(
-                f"{section_name}#{index} ({type(component).__name__}) "
-                f"does not implement RobotComponent"
-            )
-        if component.component_category is not expected_category:
-            raise ConfigError(
-                f"{section_name}#{index} resolved to "
-                f"{type(component).__name__} with category "
-                f"{component.component_category.value}; expected "
-                f"{expected_category.value}"
-            )
-        out.append(component)
-    return out
-
-
-def _build_actor(
-    actor_spec: Any,
-    *,
-    credentials: CredentialProviderPort | None = None,
-) -> ActorPort:
-    """Build the actor, injecting credentials by Convention-DI.
-
-    Any actor whose constructor declares a ``credentials`` keyword
-    gets the shared :class:`CredentialProviderPort`; actors that
-    don't declare it (e.g. :class:`~src.actor.echo.EchoActor`) are
-    untouched. An explicit value in the YAML spec wins over the
-    auto-injection.
-
-    Note: the model catalog is *not* injected into actors. Actors
-    are drivers -- they report token counts; the future
-    ``LLMKernel`` consults the catalog to compute cost. Catalog
-    injection happens at kernel construction (once the LLMKernel
-    lands), not here.
-    """
-    import inspect
-
-    if not isinstance(actor_spec, dict):
-        raise ConfigError("robot.yaml#actor must be a mapping")
-    actor_spec = dict(actor_spec)
-
-    cls = _resolve_actor_class(actor_spec)
-    try:
-        sig = inspect.signature(cls)
-    except (ValueError, TypeError):
-        sig = None
-
-    extras: dict[str, Any] = {}
-    if (
-        credentials is not None
-        and "credentials" not in actor_spec
-        and sig is not None
-        and "credentials" in sig.parameters
-    ):
-        extras["credentials"] = credentials
-
-    return build(actor_spec, **extras)
-
-
-def _resolve_actor_class(spec: dict[str, Any]) -> type:
-    """Peek the registered/imported class without consuming the spec."""
-    from src.registry import _import_class, get  # type: ignore[attr-defined]
-
-    if "class" in spec:
-        cls_path = spec["class"]
-        if not isinstance(cls_path, str):
-            raise ConfigError(
-                "robot.yaml#actor.class must be a dotted path string"
-            )
-        return _import_class(cls_path)
-    if "name" in spec:
-        name = spec["name"]
-        if not isinstance(name, str):
-            raise ConfigError("robot.yaml#actor.name must be a string")
-        return get(name)
-    raise ConfigError(
-        "robot.yaml#actor needs either a 'name' or a 'class' key"
-    )
+# ---------------------------------------------------------------------------
+# Observers (persistence, telemetry, audit) and the control plane
+# ---------------------------------------------------------------------------
 
 
 def _build_persistence_provider(
     spec: Any,
     workspace: str | Path | None,
+    *,
+    library: ComponentLibrary,
 ) -> PersistenceProvider | None:
     """Build the robot-wide :class:`PersistenceProvider`.
 
-    Returns ``None`` when persistence is explicitly disabled or when
-    no usable root can be derived (no explicit path *and* no
-    workspace). Components that depend on the provider take ``None``
-    as "no persistence configured" and skip themselves with an info
-    log -- the boot succeeds either way.
+    Returns ``None`` when no spec is present (the slot was deleted /
+    never declared) or when no usable root can be derived (no
+    explicit path *and* no workspace). Components that depend on the
+    provider take ``None`` as "no persistence configured" and skip
+    themselves with an info log -- the boot succeeds either way.
+
+    Library defaults under ``components.persistence[name=jsonl]``
+    fill missing fields (today: ``path: logs``).
     """
     if spec is None:
-        spec = {}
+        return None
     if not isinstance(spec, dict):
         raise ConfigError("robot.yaml#persistence must be a mapping")
-    if not bool(spec.get("enabled", True)):
-        return None
 
-    name = str(spec.get("name", "jsonl"))
+    enriched = _apply_library_defaults(
+        spec, category="persistence", library=library
+    )
+
+    name = str(enriched.get("name", "jsonl"))
     if name != "jsonl":
         raise ConfigError(
             f"unknown persistence backend {name!r}; "
             "the only built-in persistence backend is 'jsonl'"
         )
 
-    raw_path = spec.get("path", "logs")
+    raw_path = enriched.get("path", "logs")
     candidate = Path(str(raw_path)).expanduser()
     if not candidate.is_absolute():
         if workspace is None:
@@ -529,22 +893,25 @@ def _build_persistence_provider(
 def _build_telemetry(
     spec: Any,
     persistence: PersistenceProvider | None,
+    *,
+    library: ComponentLibrary,
 ) -> BusRecorder | None:
     """Build the telemetry component from ``robot.yaml#telemetry``.
 
-    Returns ``None`` when telemetry is explicitly disabled or when no
-    persistence provider is available -- without somewhere to write
-    to, a recorder is a passive observer with side effects and
-    nothing more.
+    Returns ``None`` when the slot is absent or no persistence is
+    available -- without a sink, the recorder is a passive observer
+    with side effects and nothing more.
     """
     if spec is None:
-        spec = {}
+        return None
     if not isinstance(spec, dict):
         raise ConfigError("robot.yaml#telemetry must be a mapping")
-    if not bool(spec.get("enabled", True)):
-        return None
 
-    name = str(spec.get("name", "bus_recorder"))
+    enriched = _apply_library_defaults(
+        spec, category="telemetry", library=library
+    )
+
+    name = str(enriched.get("name", "bus_recorder"))
     if name != "bus_recorder":
         raise ConfigError(
             f"unknown telemetry component {name!r}; "
@@ -553,28 +920,32 @@ def _build_telemetry(
 
     if persistence is None:
         logger.info(
-            "telemetry enabled but no persistence configured; "
+            "telemetry configured but no persistence available; "
             "skipping BusRecorder"
         )
         return None
 
-    channel = str(spec.get("channel", _DEFAULT_TELEMETRY_CHANNEL))
+    channel = str(enriched.get("channel", _DEFAULT_TELEMETRY_CHANNEL))
     return BusRecorder(sink=persistence.open(channel))
 
 
 def _build_audit(
     spec: Any,
     persistence: PersistenceProvider | None,
+    *,
+    library: ComponentLibrary,
 ) -> AuditNoteSink | None:
     """Build the audit component from ``robot.yaml#audit``."""
     if spec is None:
-        spec = {}
+        return None
     if not isinstance(spec, dict):
         raise ConfigError("robot.yaml#audit must be a mapping")
-    if not bool(spec.get("enabled", True)):
-        return None
 
-    name = str(spec.get("name", "audit_note_sink"))
+    enriched = _apply_library_defaults(
+        spec, category="audit", library=library
+    )
+
+    name = str(enriched.get("name", "audit_note_sink"))
     if name != "audit_note_sink":
         raise ConfigError(
             f"unknown audit component {name!r}; "
@@ -583,28 +954,48 @@ def _build_audit(
 
     if persistence is None:
         logger.info(
-            "audit enabled but no persistence configured; "
+            "audit configured but no persistence available; "
             "skipping AuditNoteSink"
         )
         return None
 
-    channel = str(spec.get("channel", _DEFAULT_AUDIT_CHANNEL))
+    channel = str(enriched.get("channel", _DEFAULT_AUDIT_CHANNEL))
     return AuditNoteSink(sink=persistence.open(channel))
 
 
-def _control_plane_config(spec: Any) -> ControlPlaneConfig:
-    """Translate a ``control_plane:`` YAML block into a config dataclass."""
+def _control_plane_config(
+    spec: Any, *, library: ComponentLibrary
+) -> ControlPlaneConfig:
+    """Translate a ``control_plane:`` YAML block into a config dataclass.
+
+    A missing slot returns the all-defaults
+    :class:`ControlPlaneConfig` (enabled, 127.0.0.1:9876). Library
+    defaults under ``components.control_plane[name=control_plane]``
+    fill missing fields.
+    """
     if spec is None:
         return ControlPlaneConfig()
     if not isinstance(spec, dict):
         raise ConfigError("robot.yaml#control_plane must be a mapping")
 
-    enabled = bool(spec.get("enabled", True))
-    host = str(spec.get("host", "127.0.0.1"))
-    port = int(spec.get("port", 9876))
-    path = str(spec.get("path", "/control"))
+    enriched = _apply_library_defaults(
+        spec, category="control_plane", library=library
+    )
 
-    raw_range = spec.get("port_range") or [9876, 9999]
+    name = enriched.get("name", "control_plane")
+    if name != "control_plane":
+        raise ConfigError(
+            f"unknown control_plane component {name!r}; "
+            "the only built-in control_plane component is "
+            "'control_plane'"
+        )
+
+    enabled = bool(enriched.get("enabled", True))
+    host = str(enriched.get("host", "127.0.0.1"))
+    port = int(enriched.get("port", 9876))
+    path = str(enriched.get("path", "/control"))
+
+    raw_range = enriched.get("port_range") or [9876, 9999]
     if (
         not isinstance(raw_range, (list, tuple))
         or len(raw_range) != 2

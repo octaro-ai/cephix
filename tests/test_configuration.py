@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from src.configuration import (
+    ComponentLibrary,
     deep_merge,
     default_workspace_for,
     discover_robots,
@@ -120,10 +121,20 @@ def test_save_home_config_round_trip(tmp_path: Path) -> None:
 def test_home_defaults_returns_block(tmp_path: Path) -> None:
     ensure_home_config(tmp_path)
     block = home_defaults(tmp_path)
-    assert "kernel" in block
-    assert block["kernel"]["name"] == "base"
-    assert "actor" in block
-    assert block["actor"]["name"] == "echo"
+    # New schema: defaults split into templates (named blueprints) and
+    # components (per-name field defaults). The legacy flat layout is
+    # gone -- the home file is regenerated from packaged defaults
+    # whenever it's missing, so this test sees the new schema.
+    assert "templates" in block
+    assert "components" in block
+
+    default_template = block["templates"]["default"]
+    assert default_template["kernel"]["name"] == "base"
+    assert default_template["kernel"]["actor"]["name"] == "echo"
+
+    actor_lib = {entry["name"]: entry for entry in block["components"]["actor"]}
+    assert "echo" in actor_lib
+    assert actor_lib["echo"]["prefix"] == "echo: "
 
 
 # ---------------------------------------------------------------------------
@@ -260,42 +271,85 @@ def test_deep_merge_preserves_originals() -> None:
     assert override == {"k": {"b": 2}}
 
 
-def test_deep_merge_replaces_subdict_when_name_discriminator_differs() -> None:
-    """Different ``name`` => different component => no field carry-over.
+# ---------------------------------------------------------------------------
+# ComponentLibrary
+# ---------------------------------------------------------------------------
+#
+# The library replaces the old "deep_merge with discriminator rule" hack:
+# component-name semantics now live where they belong (in the build
+# pipeline, indexed explicitly), not as a hidden behaviour inside a
+# generic merge primitive.
 
-    Concrete case: home defaults define ``actor: {name: echo, prefix: 'x'}``;
-    a robot.yaml overrides with ``actor: {name: llm.openai, model_id: y}``.
-    ``prefix`` belongs to ``EchoActor`` only and must not survive the merge,
-    or the registry rejects it as an unknown parameter.
-    """
-    base = {"actor": {"name": "echo", "prefix": "echo: "}}
-    override = {
-        "actor": {"name": "llm.openai", "model_id": "gpt-5.5", "api_key": "k"}
-    }
-    merged = deep_merge(base, override)
-    assert merged == {
-        "actor": {
-            "name": "llm.openai",
-            "model_id": "gpt-5.5",
-            "api_key": "k",
+
+def test_component_library_indexes_by_category_and_name() -> None:
+    lib = ComponentLibrary(
+        {
+            "actor": [
+                {"name": "echo", "prefix": "echo: "},
+                {"name": "llm.openai", "provider": "openai", "timeout": 60.0},
+            ],
+            "kernel": [{"name": "base", "actor_timeout": 30.0}],
         }
+    )
+    assert lib.defaults_for("actor", "echo") == {"prefix": "echo: "}
+    assert lib.defaults_for("actor", "llm.openai") == {
+        "provider": "openai",
+        "timeout": 60.0,
     }
+    assert lib.defaults_for("kernel", "base") == {"actor_timeout": 30.0}
 
 
-def test_deep_merge_combines_subdict_when_name_matches() -> None:
-    """Same ``name`` => same component => fill missing fields from defaults."""
-    base = {"actor": {"name": "echo", "prefix": "echo: "}}
-    override = {"actor": {"name": "echo"}}
-    merged = deep_merge(base, override)
-    assert merged == {"actor": {"name": "echo", "prefix": "echo: "}}
+def test_component_library_returns_empty_dict_for_unknown_entry() -> None:
+    """An unknown (category, name) is not a hard error -- the build
+    pipeline falls back to whatever the spec already carries."""
+    lib = ComponentLibrary({"actor": [{"name": "echo", "prefix": "x"}]})
+    assert lib.defaults_for("actor", "ghost") == {}
+    assert lib.defaults_for("nonexistent_category", "echo") == {}
 
 
-def test_deep_merge_combines_subdict_when_override_omits_name() -> None:
-    """Override without ``name`` => still the same component => merge fields."""
-    base = {"actor": {"name": "echo", "prefix": "echo: "}}
-    override = {"actor": {"prefix": "boom: "}}
-    merged = deep_merge(base, override)
-    assert merged == {"actor": {"name": "echo", "prefix": "boom: "}}
+def test_component_library_isolates_returned_dict() -> None:
+    """``defaults_for`` returns a fresh dict each call -- mutating it
+    must not corrupt the library's state."""
+    lib = ComponentLibrary({"actor": [{"name": "echo", "prefix": "x"}]})
+    first = lib.defaults_for("actor", "echo")
+    first["prefix"] = "polluted"
+    assert lib.defaults_for("actor", "echo") == {"prefix": "x"}
+
+
+def test_component_library_rejects_duplicate_name_per_category() -> None:
+    """Two entries with the same name silently shadow each other; the
+    library refuses ambiguity at construction time."""
+    with pytest.raises(ValueError, match="duplicate"):
+        ComponentLibrary(
+            {
+                "actor": [
+                    {"name": "echo", "prefix": "first"},
+                    {"name": "echo", "prefix": "second"},
+                ]
+            }
+        )
+
+
+def test_component_library_rejects_entry_without_name() -> None:
+    with pytest.raises(ValueError, match="name"):
+        ComponentLibrary({"actor": [{"prefix": "echo: "}]})
+
+
+def test_component_library_rejects_non_list_category() -> None:
+    with pytest.raises(ValueError, match="list"):
+        ComponentLibrary({"actor": {"name": "echo"}})
+
+
+def test_component_library_accepts_none_category() -> None:
+    """``components.actor: null`` is a no-op: an empty category."""
+    lib = ComponentLibrary({"actor": None})
+    assert lib.defaults_for("actor", "echo") == {}
+
+
+def test_component_library_accepts_none_root() -> None:
+    """No ``components:`` block at all is allowed (every lookup empty)."""
+    lib = ComponentLibrary(None)
+    assert lib.defaults_for("actor", "echo") == {}
 
 
 # ---------------------------------------------------------------------------

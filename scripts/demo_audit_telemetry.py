@@ -40,10 +40,20 @@ logger = logging.getLogger("demo")
 ROBOT_YAML = {
     "id": "demo",
     "name": "Demo Bot",
-    "kernel": {"type": "base", "actor_timeout": 5.0},
-    "actor": {"type": "echo", "prefix": "echo: "},
+    # Demo runs without going through home defaults, so every slot
+    # is declared inline. In production, `template: default` would
+    # supply most of these.
+    "bus": {"name": "asyncio"},
+    "persistence": {"name": "jsonl"},
+    "telemetry": {"name": "bus_recorder"},
+    "audit": {"name": "audit_note_sink"},
+    "kernel": {
+        "name": "base",
+        "actor_timeout": 5.0,
+        "actor": {"name": "echo", "prefix": "echo: "},
+    },
     "channels": [
-        {"type": "websocket", "host": "127.0.0.1", "port": 0, "path": "/ws"}
+        {"name": "websocket", "host": "127.0.0.1", "port": 0, "path": "/ws"}
     ],
     "control_plane": {"enabled": False},
 }
