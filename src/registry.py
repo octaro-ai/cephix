@@ -204,6 +204,7 @@ def _register_builtins() -> None:
     from src.credentials.provider import CredentialProvider
     from src.kernel.base import BaseKernel
     from src.kernel.chat import ChatKernel
+    from src.persistence.provider import JsonlPersistenceProvider
 
     register(AsyncioBus)
     register(BaseKernel)
@@ -211,6 +212,7 @@ def _register_builtins() -> None:
     register(ChatKernel)
     register(CredentialProvider)
     register(EchoActor)
+    register(JsonlPersistenceProvider)
     register(JsonlSessionStore)
     register(LLMActorOpenAI)
     register(MarkdownFirmwareStore)

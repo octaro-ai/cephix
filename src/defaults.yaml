@@ -52,9 +52,17 @@ defaults:
     # audit, control_plane).
     default:
       bus: {name: asyncio}
-      persistence: {name: jsonl}
-      telemetry: {name: bus_recorder}
-      audit: {name: audit_note_sink}
+      # Single persistence provider; observers (telemetry, audit) pick
+      # it up automatically as the default. To run multiple providers
+      # (filesystem + DB / Supabase), declare a list with explicit
+      # ``id:`` values and reference one via ``persistence: <id>`` on
+      # the observer entry.
+      persistence:
+        - {name: jsonl}
+      telemetry:
+        - {name: bus_recorder}
+      audit:
+        - {name: audit_note_sink}
       control_plane: {name: control_plane}
       kernel:
         name: base
@@ -79,7 +87,8 @@ defaults:
     # store) are wired by convention from the `utility:` list.
     chatbot:
       bus: {name: asyncio}
-      persistence: {name: jsonl}
+      persistence:
+        - {name: jsonl}
       telemetry:
         - {name: bus_recorder}
         # Boots at the telemetry level so it is subscribed before any
@@ -88,7 +97,8 @@ defaults:
         # component self-announces into the retained harness.capabilities
         # manifest, so channels/UIs render a failsafe, dynamic surface.
         - {name: capability-collector}
-      audit: {name: audit_note_sink}
+      audit:
+        - {name: audit_note_sink}
       control_plane: {name: control_plane}
       utility:
         - {name: model-catalog}

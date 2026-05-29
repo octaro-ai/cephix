@@ -227,13 +227,29 @@ def build_robot_from_config(
     )
     channels = _build_channels(channel_specs, library=library)
 
-    persistence = _build_persistence_provider(
+    persistence = _build_persistence_components(
         cfg.get("persistence"), workspace, library=library
     )
-    telemetry_components = _build_telemetry_components(
-        cfg.get("telemetry"), persistence, library=library
+    telemetry_components = _build_observer_components(
+        cfg.get("telemetry"),
+        slot="telemetry",
+        expected_category=ComponentCategory.TELEMETRY,
+        default_name="bus_recorder",
+        default_channel=_DEFAULT_TELEMETRY_CHANNEL,
+        sink_bound_names={"bus_recorder": BusRecorder},
+        persistence=persistence,
+        library=library,
     )
-    audit = _build_audit(cfg.get("audit"), persistence, library=library)
+    audit_components = _build_observer_components(
+        cfg.get("audit"),
+        slot="audit",
+        expected_category=ComponentCategory.AUDIT,
+        default_name="audit_note_sink",
+        default_channel=_DEFAULT_AUDIT_CHANNEL,
+        sink_bound_names={"audit_note_sink": AuditNoteSink},
+        persistence=persistence,
+        library=library,
+    )
 
     robot_id_raw = robot_yaml.get("id")
     robot_name_raw = robot_yaml.get("name")
@@ -253,15 +269,15 @@ def build_robot_from_config(
     components: list[RobotComponent] = [
         bus,
         credentials,
+        *persistence.values(),
         *actors,
         *kernels,
         *utilities,
         *bus_utilities,
         *channels,
         *telemetry_components,
+        *audit_components,
     ]
-    if audit is not None:
-        components.append(audit)
 
     return Robot(
         identity=identity,
@@ -989,99 +1005,95 @@ def _build_credential_store(
 # ---------------------------------------------------------------------------
 
 
-def _build_persistence_provider(
+_DEFAULT_PERSISTENCE_ID = "default"
+
+
+def _build_persistence_components(
     spec: Any,
     workspace: str | Path | None,
     *,
     library: ComponentLibrary,
-) -> PersistenceProvider | None:
-    """Build the robot-wide :class:`PersistenceProvider`.
+) -> dict[str, RobotComponent]:
+    """Build persistence components from ``robot.yaml#persistence``.
 
-    Returns ``None`` when no spec is present (the slot was deleted /
-    never declared) or when no usable root can be derived (no
-    explicit path *and* no workspace). Components that depend on the
-    provider take ``None`` as "no persistence configured" and skip
-    themselves with an info log -- the boot succeeds either way.
+    Returns a mapping ``id -> component`` so observers can reference a
+    specific provider by id (e.g. ``telemetry: - {name: bus_recorder,
+    persistence: cloud}``). Singular and list shapes are both accepted;
+    a singular spec implicitly gets ``id: "default"``. A list may mix
+    backends (the only one shipping today is ``jsonl``; future entries
+    might be ``sqlite``, ``supabase``, ``s3``, or a composite).
 
-    Library defaults under ``components.persistence[name=jsonl]``
-    fill missing fields (today: ``path: logs``).
+    An empty result means "no persistence configured". Components that
+    depend on the provider check the mapping and skip themselves with
+    an info log when nothing is available, so the boot succeeds either
+    way.
+
+    Library defaults under ``components.persistence[name=<name>]`` fill
+    missing fields (today: ``path: logs`` for ``jsonl``).
     """
-    if spec is None:
-        return None
-    if not isinstance(spec, dict):
-        raise ConfigError("robot.yaml#persistence must be a mapping")
-
-    enriched = _apply_library_defaults(
-        spec, category="persistence", library=library
-    )
-
-    name = str(enriched.get("name", "jsonl"))
-    if name != "jsonl":
-        raise ConfigError(
-            f"unknown persistence backend {name!r}; "
-            "the only built-in persistence backend is 'jsonl'"
-        )
-
-    raw_path = enriched.get("path", "logs")
-    candidate = Path(str(raw_path)).expanduser()
-    if not candidate.is_absolute():
-        if workspace is None:
-            return None
-        candidate = Path(workspace) / candidate
-
-    return JsonlPersistenceProvider(candidate)
-
-
-def _build_telemetry_components(
-    spec: Any,
-    persistence: PersistenceProvider | None,
-    *,
-    library: ComponentLibrary,
-) -> list[RobotComponent]:
-    """Build the telemetry-level observers from ``robot.yaml#telemetry``.
-
-    The ``telemetry`` slot accepts either a single mapping (the common
-    ``{name: bus_recorder}`` case) or a list of mappings. Telemetry is
-    the boot level for read-mostly, bus-wide observers that must come up
-    right after the bus -- today the ``bus_recorder`` and the
-    ``capability-collector`` (which has to be subscribed before anyone
-    announces capabilities).
-
-    Heterogeneous construction: the ``bus_recorder`` is sink-bound and
-    is skipped when no persistence is available (a recorder with no sink
-    is a no-op). Every other telemetry component (e.g. the
-    ``capability-collector``) is built generically via the library and
-    needs no sink, so it is built regardless of persistence. Each
-    resulting component's category is verified to be ``TELEMETRY``.
-    """
-    out: list[RobotComponent] = []
-    for entry in _normalize_observer_specs(spec, slot="telemetry"):
+    entries = _normalize_observer_specs(spec, slot="persistence")
+    out: dict[str, RobotComponent] = {}
+    used_ids: set[str] = set()
+    for index, entry in enumerate(entries):
         enriched = _apply_library_defaults(
-            entry, category="telemetry", library=library
+            entry, category="persistence", library=library
         )
-        name = str(enriched.get("name", "bus_recorder"))
-        if name == "bus_recorder":
-            if persistence is None:
-                logger.info(
-                    "telemetry configured but no persistence available; "
-                    "skipping BusRecorder"
-                )
-                continue
-            channel = str(enriched.get("channel", _DEFAULT_TELEMETRY_CHANNEL))
-            out.append(BusRecorder(sink=persistence.open(channel)))
-            continue
 
-        component = _build_with_library(
-            entry, category="telemetry", library=library
-        )
-        if component.component_category is not ComponentCategory.TELEMETRY:
+        name = str(enriched.get("name", "jsonl"))
+        if name != "jsonl":
             raise ConfigError(
-                f"telemetry component {name!r} resolved to "
-                f"{type(component).__name__} with category "
-                f"{component.component_category.value}; expected telemetry"
+                f"unknown persistence backend {name!r}; "
+                "the only built-in persistence backend today is 'jsonl'"
             )
-        out.append(component)
+
+        # ``id`` discriminator: explicit if provided, else "default"
+        # for a single entry, else the entry's index as a string. We
+        # reject duplicates so observers can rely on the mapping.
+        explicit_id = enriched.get("id")
+        if explicit_id is not None:
+            persistence_id = str(explicit_id)
+        elif len(entries) == 1:
+            persistence_id = _DEFAULT_PERSISTENCE_ID
+        else:
+            persistence_id = str(index)
+        if persistence_id in used_ids:
+            raise ConfigError(
+                f"persistence[{index}] re-uses id {persistence_id!r}; "
+                "each persistence entry needs a unique id when more "
+                "than one is declared"
+            )
+        used_ids.add(persistence_id)
+
+        raw_path = enriched.get("path", "logs")
+        candidate = Path(str(raw_path)).expanduser()
+        if not candidate.is_absolute():
+            if workspace is None:
+                # No usable root for this entry; skip it silently so a
+                # robot without workspace still boots (other entries
+                # may still be valid if they use absolute paths).
+                continue
+            candidate = Path(workspace) / candidate
+
+        out[persistence_id] = JsonlPersistenceProvider(candidate)
     return out
+
+
+def _resolve_default_persistence(
+    persistence: dict[str, RobotComponent],
+) -> RobotComponent | None:
+    """Pick the implicit default when an observer omits ``persistence:``.
+
+    Rule: a single configured provider is the default. With two or
+    more, an observer must declare ``persistence: <id>`` explicitly --
+    we refuse to guess which storage gets the writes.
+    """
+    if not persistence:
+        return None
+    if len(persistence) == 1:
+        return next(iter(persistence.values()))
+    if _DEFAULT_PERSISTENCE_ID in persistence:
+        return persistence[_DEFAULT_PERSISTENCE_ID]
+    return None
 
 
 def _normalize_observer_specs(spec: Any, *, slot: str) -> list[dict[str, Any]]:
@@ -1089,7 +1101,7 @@ def _normalize_observer_specs(spec: Any, *, slot: str) -> list[dict[str, Any]]:
     if spec is None:
         return []
     if isinstance(spec, dict):
-        return [spec]
+        return [dict(spec)]
     if isinstance(spec, list):
         for index, entry in enumerate(spec):
             if not isinstance(entry, dict):
@@ -1102,38 +1114,112 @@ def _normalize_observer_specs(spec: Any, *, slot: str) -> list[dict[str, Any]]:
     )
 
 
-def _build_audit(
+def _build_observer_components(
     spec: Any,
-    persistence: PersistenceProvider | None,
     *,
+    slot: str,
+    expected_category: ComponentCategory,
+    default_name: str,
+    default_channel: str,
+    sink_bound_names: dict[str, type[RobotComponent]],
+    persistence: dict[str, RobotComponent],
     library: ComponentLibrary,
-) -> AuditNoteSink | None:
-    """Build the audit component from ``robot.yaml#audit``."""
-    if spec is None:
-        return None
-    if not isinstance(spec, dict):
-        raise ConfigError("robot.yaml#audit must be a mapping")
+) -> list[RobotComponent]:
+    """Build a list of observer components for one slot (``telemetry`` /
+    ``audit``).
 
-    enriched = _apply_library_defaults(
-        spec, category="audit", library=library
-    )
+    Both slots are kind-aliased lists of bus-attached observers that
+    write through a :class:`PersistenceProvider`. Shape parity with
+    ``kernel`` / ``channel``: singular mapping or list, both valid.
 
-    name = str(enriched.get("name", "audit_note_sink"))
-    if name != "audit_note_sink":
-        raise ConfigError(
-            f"unknown audit component {name!r}; "
-            "the only built-in audit component is 'audit_note_sink'"
+    Two flavours of entries:
+
+    - **Sink-bound observers** -- names listed in ``sink_bound_names``
+      (today: ``bus_recorder`` for telemetry, ``audit_note_sink`` for
+      audit). Constructed via the mapped class with
+      ``sink=persistence_provider.open(channel)``. The persistence
+      provider is selected by an optional ``persistence: <id>`` field;
+      a single configured provider is the implicit default. When no
+      persistence is configured, sink-bound observers are skipped
+      with an info log (instead of failing the boot).
+    - **Regular bus-attached observers** -- any other name resolves
+      through the registry like a normal component. Constructed via
+      :func:`_build_with_library`. The result must have the slot's
+      expected category, otherwise the build aborts.
+    """
+    out: list[RobotComponent] = []
+    for entry in _normalize_observer_specs(spec, slot=slot):
+        # Slot has a canonical default name (``bus_recorder`` /
+        # ``audit_note_sink``), so an entry that only overrides a
+        # field (e.g. ``{channel: raw-events}``) still resolves.
+        if "name" not in entry:
+            entry = {"name": default_name, **entry}
+        enriched = _apply_library_defaults(
+            entry, category=slot, library=library
         )
+        name = str(enriched.get("name", ""))
+        if not name:
+            raise ConfigError(f"{slot} entry must declare a 'name'")
 
-    if persistence is None:
-        logger.info(
-            "audit configured but no persistence available; "
-            "skipping AuditNoteSink"
+        sink_class = sink_bound_names.get(name)
+        if sink_class is not None:
+            provider = _select_persistence(enriched, persistence, slot=slot)
+            if provider is None:
+                logger.info(
+                    "%s configured but no persistence available; "
+                    "skipping %s",
+                    slot,
+                    sink_class.__name__,
+                )
+                continue
+            channel = str(enriched.get("channel", default_channel))
+            out.append(sink_class(sink=provider.open(channel)))  # type: ignore[call-arg, attr-defined]
+            continue
+
+        component = _build_with_library(
+            enriched, category=slot, library=library
         )
-        return None
+        if component.component_category is not expected_category:
+            raise ConfigError(
+                f"{slot} component {name!r} resolved to "
+                f"{type(component).__name__} with category "
+                f"{component.component_category.value}; expected "
+                f"{expected_category.value}"
+            )
+        out.append(component)
+    return out
 
-    channel = str(enriched.get("channel", _DEFAULT_AUDIT_CHANNEL))
-    return AuditNoteSink(sink=persistence.open(channel))
+
+def _select_persistence(
+    spec: dict[str, Any],
+    persistence: dict[str, RobotComponent],
+    *,
+    slot: str,
+) -> RobotComponent | None:
+    """Pick the persistence provider an observer entry asks for.
+
+    Resolution rules:
+
+    - explicit ``persistence: <id>`` on the entry -> exact lookup
+      (missing id is a configuration error, not a silent skip);
+    - no field set and exactly one provider configured -> that one;
+    - no field set and multiple providers -> :func:`_resolve_default_persistence`
+      (returns the ``default``-id provider if present, ``None``
+      otherwise -- which the caller turns into a skipped observer);
+    - no providers at all -> ``None``.
+    """
+    requested = spec.get("persistence")
+    if requested is not None:
+        requested_id = str(requested)
+        provider = persistence.get(requested_id)
+        if provider is None:
+            available = sorted(persistence.keys()) or ["<none>"]
+            raise ConfigError(
+                f"{slot} references persistence id {requested_id!r} "
+                f"which is not configured (available: {available})"
+            )
+        return provider
+    return _resolve_default_persistence(persistence)
 
 
 def _control_plane_config(

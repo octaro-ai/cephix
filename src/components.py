@@ -131,49 +131,53 @@ class ComponentCategory(str, Enum):
     """Coarse role buckets used by the registry, the wizard and the
     robot's lifecycle ordering.
 
-    Five cross-cutting roles are distinguished from regular userspace:
+    Cross-cutting roles distinguished from regular userspace:
 
-    - :attr:`TELEMETRY`: read-only observers that watch *everything*
-      that flows over the bus. Boots immediately after the bus so
-      it captures the full lifetime of every userspace component.
-      The reference implementation is the ``BusRecorder``.
-    - :attr:`AUDIT`: subscribers that record curated, semantic notes
-      published via :meth:`RobotComponent.publish_audit`. Boots right
-      after telemetry so audit notes are captured from the very
-      first userspace event. The reference implementation is the
-      ``AuditNoteSink``.
     - :attr:`UTILITY`: off-bus helpers other components consult
       synchronously during their own ``start()`` -- model catalogs,
-      tokenizers, pure data services, future credential stores
-      *before* they grow a bus interface. No bus dependency at all;
-      the robot owns their lifecycle and publishes
-      :class:`ComponentLifecycle` events on their behalf. Reference
-      implementation is the ``ModelCatalog``.
+      tokenizers, pure data services. No bus dependency at all, so
+      they boot *before* the bus (priority 0): the bus does not need
+      them, but bus-attached components may need them already
+      resolved. Reference implementation is the ``ModelCatalog``.
+    - :attr:`PERSISTENCE`: storage providers (filesystem-backed today,
+      DB / S3 / Supabase later). Bus-attached for lifecycle and
+      health-check, but **not bus-aware** for the data path: writes
+      flow through a direct sink API, not through bus messages.
+      Boots between the bus and telemetry so observers can open
+      their sinks at ``start()``.
+    - :attr:`TELEMETRY`: read-only observers that watch *everything*
+      that flows over the bus. Boots immediately after persistence so
+      it can open sinks and capture the full lifetime of every
+      userspace component. Reference implementations: ``BusRecorder``
+      and the ``CapabilityCollector``.
+    - :attr:`AUDIT`: subscribers that record curated, semantic notes
+      published via :meth:`RobotComponent.publish_audit`. Boots right
+      after telemetry. Reference implementation is the
+      ``AuditNoteSink``.
     - :attr:`BUS_UTILITY`: bus-attached infrastructure that other
       components share at runtime -- a future cost aggregator, a
-      future approval gate, a future credentials broker. Boots
-      between audit and the actor so it is online before any
-      consumer ``start()`` runs. None ship today; the slot is here
-      for the first concrete need.
+      future approval gate, the credential broker. Boots between
+      audit and the actor so it is online before any consumer
+      ``start()`` runs.
     - :attr:`ACTOR`: the entity the kernel consults to turn a curated
       context into a reply. *Not* a bus participant: the kernel
       holds the actor as a direct in-process collaborator and calls
       its :meth:`ActorPort.run` method. Actors are still
-      :class:`RobotComponent`s so the robot owns their lifecycle
-      (handy for subprocess actors, HTTP clients, ...). Reference
-      implementations: :class:`EchoActor`, :class:`MockLLMActor`;
-      later iterations add ``LLMActorOpenAI``, ``LLMActorAnthropic``,
-      ``HumanActor``, ``PlaywrightActor``.
+      :class:`RobotComponent`s so the robot owns their lifecycle.
+      Reference implementations: :class:`EchoActor`,
+      :class:`MockLLMActor`, :class:`LLMActorOpenAI`.
 
     The full boot order is therefore:
-    bus -> telemetry -> audit -> utility -> bus_utility ->
-    actor -> kernel -> channels. Stop runs in the reverse order.
+    utility -> bus -> persistence -> telemetry -> audit ->
+    bus_utility -> actor -> kernel -> channels. Stop runs in the
+    reverse order.
     """
 
+    UTILITY = "utility"
     BUS = "bus"
+    PERSISTENCE = "persistence"
     TELEMETRY = "telemetry"
     AUDIT = "audit"
-    UTILITY = "utility"
     BUS_UTILITY = "bus_utility"
     ACTOR = "actor"
     KERNEL = "kernel"
@@ -186,19 +190,20 @@ class ComponentCategory(str, Enum):
 # a new category here is the single edit needed for new lifecycle
 # stages -- the robot itself does not know about specific categories.
 #
-# Skeleton runs first (BUS), then the cross-cutting observers
-# (TELEMETRY records *everything*, including the boot of AUDIT
-# itself; AUDIT subscribes before any userspace component publishes
-# audit notes), and finally userspace.
+# Renumbered so off-bus utilities come up before the bus (they do not
+# need it and bus-attached components may need them resolved), and
+# persistence sits between the bus and telemetry (telemetry opens its
+# sinks via persistence).
 BOOT_PRIORITY: dict[ComponentCategory, int] = {
-    ComponentCategory.BUS: 0,
-    ComponentCategory.TELEMETRY: 1,
-    ComponentCategory.AUDIT: 2,
-    ComponentCategory.UTILITY: 5,
-    ComponentCategory.BUS_UTILITY: 7,
-    ComponentCategory.ACTOR: 8,
-    ComponentCategory.KERNEL: 10,
-    ComponentCategory.CHANNEL: 20,
+    ComponentCategory.UTILITY: 0,
+    ComponentCategory.BUS: 1,
+    ComponentCategory.PERSISTENCE: 2,
+    ComponentCategory.TELEMETRY: 3,
+    ComponentCategory.AUDIT: 4,
+    ComponentCategory.BUS_UTILITY: 8,
+    ComponentCategory.ACTOR: 9,
+    ComponentCategory.KERNEL: 11,
+    ComponentCategory.CHANNEL: 21,
 }
 
 
@@ -206,22 +211,26 @@ BOOT_PRIORITY: dict[ComponentCategory, int] = {
 # Phase 2 -- before the ``RobotLifecycle`` ``boot`` event is
 # broadcast and before any userspace component starts.
 #
-# Includes the bus itself and any cross-cutting infrastructure that
-# must witness the entire robot lifetime, including the boot:
-#
-# - ``BUS``       -- the routing fabric. ``start()`` with no
-#                    arguments because it *is* the upstream.
-# - ``TELEMETRY`` -- read-all observers (``BusRecorder``). Must
-#                    boot before the lifecycle ``boot`` event is
-#                    published, otherwise the very first lifecycle
-#                    event would be missing from the recording.
+# - ``UTILITY``     -- off-bus helpers. Booted first so anything
+#                      that depends on them is guaranteed a resolved
+#                      reference.
+# - ``BUS``         -- the routing fabric.
+# - ``PERSISTENCE`` -- bus-attached storage provider. Telemetry/audit
+#                      open their sinks via persistence at their own
+#                      ``start()``, so persistence must be up first.
+# - ``TELEMETRY``   -- read-all observers. Must boot before the
+#                      lifecycle ``boot`` event is published,
+#                      otherwise the very first lifecycle event would
+#                      be missing from the recording.
 #
 # ``AUDIT`` is *not* in here on purpose: audit only consumes curated
 # ``RobotAuditNote`` events, which can only be produced by userspace
 # components that themselves boot in Phase 3. There is nothing for
 # audit to record before userspace exists.
 SKELETON_CATEGORIES: frozenset[ComponentCategory] = frozenset({
+    ComponentCategory.UTILITY,
     ComponentCategory.BUS,
+    ComponentCategory.PERSISTENCE,
     ComponentCategory.TELEMETRY,
 })
 

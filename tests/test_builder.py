@@ -389,6 +389,93 @@ def test_builder_observer_null_keeps_other_observer(
     assert any(isinstance(c, AuditNoteSink) for c in robot.components)
 
 
+def test_builder_persistence_is_a_component(tmp_path: Path) -> None:
+    """Since chunk 3 the persistence provider is itself a RobotComponent
+    and lives in robot.components. Boot order: between BUS and TELEMETRY.
+    """
+    from src.components import ComponentCategory
+    from src.persistence import JsonlPersistenceProvider as _Jsonl
+
+    robot = build_robot_from_config(
+        _cfg({"kernel": {"name": "base"}}),
+        workspace=tmp_path,
+    )
+    providers = [c for c in robot.components if isinstance(c, _Jsonl)]
+    assert len(providers) == 1
+    order = list(robot.components)  # boot order
+    bus_pos = next(
+        i for i, c in enumerate(order)
+        if c.component_category is ComponentCategory.BUS
+    )
+    persistence_pos = order.index(providers[0])
+    recorder_pos = next(
+        i for i, c in enumerate(order) if isinstance(c, BusRecorder)
+    )
+    assert bus_pos < persistence_pos < recorder_pos
+
+
+def test_builder_persistence_list_form_with_ids(tmp_path: Path) -> None:
+    """``persistence:`` can be a list with explicit ``id:`` values; an
+    observer references one via ``persistence: <id>``."""
+    robot = build_robot_from_config(
+        _cfg(
+            {
+                "kernel": {"name": "base"},
+                "persistence": [
+                    {"name": "jsonl", "id": "primary", "path": "logs-a"},
+                    {"name": "jsonl", "id": "mirror",  "path": "logs-b"},
+                ],
+                "telemetry": [
+                    {"name": "bus_recorder", "persistence": "mirror"},
+                ],
+                "audit": [
+                    {"name": "audit_note_sink", "persistence": "primary"},
+                ],
+            }
+        ),
+        workspace=tmp_path,
+    )
+    recorder = next(c for c in robot.components if isinstance(c, BusRecorder))
+    audit = next(c for c in robot.components if isinstance(c, AuditNoteSink))
+    assert recorder._sink._path == tmp_path / "logs-b" / "telemetry.jsonl"  # type: ignore[attr-defined]
+    assert audit._sink._path == tmp_path / "logs-a" / "audit.jsonl"  # type: ignore[attr-defined]
+
+
+def test_builder_rejects_unknown_persistence_reference(tmp_path: Path) -> None:
+    from src.registry import ConfigError
+
+    with pytest.raises(ConfigError, match="persistence id"):
+        build_robot_from_config(
+            _cfg(
+                {
+                    "kernel": {"name": "base"},
+                    "persistence": [{"name": "jsonl", "id": "only"}],
+                    "telemetry": [
+                        {"name": "bus_recorder", "persistence": "missing"},
+                    ],
+                }
+            ),
+            workspace=tmp_path,
+        )
+
+
+def test_builder_audit_accepts_list_form(tmp_path: Path) -> None:
+    """``audit:`` accepts a list, parity with ``telemetry`` /
+    ``kernel`` / ``channel``. Same default name applies.
+    """
+    robot = build_robot_from_config(
+        _cfg(
+            {
+                "kernel": {"name": "base"},
+                "audit": [{"channel": "narrative"}],
+            }
+        ),
+        workspace=tmp_path,
+    )
+    audit = next(c for c in robot.components if isinstance(c, AuditNoteSink))
+    assert audit._sink._path == tmp_path / "logs" / "narrative.jsonl"  # type: ignore[attr-defined]
+
+
 def test_builder_uses_explicit_channel_names(tmp_path: Path) -> None:
     """An overridden channel routes the sink to a custom path."""
     robot = build_robot_from_config(
