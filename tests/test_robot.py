@@ -250,13 +250,13 @@ async def test_robot_logs_boot_and_shutdown_narrative(
     # ``Leaving ...``, ``shutdown complete``) are intentionally
     # silenced for readability -- the next "Entering" line and the
     # final "robot offline" already bracket the section. The robot
-    # under test has BUS (priority 1) and KERNEL (priority 11).
-    assert any("Entering Boot Level 1 (BUS)" in m for m in messages)
-    assert any("Entering Boot Level 11 (KERNEL)" in m for m in messages)
+    # under test has BUS (level 4) and KERNEL (level 10).
+    assert any("Entering Boot Level 4 (BUS)" in m for m in messages)
+    assert any("Entering Boot Level 10 (KERNEL)" in m for m in messages)
     # Closing markers are off by convention; assert they stay quiet.
-    assert not any("Boot Level 1 (BUS) complete" in m for m in messages)
-    assert not any("Leaving Boot Level 1 (BUS)" in m for m in messages)
-    assert not any("Boot Level 1 (BUS) shutdown complete" in m for m in messages)
+    assert not any("Boot Level 4 (BUS) complete" in m for m in messages)
+    assert not any("Leaving Boot Level 4 (BUS)" in m for m in messages)
+    assert not any("Boot Level 4 (BUS) shutdown complete" in m for m in messages)
 
 
 async def test_robot_uses_symmetric_boot_and_shutdown_verbs(

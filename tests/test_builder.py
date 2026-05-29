@@ -390,8 +390,8 @@ def test_builder_observer_null_keeps_other_observer(
 
 
 def test_builder_persistence_is_a_component(tmp_path: Path) -> None:
-    """Since chunk 3 the persistence provider is itself a RobotComponent
-    and lives in robot.components. Boot order: between BUS and TELEMETRY.
+    """The interim jsonl provider is a PROVIDER-level RobotComponent.
+    Boot order: before BUS and TELEMETRY (levels 2, 4, 6).
     """
     from src.components import ComponentCategory
     from src.persistence import JsonlPersistenceProvider as _Jsonl
@@ -402,16 +402,16 @@ def test_builder_persistence_is_a_component(tmp_path: Path) -> None:
     )
     providers = [c for c in robot.components if isinstance(c, _Jsonl)]
     assert len(providers) == 1
-    order = list(robot.components)  # boot order
+    order = list(robot.components)
+    provider_pos = order.index(providers[0])
     bus_pos = next(
         i for i, c in enumerate(order)
         if c.component_category is ComponentCategory.BUS
     )
-    persistence_pos = order.index(providers[0])
     recorder_pos = next(
         i for i, c in enumerate(order) if isinstance(c, BusRecorder)
     )
-    assert bus_pos < persistence_pos < recorder_pos
+    assert provider_pos < bus_pos < recorder_pos
 
 
 def test_builder_persistence_list_form_with_ids(tmp_path: Path) -> None:

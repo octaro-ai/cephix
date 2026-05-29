@@ -120,57 +120,26 @@ def test_custom_suffix_is_respected(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_jsonl_provider_is_bus_component(tmp_path: Path) -> None:
-    from src.components import BusComponent, ComponentCategory
+def test_jsonl_provider_is_robot_component_at_provider_level(
+    tmp_path: Path,
+) -> None:
+    from src.components import ComponentCategory, RobotComponent
 
     provider = JsonlPersistenceProvider(tmp_path)
-    assert isinstance(provider, BusComponent)
-    assert provider.component_category is ComponentCategory.PERSISTENCE
+    assert isinstance(provider, RobotComponent)
+    assert provider.component_category is ComponentCategory.PROVIDER
     assert provider.component_name == "jsonl"
 
 
-async def test_jsonl_provider_announces_ready_and_shutdown(tmp_path: Path) -> None:
-    """Provider self-announces on its lifecycle topic, like every
-    other BusComponent."""
-    from src.bus.asyncio_bus import AsyncioBus
-    from src.bus.messages import ComponentLifecycle, component_lifecycle_topic
-
+async def test_jsonl_provider_start_stop_without_bus(tmp_path: Path) -> None:
+    """PROVIDER-level components boot off-bus (no announce_lifecycle)."""
     provider = JsonlPersistenceProvider(tmp_path)
-    bus = AsyncioBus()
-    await bus.start()
-    try:
-        await provider.start(bus)
-        retained = bus.retained(component_lifecycle_topic("jsonl"))
-        assert isinstance(retained, ComponentLifecycle)
-        assert retained.phase == "ready"
-
-        await provider.stop()
-        retained = bus.retained(component_lifecycle_topic("jsonl"))
-        assert isinstance(retained, ComponentLifecycle)
-        assert retained.phase == "shutdown"
-    finally:
-        await bus.stop()
-
-
-async def test_jsonl_provider_stop_closes_issued_sinks(tmp_path: Path) -> None:
-    """stop() must close every sink the provider handed out, so a
-    consumer that forgets to ``close()`` doesn't leak file handles."""
-    from src.bus.asyncio_bus import AsyncioBus
-
-    provider = JsonlPersistenceProvider(tmp_path)
-    bus = AsyncioBus()
-    await bus.start()
-    try:
-        await provider.start(bus)
-        sink = provider.open("telemetry")
-        await sink.append({"event_type": "RobotInput"})
-        await provider.stop()
-        # After stop(), further appends on the issued sink must fail
-        # (sink is closed). This is the JsonlEventSink contract.
-        with pytest.raises(Exception):
-            await sink.append({"event_type": "x"})
-    finally:
-        await bus.stop()
+    await provider.start()
+    assert provider.root.is_dir()
+    sink = provider.open("telemetry")
+    await sink.append({"event_type": "RobotInput"})
+    await provider.stop()
+    assert not provider._cache
 
 
 async def test_jsonl_provider_health_check_ok_for_writable_root(

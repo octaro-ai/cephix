@@ -27,8 +27,8 @@ Subscription: the bus has no wildcard subscribe, so the collector uses
 :meth:`BusPort.subscribe_all` and filters for :class:`ComponentLifecycle`.
 ``subscribe_all`` does not replay retained events, so the collector must
 be subscribed before anyone announces ``ready``. It therefore boots at
-the **telemetry** level (priority 1, part of the skeleton, right after
-the bus) -- ahead of every utility, actor, kernel and channel. The
+the **telemetry** level (6, part of the skeleton, after the bus) --
+ahead of every utility, actor, kernel and channel. The
 skeleton's retained ``RobotLifecycle`` is **not** consulted -- it is the
 "who exists" roster, not the source of capabilities.
 
@@ -57,14 +57,8 @@ class CapabilityCollector(BusComponent):
     """Aggregate self-announced component commands into a retained manifest."""
 
     component_name = "capability-collector"
-    # TELEMETRY, not BUS_UTILITY: the collector is a read-mostly,
-    # bus-wide observer that must boot *first* (right after the bus,
-    # ahead of every capability-providing component). ``subscribe_all``
-    # does not replay retained events, so the collector has to be
-    # subscribed before anyone announces ``ready``. Booting at the
-    # telemetry level (the earliest userspace-adjacent priority, part
-    # of the skeleton) guarantees that instead of merely hoping it
-    # out-prioritizes the kernels/channels it happens to precede today.
+    # TELEMETRY (level 6): read-mostly bus-wide observer. Must subscribe
+    # before any capability-providing component announces ``ready``.
     component_category = ComponentCategory.TELEMETRY
     component_description = (
         "Aggregates the commands each component self-announces via its "

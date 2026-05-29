@@ -15,19 +15,11 @@ This decouples component code from the storage backend:
 - The day after, a ``SupabasePersistenceProvider`` can map them to
   remote rows; same component code.
 
-Lifecycle: providers are :class:`BusComponent` instances. They are
-**not bus-aware on the data path** -- the actual write API
-(:meth:`open` -> :class:`EventSink`) is called directly by the
-observer (the recorder / audit sink), no bus messages involved. The
-bus attachment only carries lifecycle announcements
-(``ComponentLifecycle`` on attach/detach) so the provider can be
-health-checked and, later, gracefully swapped at runtime. That keeps
-write volume off the bus while still treating storage as a first-
-class component.
-
-Boot ordering: providers boot at the ``PERSISTENCE`` priority
-(between ``BUS`` and ``TELEMETRY``), so observers can call
-:meth:`open` from their own ``start()`` and find the provider ready.
+Lifecycle: providers are plain :class:`RobotComponent`s at boot
+level ``PROVIDER`` (2). They boot **before** the bus and are injected
+by constructor -- no bus traffic on the data path. A future
+``BUS_PROVIDER`` (level 5) can expose the same provider over the bus
+when bus-visible storage access is desired.
 """
 
 from __future__ import annotations
@@ -37,8 +29,7 @@ import os
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from src.bus.ports import BusPort
-from src.components import BusComponent, ComponentCategory, ComponentHealth
+from src.components import ComponentCategory, ComponentHealth, RobotComponent
 from src.bus.messages import ErrorInfo
 from src.persistence.jsonl_sink import JsonlEventSink
 from src.persistence.sink import EventSink
@@ -62,28 +53,26 @@ class PersistenceProvider(Protocol):
         """
 
 
-class JsonlPersistenceProvider(BusComponent):
-    """Provider that maps channels to ``<root>/<channel>.jsonl`` files.
+class JsonlPersistenceProvider(RobotComponent):
+    """Interim provider: maps channels to ``<root>/<channel>.jsonl`` files.
 
-    The root is typically the bot's workspace, so a robot's full
-    persistent footprint sits next to its ``robot.yaml``. Subdirectories
-    can be expressed in the channel name (e.g. ``"runs/2026-05-25"``);
-    parent directories are created lazily on first append.
+    The root is typically the bot's workspace. Subdirectories can be
+    expressed in the channel name; parent directories are created lazily
+    on first append.
 
-    BusComponent for lifecycle (announces ``ready`` / ``shutdown`` on
-    its own ``component.lifecycle.<name>`` topic) and health-check
-    only -- the write path stays direct (each component receives an
-    :class:`EventSink` reference via :meth:`open` and writes to it
-    without going through the bus).
+    Boots at ``PROVIDER`` (level 2), off-bus. Telemetry and audit
+    receive sinks via :meth:`open` at build/constructor time. Later
+    this class splits into Backend + Connection + Provider with
+    ``filesystem`` as the layer name and ``jsonl`` as the format.
     """
 
     component_name = "jsonl"
-    component_category = ComponentCategory.PERSISTENCE
+    component_category = ComponentCategory.PROVIDER
     component_description = (
-        "Filesystem persistence provider: one append-only JSONL file "
-        "per channel under the configured root. Bus-attached for "
-        "lifecycle and health-check only; write volume bypasses the "
-        "bus and goes directly through EventSink references."
+        "Interim filesystem-backed persistence provider (JSONL format). "
+        "Off-bus PROVIDER at boot level 2; injectable by constructor. "
+        "Write volume bypasses the bus and goes directly through "
+        "EventSink references."
     )
 
     def __init__(
@@ -98,7 +87,6 @@ class JsonlPersistenceProvider(BusComponent):
         # the same sink instance for the lifetime of the provider.
         # Also used by ``stop()`` to flush + close every issued sink.
         self._cache: dict[str, JsonlEventSink] = {}
-        self._bus: BusPort | None = None
 
     @property
     def root(self) -> Path:
@@ -126,22 +114,13 @@ class JsonlPersistenceProvider(BusComponent):
         )
         return sink
 
-    # ---- BusComponent lifecycle -------------------------------------------
+    # ---- RobotComponent lifecycle -----------------------------------------
 
-    async def start(self, bus: BusPort) -> None:  # type: ignore[override]
-        """Attach to the bus and announce ``ready``.
+    async def start(self) -> None:
+        """Ensure the root exists; sinks open lazily via :meth:`open`."""
+        self._root.mkdir(parents=True, exist_ok=True)
 
-        Sinks are still opened lazily on demand via :meth:`open`; the
-        provider just registers itself as available now. Observer
-        components (bus_recorder, audit_note_sink) call :meth:`open`
-        from their own ``start()`` once they are booted -- by then
-        persistence is up because it sits at a lower
-        ``BOOT_PRIORITY``.
-        """
-        self._bus = bus
-        await self.announce_lifecycle(bus, "ready")
-
-    async def drain(self) -> None:  # type: ignore[override]
+    async def drain(self) -> None:
         """Flush every issued sink before the robot starts stopping.
 
         The observers that own these sinks also drain them on their
@@ -159,10 +138,8 @@ class JsonlPersistenceProvider(BusComponent):
                     channel,
                 )
 
-    async def stop(self) -> None:  # type: ignore[override]
-        """Announce ``shutdown`` and close every issued sink."""
-        if self._bus is not None:
-            await self.announce_lifecycle(self._bus, "shutdown")
+    async def stop(self) -> None:
+        """Close every issued sink."""
         for channel, sink in list(self._cache.items()):
             try:
                 await sink.close()
@@ -172,9 +149,8 @@ class JsonlPersistenceProvider(BusComponent):
                     channel,
                 )
         self._cache.clear()
-        self._bus = None
 
-    async def health_check(self) -> ComponentHealth:  # type: ignore[override]
+    async def health_check(self) -> ComponentHealth:
         """Report ``ok`` while the root is writable, ``warn`` otherwise.
 
         First-cut check: the configured root directory must exist (or
