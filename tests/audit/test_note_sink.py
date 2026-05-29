@@ -16,20 +16,18 @@ from src.bus import (
 )
 
 
-class _MemorySink:
+class _MemoryProvider:
+    """Minimal in-memory :class:`EventStreamProviderPort` for tests."""
+
     def __init__(self) -> None:
-        self.records: list[dict[str, Any]] = []
-        self.flushed = 0
-        self.closed = False
+        self.records: dict[str, list[dict[str, Any]]] = {}
+        self.flushes: dict[str | None, int] = {}
 
-    async def append(self, record: Mapping[str, Any]) -> None:
-        self.records.append(dict(record))
+    async def append(self, channel: str, record: Mapping[str, Any]) -> None:
+        self.records.setdefault(channel, []).append(dict(record))
 
-    async def flush(self) -> None:
-        self.flushed += 1
-
-    async def close(self) -> None:
-        self.closed = True
+    async def flush(self, channel: str | None = None) -> None:
+        self.flushes[channel] = self.flushes.get(channel, 0) + 1
 
 
 def _note(action: str, *, component: str = "kernel", **details: Any) -> RobotAuditNote:
@@ -46,8 +44,8 @@ def _note(action: str, *, component: str = "kernel", **details: Any) -> RobotAud
 
 async def test_sink_persists_audit_notes() -> None:
     bus = AsyncioBus()
-    sink = _MemorySink()
-    component = AuditNoteSink(sink=sink)
+    provider = _MemoryProvider()
+    component = AuditNoteSink(provider=provider)
 
     await bus.start()
     try:
@@ -59,8 +57,9 @@ async def test_sink_persists_audit_notes() -> None:
         await component.stop()
         await bus.stop()
 
-    assert [r["action"] for r in sink.records] == ["tool.invoke", "approval.deny"]
-    for record in sink.records:
+    records = provider.records.get("audit", [])
+    assert [r["action"] for r in records] == ["tool.invoke", "approval.deny"]
+    for record in records:
         assert record["event_type"] == "RobotAuditNote"
         assert record["topic"] == AUDIT_TOPIC
 
@@ -70,8 +69,8 @@ async def test_sink_ignores_non_audit_events_on_audit_topic(
 ) -> None:
     """If something else lands on AUDIT_TOPIC, it's ignored with a warning."""
     bus = AsyncioBus()
-    sink = _MemorySink()
-    component = AuditNoteSink(sink=sink)
+    provider = _MemoryProvider()
+    component = AuditNoteSink(provider=provider)
 
     await bus.start()
     try:
@@ -91,7 +90,7 @@ async def test_sink_ignores_non_audit_events_on_audit_topic(
         await component.stop()
         await bus.stop()
 
-    assert sink.records == []
+    assert provider.records.get("audit", []) == []
     assert any(
         "non-audit event" in rec.message for rec in caplog.records
     )
@@ -101,8 +100,8 @@ async def test_sink_only_listens_on_audit_topic() -> None:
     """Notes must travel on AUDIT_TOPIC; events on other topics are not
     in the audit's scope."""
     bus = AsyncioBus()
-    sink = _MemorySink()
-    component = AuditNoteSink(sink=sink)
+    provider = _MemoryProvider()
+    component = AuditNoteSink(provider=provider)
 
     await bus.start()
     try:
@@ -126,13 +125,31 @@ async def test_sink_only_listens_on_audit_topic() -> None:
         await component.stop()
         await bus.stop()
 
-    assert sink.records == []
+    assert provider.records.get("audit", []) == []
 
 
-async def test_sink_drain_flushes_sink() -> None:
+async def test_sink_writes_to_custom_channel() -> None:
     bus = AsyncioBus()
-    sink = _MemorySink()
-    component = AuditNoteSink(sink=sink)
+    provider = _MemoryProvider()
+    component = AuditNoteSink(provider=provider, channel="narrative")
+
+    await bus.start()
+    try:
+        await component.start(bus)
+        await bus.publish(_note("relocated"))
+        await asyncio.sleep(0.02)
+    finally:
+        await component.stop()
+        await bus.stop()
+
+    assert "narrative" in provider.records
+    assert "audit" not in provider.records
+
+
+async def test_sink_drain_flushes_configured_channel() -> None:
+    bus = AsyncioBus()
+    provider = _MemoryProvider()
+    component = AuditNoteSink(provider=provider, channel="audit")
 
     await bus.start()
     try:
@@ -142,13 +159,13 @@ async def test_sink_drain_flushes_sink() -> None:
         await component.stop()
         await bus.stop()
 
-    assert sink.flushed >= 1
+    assert provider.flushes.get("audit", 0) >= 1
 
 
-async def test_sink_stop_closes_sink_and_unsubscribes() -> None:
+async def test_sink_stop_unsubscribes() -> None:
     bus = AsyncioBus()
-    sink = _MemorySink()
-    component = AuditNoteSink(sink=sink)
+    provider = _MemoryProvider()
+    component = AuditNoteSink(provider=provider)
 
     await bus.start()
     try:
@@ -160,5 +177,4 @@ async def test_sink_stop_closes_sink_and_unsubscribes() -> None:
     finally:
         await bus.stop()
 
-    assert sink.closed is True
-    assert sink.records == []
+    assert provider.records.get("audit", []) == []

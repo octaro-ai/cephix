@@ -68,7 +68,7 @@ def _cfg(extra: dict[str, Any]) -> dict[str, Any]:
     # and the test surface comparable to a real boot. Individual tests
     # opt out per slot by passing ``persistence: None`` etc.
     merged.setdefault("bus", {"name": "asyncio"})
-    merged.setdefault("persistence", {"name": "jsonl"})
+    merged.setdefault("persistence", {"name": "filesystem-events"})
     merged.setdefault("telemetry", {"name": "bus_recorder"})
     merged.setdefault("audit", {"name": "audit_note_sink"})
     merged.update(extra)
@@ -80,6 +80,19 @@ def _channels_of(robot: Robot) -> tuple[WebsocketChannel, ...]:
     return tuple(
         c for c in robot.components if isinstance(c, WebsocketChannel)
     )
+
+
+def _observer_path(observer: BusRecorder | AuditNoteSink) -> Path:
+    """Resolve where the observer would persist a record on disk.
+
+    Reaches into provider + connection internals because the
+    builder tests want to verify wiring, not behaviour. Production
+    code never does this.
+    """
+    provider = observer._provider  # type: ignore[attr-defined]
+    connection = provider._connection  # type: ignore[attr-defined]
+    codec_ext = provider._codec.extension  # type: ignore[attr-defined]
+    return Path(connection.path_for(observer.channel, suffix=codec_ext))
 
 
 def _bus_of(robot: Robot) -> AsyncioBus:
@@ -348,10 +361,8 @@ def test_builder_wires_telemetry_and_audit_via_persistence(
     sinks = [c for c in robot.components if isinstance(c, AuditNoteSink)]
     assert len(recorders) == 1
     assert len(sinks) == 1
-    recorder_sink_path = recorders[0]._sink._path  # type: ignore[attr-defined]
-    audit_sink_path = sinks[0]._sink._path  # type: ignore[attr-defined]
-    assert recorder_sink_path == tmp_path / "logs" / "telemetry.jsonl"
-    assert audit_sink_path == tmp_path / "logs" / "audit.jsonl"
+    assert _observer_path(recorders[0]) == tmp_path / "logs" / "telemetry.jsonl"
+    assert _observer_path(sinks[0]) == tmp_path / "logs" / "audit.jsonl"
 
 
 def test_builder_persistence_null_skips_all_observers(
@@ -389,20 +400,37 @@ def test_builder_observer_null_keeps_other_observer(
     assert any(isinstance(c, AuditNoteSink) for c in robot.components)
 
 
-def test_builder_persistence_is_a_component(tmp_path: Path) -> None:
-    """The interim jsonl provider is a PROVIDER-level RobotComponent.
-    Boot order: before BUS and TELEMETRY (levels 2, 4, 6).
-    """
+def test_builder_persistence_stack_is_three_components(tmp_path: Path) -> None:
+    """One persistence entry synthesizes three components:
+    LocalFSAdapter (BACKEND, 0), FilesystemConnection (CONNECTION, 1),
+    FilesystemEventStreamProvider (PROVIDER, 2). All three sit before
+    the bus (4) and the telemetry/audit observers."""
     from src.components import ComponentCategory
-    from src.persistence import JsonlPersistenceProvider as _Jsonl
+    from src.persistence import (
+        FilesystemConnection,
+        FilesystemEventStreamProvider,
+        LocalFSAdapter,
+    )
 
     robot = build_robot_from_config(
         _cfg({"kernel": {"name": "base"}}),
         workspace=tmp_path,
     )
-    providers = [c for c in robot.components if isinstance(c, _Jsonl)]
+    adapters = [c for c in robot.components if isinstance(c, LocalFSAdapter)]
+    connections = [
+        c for c in robot.components if isinstance(c, FilesystemConnection)
+    ]
+    providers = [
+        c
+        for c in robot.components
+        if isinstance(c, FilesystemEventStreamProvider)
+    ]
+    assert len(adapters) == 1
+    assert len(connections) == 1
     assert len(providers) == 1
     order = list(robot.components)
+    adapter_pos = order.index(adapters[0])
+    connection_pos = order.index(connections[0])
     provider_pos = order.index(providers[0])
     bus_pos = next(
         i for i, c in enumerate(order)
@@ -411,7 +439,9 @@ def test_builder_persistence_is_a_component(tmp_path: Path) -> None:
     recorder_pos = next(
         i for i, c in enumerate(order) if isinstance(c, BusRecorder)
     )
-    assert provider_pos < bus_pos < recorder_pos
+    # Bringup order: backend (0) -> connection (1) -> provider (2)
+    # -> ... -> bus (4) -> ... -> telemetry (6).
+    assert adapter_pos < connection_pos < provider_pos < bus_pos < recorder_pos
 
 
 def test_builder_persistence_list_form_with_ids(tmp_path: Path) -> None:
@@ -422,8 +452,8 @@ def test_builder_persistence_list_form_with_ids(tmp_path: Path) -> None:
             {
                 "kernel": {"name": "base"},
                 "persistence": [
-                    {"name": "jsonl", "id": "primary", "path": "logs-a"},
-                    {"name": "jsonl", "id": "mirror",  "path": "logs-b"},
+                    {"name": "filesystem-events", "id": "primary", "path": "logs-a"},
+                    {"name": "filesystem-events", "id": "mirror",  "path": "logs-b"},
                 ],
                 "telemetry": [
                     {"name": "bus_recorder", "persistence": "mirror"},
@@ -437,8 +467,8 @@ def test_builder_persistence_list_form_with_ids(tmp_path: Path) -> None:
     )
     recorder = next(c for c in robot.components if isinstance(c, BusRecorder))
     audit = next(c for c in robot.components if isinstance(c, AuditNoteSink))
-    assert recorder._sink._path == tmp_path / "logs-b" / "telemetry.jsonl"  # type: ignore[attr-defined]
-    assert audit._sink._path == tmp_path / "logs-a" / "audit.jsonl"  # type: ignore[attr-defined]
+    assert _observer_path(recorder) == tmp_path / "logs-b" / "telemetry.jsonl"
+    assert _observer_path(audit) == tmp_path / "logs-a" / "audit.jsonl"
 
 
 def test_builder_rejects_unknown_persistence_reference(tmp_path: Path) -> None:
@@ -449,7 +479,7 @@ def test_builder_rejects_unknown_persistence_reference(tmp_path: Path) -> None:
             _cfg(
                 {
                     "kernel": {"name": "base"},
-                    "persistence": [{"name": "jsonl", "id": "only"}],
+                    "persistence": [{"name": "filesystem-events", "id": "only"}],
                     "telemetry": [
                         {"name": "bus_recorder", "persistence": "missing"},
                     ],
@@ -473,7 +503,7 @@ def test_builder_audit_accepts_list_form(tmp_path: Path) -> None:
         workspace=tmp_path,
     )
     audit = next(c for c in robot.components if isinstance(c, AuditNoteSink))
-    assert audit._sink._path == tmp_path / "logs" / "narrative.jsonl"  # type: ignore[attr-defined]
+    assert _observer_path(audit) == tmp_path / "logs" / "narrative.jsonl"
 
 
 def test_builder_uses_explicit_channel_names(tmp_path: Path) -> None:
@@ -490,8 +520,8 @@ def test_builder_uses_explicit_channel_names(tmp_path: Path) -> None:
     )
     recorder = next(c for c in robot.components if isinstance(c, BusRecorder))
     audit = next(c for c in robot.components if isinstance(c, AuditNoteSink))
-    assert recorder._sink._path == tmp_path / "logs" / "raw-events.jsonl"  # type: ignore[attr-defined]
-    assert audit._sink._path == tmp_path / "logs" / "narrative.jsonl"  # type: ignore[attr-defined]
+    assert _observer_path(recorder) == tmp_path / "logs" / "raw-events.jsonl"
+    assert _observer_path(audit) == tmp_path / "logs" / "narrative.jsonl"
 
 
 def test_builder_persistence_absolute_path_wins(tmp_path: Path) -> None:
@@ -507,11 +537,11 @@ def test_builder_persistence_absolute_path_wins(tmp_path: Path) -> None:
         workspace=tmp_path / "ws",
     )
     recorder = next(c for c in robot.components if isinstance(c, BusRecorder))
-    assert recorder._sink._path == abs_root / "telemetry.jsonl"  # type: ignore[attr-defined]
+    assert _observer_path(recorder) == abs_root / "telemetry.jsonl"
 
 
 def test_builder_rejects_unknown_persistence_type(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="persistence backend"):
+    with pytest.raises(ConfigError, match="persistence provider"):
         build_robot_from_config(
             _cfg(
                 {
@@ -975,7 +1005,7 @@ class TestBuilderTemplates:
             "templates": {
                 "demo": {
                     "bus": {"name": "asyncio"},
-                    "persistence": {"name": "jsonl"},
+                    "persistence": {"name": "filesystem-events"},
                     "telemetry": {"name": "bus_recorder"},
                     "audit": {"name": "audit_note_sink"},
                     "kernel": {"name": "base", "actor": {"name": "echo"}},

@@ -79,22 +79,19 @@ async def test_publish_audit_reaches_audit_note_sink_end_to_end() -> None:
     from collections.abc import Mapping
     from typing import Any
 
-    class _MemorySink:
+    class _MemoryProvider:
         def __init__(self) -> None:
-            self.records: list[dict[str, Any]] = []
+            self.records: dict[str, list[dict[str, Any]]] = {}
 
-        async def append(self, record: Mapping[str, Any]) -> None:
-            self.records.append(dict(record))
+        async def append(self, channel: str, record: Mapping[str, Any]) -> None:
+            self.records.setdefault(channel, []).append(dict(record))
 
-        async def flush(self) -> None:
-            ...
-
-        async def close(self) -> None:
+        async def flush(self, channel: str | None = None) -> None:
             ...
 
     bus = AsyncioBus()
-    persistence = _MemorySink()
-    note_sink = AuditNoteSink(sink=persistence)
+    persistence = _MemoryProvider()
+    note_sink = AuditNoteSink(provider=persistence)
     producer = _Producer()
 
     await bus.start()
@@ -108,8 +105,9 @@ async def test_publish_audit_reaches_audit_note_sink_end_to_end() -> None:
         await note_sink.stop()
         await bus.stop()
 
-    assert len(persistence.records) == 1
-    record = persistence.records[0]
+    audit_records = persistence.records.get("audit", [])
+    assert len(audit_records) == 1
+    record = audit_records[0]
     assert record["component"] == "test_producer"
     assert record["action"] == "approval.deny"
     assert record["details"] == {"reason": "policy"}

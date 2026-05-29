@@ -16,22 +16,23 @@ from src.bus import (
 from src.telemetry.bus_recorder import BusRecorder
 
 
-class _MemorySink:
-    """Minimal in-memory :class:`EventSink` for tests."""
+class _MemoryProvider:
+    """Minimal in-memory :class:`EventStreamProviderPort` for tests.
+
+    Stores every appended record keyed by channel, plus per-channel
+    flush counters. Satisfies the runtime-checkable protocol by
+    duck-typing on ``append`` and ``flush``.
+    """
 
     def __init__(self) -> None:
-        self.records: list[dict[str, Any]] = []
-        self.flushed = 0
-        self.closed = False
+        self.records: dict[str, list[dict[str, Any]]] = {}
+        self.flushes: dict[str | None, int] = {}
 
-    async def append(self, record: Mapping[str, Any]) -> None:
-        self.records.append(dict(record))
+    async def append(self, channel: str, record: Mapping[str, Any]) -> None:
+        self.records.setdefault(channel, []).append(dict(record))
 
-    async def flush(self) -> None:
-        self.flushed += 1
-
-    async def close(self) -> None:
-        self.closed = True
+    async def flush(self, channel: str | None = None) -> None:
+        self.flushes[channel] = self.flushes.get(channel, 0) + 1
 
 
 def _input(text: str, *, topic: str = "input.demo") -> RobotInput:
@@ -44,10 +45,20 @@ def _input(text: str, *, topic: str = "input.demo") -> RobotInput:
     )
 
 
+def _records(provider: _MemoryProvider, channel: str = "telemetry") -> list[dict]:
+    """Drop the recorder's own self-announced ComponentLifecycle so
+    tests assert on the records they care about."""
+    return [
+        r
+        for r in provider.records.get(channel, [])
+        if r["event_type"] != "ComponentLifecycle"
+    ]
+
+
 async def test_recorder_persists_every_routable_publish() -> None:
     bus = AsyncioBus()
-    sink = _MemorySink()
-    recorder = BusRecorder(sink=sink)
+    provider = _MemoryProvider()
+    recorder = BusRecorder(provider=provider)
 
     await bus.start()
     try:
@@ -67,9 +78,7 @@ async def test_recorder_persists_every_routable_publish() -> None:
         await recorder.stop()
         await bus.stop()
 
-    # Filter the recorder's own self-announced ComponentLifecycle: it is
-    # a wide-event sink and records its own lifecycle too.
-    data = [r for r in sink.records if r["event_type"] != "ComponentLifecycle"]
+    data = _records(provider)
     topics = [r["topic"] for r in data]
     assert topics == ["input.a", "output.a"]
     types = [r["event_type"] for r in data]
@@ -78,8 +87,8 @@ async def test_recorder_persists_every_routable_publish() -> None:
 
 async def test_recorder_persists_broadcasts_too() -> None:
     bus = AsyncioBus()
-    sink = _MemorySink()
-    recorder = BusRecorder(sink=sink)
+    provider = _MemoryProvider()
+    recorder = BusRecorder(provider=provider)
 
     await bus.start()
     try:
@@ -92,7 +101,7 @@ async def test_recorder_persists_broadcasts_too() -> None:
         await recorder.stop()
         await bus.stop()
 
-    data = [r for r in sink.records if r["event_type"] != "ComponentLifecycle"]
+    data = _records(provider)
     assert len(data) == 1
     assert data[0]["topic"] == "robot.lifecycle"
 
@@ -101,8 +110,8 @@ async def test_recorder_picks_up_audit_notes() -> None:
     """A telemetry recorder also sees curated audit notes -- audit and
     telemetry are not mutually exclusive."""
     bus = AsyncioBus()
-    sink = _MemorySink()
-    recorder = BusRecorder(sink=sink)
+    provider = _MemoryProvider()
+    recorder = BusRecorder(provider=provider)
 
     await bus.start()
     try:
@@ -123,7 +132,7 @@ async def test_recorder_picks_up_audit_notes() -> None:
         await recorder.stop()
         await bus.stop()
 
-    data = [r for r in sink.records if r["event_type"] != "ComponentLifecycle"]
+    data = _records(provider)
     assert len(data) == 1
     record = data[0]
     assert record["topic"] == AUDIT_TOPIC
@@ -131,10 +140,28 @@ async def test_recorder_picks_up_audit_notes() -> None:
     assert record["action"] == "approval.deny"
 
 
-async def test_recorder_drain_flushes_sink() -> None:
+async def test_recorder_writes_to_custom_channel() -> None:
     bus = AsyncioBus()
-    sink = _MemorySink()
-    recorder = BusRecorder(sink=sink)
+    provider = _MemoryProvider()
+    recorder = BusRecorder(provider=provider, channel="raw-events")
+
+    await bus.start()
+    try:
+        await recorder.start(bus)
+        await bus.publish(_input("payload"))
+        await asyncio.sleep(0.02)
+    finally:
+        await recorder.stop()
+        await bus.stop()
+
+    assert "raw-events" in provider.records
+    assert "telemetry" not in provider.records
+
+
+async def test_recorder_drain_flushes_configured_channel() -> None:
+    bus = AsyncioBus()
+    provider = _MemoryProvider()
+    recorder = BusRecorder(provider=provider, channel="telemetry")
 
     await bus.start()
     try:
@@ -144,13 +171,13 @@ async def test_recorder_drain_flushes_sink() -> None:
         await recorder.stop()
         await bus.stop()
 
-    assert sink.flushed >= 1
+    assert provider.flushes.get("telemetry", 0) >= 1
 
 
-async def test_recorder_stop_closes_sink_and_unsubscribes() -> None:
+async def test_recorder_stop_unsubscribes() -> None:
     bus = AsyncioBus()
-    sink = _MemorySink()
-    recorder = BusRecorder(sink=sink)
+    provider = _MemoryProvider()
+    recorder = BusRecorder(provider=provider)
 
     await bus.start()
     try:
@@ -162,5 +189,9 @@ async def test_recorder_stop_closes_sink_and_unsubscribes() -> None:
     finally:
         await bus.stop()
 
-    assert sink.closed is True
-    assert sink.records == []  # subscription was torn down before the publish
+    # The subscription was torn down before the publish, so the
+    # input event never reaches the recorder.
+    assert all(
+        r["event_type"] == "ComponentLifecycle"
+        for r in provider.records.get("telemetry", [])
+    )

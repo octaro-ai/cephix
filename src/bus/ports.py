@@ -16,7 +16,6 @@ from __future__ import annotations
 from typing import Awaitable, Callable, Protocol, runtime_checkable
 
 from src.bus.messages import RobotEvent, ComponentRequest, ComponentResponse
-from src.components import BusComponent
 
 EventHandler = Callable[[RobotEvent], Awaitable[None]]
 

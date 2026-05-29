@@ -57,7 +57,14 @@ from src.credentials import (
 )
 from src.credentials.ports import CredentialStorePort
 from src.kernel.ports import KernelPort
-from src.persistence.provider import JsonlPersistenceProvider, PersistenceProvider
+from src.persistence import (
+    EventStreamProviderPort,
+    FilesystemConnection,
+    FilesystemEventStreamProvider,
+    JsonlCodec,
+    LocalFSAdapter,
+    RecordCodec,
+)
 from src.registry import ConfigError, build
 from src.robot import ControlPlaneConfig, Robot, RobotIdentity
 from src.telemetry.bus_recorder import BusRecorder
@@ -227,7 +234,7 @@ def build_robot_from_config(
     )
     channels = _build_channels(channel_specs, library=library)
 
-    persistence = _build_persistence_components(
+    persistence_components, persistence_index = _build_persistence_components(
         cfg.get("persistence"), workspace, library=library
     )
     telemetry_components = _build_observer_components(
@@ -237,7 +244,7 @@ def build_robot_from_config(
         default_name="bus_recorder",
         default_channel=_DEFAULT_TELEMETRY_CHANNEL,
         sink_bound_names={"bus_recorder": BusRecorder},
-        persistence=persistence,
+        persistence=persistence_index,
         library=library,
     )
     audit_components = _build_observer_components(
@@ -247,7 +254,7 @@ def build_robot_from_config(
         default_name="audit_note_sink",
         default_channel=_DEFAULT_AUDIT_CHANNEL,
         sink_bound_names={"audit_note_sink": AuditNoteSink},
-        persistence=persistence,
+        persistence=persistence_index,
         library=library,
     )
 
@@ -269,7 +276,7 @@ def build_robot_from_config(
     components: list[RobotComponent] = [
         bus,
         credentials,
-        *persistence.values(),
+        *persistence_components,
         *actors,
         *kernels,
         *utilities,
@@ -1013,37 +1020,49 @@ def _build_persistence_components(
     workspace: str | Path | None,
     *,
     library: ComponentLibrary,
-) -> dict[str, RobotComponent]:
-    """Build persistence components from ``robot.yaml#persistence``.
+) -> tuple[list[RobotComponent], dict[str, EventStreamProviderPort]]:
+    """Build the persistence stack from ``robot.yaml#persistence``.
 
-    Returns a mapping ``id -> component`` so observers can reference a
-    specific provider by id (e.g. ``telemetry: - {name: bus_recorder,
-    persistence: cloud}``). Singular and list shapes are both accepted;
-    a singular spec implicitly gets ``id: "default"``. A list may mix
-    backends (the only one shipping today is ``jsonl``; future entries
-    might be ``sqlite``, ``supabase``, ``s3``, or a composite).
+    Each persistence entry is synthesized into the three-level DAO
+    stack: a backend adapter (level 0), a connection (level 1) and
+    a provider (level 2). All three land in :data:`robot.components`
+    and the robot's boot order surfaces them as separate ``Boot
+    Level X`` markers with their own ``injected into`` log lines.
 
-    An empty result means "no persistence configured". Components that
-    depend on the provider check the mapping and skip themselves with
-    an info log when nothing is available, so the boot succeeds either
-    way.
+    Returns ``(components, provider_index)``:
 
-    Library defaults under ``components.persistence[name=<name>]`` fill
-    missing fields (today: ``path: logs`` for ``jsonl``).
+    - ``components`` -- the full list of synthesized
+      :class:`RobotComponent`s across all configured persistence
+      entries, in any order. The robot resorts them by
+      :data:`src.components.BOOT_PRIORITY`.
+    - ``provider_index`` -- mapping ``id -> provider`` so observers
+      (telemetry, audit) can reference a specific stack via
+      ``persistence: <id>``.
+
+    Shapes accepted: singular mapping or list. A singular spec
+    implicitly gets ``id: "default"``. A list may later mix backends
+    (only ``filesystem-events`` ships today; future entries might be
+    ``database-events``, ``object-store-events``, or a composite).
+
+    Library defaults under ``components.persistence[name=<name>]``
+    fill missing fields (today: ``path: logs`` for
+    ``filesystem-events``).
     """
     entries = _normalize_observer_specs(spec, slot="persistence")
-    out: dict[str, RobotComponent] = {}
+    all_components: list[RobotComponent] = []
+    provider_index: dict[str, EventStreamProviderPort] = {}
     used_ids: set[str] = set()
     for index, entry in enumerate(entries):
         enriched = _apply_library_defaults(
             entry, category="persistence", library=library
         )
 
-        name = str(enriched.get("name", "jsonl"))
-        if name != "jsonl":
+        name = str(enriched.get("name", "filesystem-events"))
+        if name != "filesystem-events":
             raise ConfigError(
-                f"unknown persistence backend {name!r}; "
-                "the only built-in persistence backend today is 'jsonl'"
+                f"unknown persistence provider {name!r}; the only "
+                "built-in provider today is 'filesystem-events' "
+                "(filesystem-backed event-stream provider)"
             )
 
         # ``id`` discriminator: explicit if provided, else "default"
@@ -1064,23 +1083,62 @@ def _build_persistence_components(
             )
         used_ids.add(persistence_id)
 
+        # Resolve root path: relative paths anchor at the workspace,
+        # absolute paths are taken as-is. Without a workspace the
+        # entry is silently dropped so a workspace-less robot still
+        # boots (other entries with absolute paths may still apply).
         raw_path = enriched.get("path", "logs")
         candidate = Path(str(raw_path)).expanduser()
         if not candidate.is_absolute():
             if workspace is None:
-                # No usable root for this entry; skip it silently so a
-                # robot without workspace still boots (other entries
-                # may still be valid if they use absolute paths).
                 continue
             candidate = Path(workspace) / candidate
 
-        out[persistence_id] = JsonlPersistenceProvider(candidate)
-    return out
+        # Adapter (BACKEND) -- ``adapter:`` may name a future
+        # ``s3-fs`` etc.; today only the local FS adapter ships.
+        adapter_name = str(enriched.get("adapter", "local-fs"))
+        if adapter_name != "local-fs":
+            raise ConfigError(
+                f"unknown filesystem adapter {adapter_name!r}; the "
+                "only built-in adapter today is 'local-fs'"
+            )
+        adapter = LocalFSAdapter()
+
+        # Connection (CONNECTION) -- holds the adapter + root.
+        connection = FilesystemConnection(adapter=adapter, root=candidate)
+
+        # Codec (library, not a component). Future codecs sit next
+        # to ``jsonl`` in :mod:`src.persistence.codec`.
+        codec_name = str(enriched.get("codec", "jsonl"))
+        codec = _resolve_codec(codec_name)
+
+        # Provider (PROVIDER) -- the DAO observers depend on.
+        provider = FilesystemEventStreamProvider(
+            connection=connection, codec=codec
+        )
+
+        all_components.extend((adapter, connection, provider))
+        provider_index[persistence_id] = provider
+    return all_components, provider_index
+
+
+def _resolve_codec(name: str) -> RecordCodec:
+    """Map a YAML ``codec:`` string to a :class:`RecordCodec` instance.
+
+    Today only ``jsonl`` ships. Future codecs (``json``, ``msgpack``,
+    ``parquet``) register here so persistence entries can pick them
+    with a single string.
+    """
+    if name == "jsonl":
+        return JsonlCodec()
+    raise ConfigError(
+        f"unknown codec {name!r}; the only built-in codec today is 'jsonl'"
+    )
 
 
 def _resolve_default_persistence(
-    persistence: dict[str, RobotComponent],
-) -> RobotComponent | None:
+    persistence: dict[str, EventStreamProviderPort],
+) -> EventStreamProviderPort | None:
     """Pick the implicit default when an observer omits ``persistence:``.
 
     Rule: a single configured provider is the default. With two or
@@ -1122,26 +1180,27 @@ def _build_observer_components(
     default_name: str,
     default_channel: str,
     sink_bound_names: dict[str, type[RobotComponent]],
-    persistence: dict[str, RobotComponent],
+    persistence: dict[str, EventStreamProviderPort],
     library: ComponentLibrary,
 ) -> list[RobotComponent]:
     """Build a list of observer components for one slot (``telemetry`` /
     ``audit``).
 
     Both slots are kind-aliased lists of bus-attached observers that
-    write through a :class:`PersistenceProvider`. Shape parity with
-    ``kernel`` / ``channel``: singular mapping or list, both valid.
+    write through an :class:`EventStreamProviderPort`. Shape parity
+    with ``kernel`` / ``channel``: singular mapping or list, both
+    valid.
 
     Two flavours of entries:
 
-    - **Sink-bound observers** -- names listed in ``sink_bound_names``
-      (today: ``bus_recorder`` for telemetry, ``audit_note_sink`` for
-      audit). Constructed via the mapped class with
-      ``sink=persistence_provider.open(channel)``. The persistence
-      provider is selected by an optional ``persistence: <id>`` field;
-      a single configured provider is the implicit default. When no
-      persistence is configured, sink-bound observers are skipped
-      with an info log (instead of failing the boot).
+    - **Provider-bound observers** -- names listed in
+      ``sink_bound_names`` (today: ``bus_recorder`` for telemetry,
+      ``audit_note_sink`` for audit). Constructed via the mapped
+      class with ``provider=<chosen provider>, channel=<channel>``.
+      The provider is selected by an optional ``persistence: <id>``
+      field; a single configured provider is the implicit default.
+      When no persistence is configured the observer is skipped with
+      an info log (instead of failing the boot).
     - **Regular bus-attached observers** -- any other name resolves
       through the registry like a normal component. Constructed via
       :func:`_build_with_library`. The result must have the slot's
@@ -1173,7 +1232,7 @@ def _build_observer_components(
                 )
                 continue
             channel = str(enriched.get("channel", default_channel))
-            out.append(sink_class(sink=provider.open(channel)))  # type: ignore[call-arg, attr-defined]
+            out.append(sink_class(provider=provider, channel=channel))  # type: ignore[call-arg]
             continue
 
         component = _build_with_library(
@@ -1192,10 +1251,10 @@ def _build_observer_components(
 
 def _select_persistence(
     spec: dict[str, Any],
-    persistence: dict[str, RobotComponent],
+    persistence: dict[str, EventStreamProviderPort],
     *,
     slot: str,
-) -> RobotComponent | None:
+) -> EventStreamProviderPort | None:
     """Pick the persistence provider an observer entry asks for.
 
     Resolution rules:

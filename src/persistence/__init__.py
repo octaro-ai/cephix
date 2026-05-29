@@ -1,28 +1,43 @@
-"""Robot-wide persistence layer.
+"""Cephix persistence layer -- DAO-modelled, format-orthogonal.
 
-Two abstractions:
+Four levels, each with one clear responsibility:
 
-- :class:`EventSink` -- the per-stream write API used by individual
-  components.
-- :class:`PersistenceProvider` -- the robot-wide factory that hands
-  out sinks by channel name. Configured once per robot; every
-  component that needs to persist asks the provider for its channel
-  and stays oblivious to the backend.
+- **Codec** (library, no lifecycle) -- record-to-bytes serialization.
+  Default: :class:`~src.persistence.codec.JsonlCodec`.
+- **Backend** (boot level 0) -- abstract filesystem driver,
+  e.g. :class:`~src.persistence.filesystem.LocalFSAdapter`.
+  Implements :class:`~src.persistence.filesystem.FilesystemPort`.
+- **Connection** (boot level 1) -- adapter + root + channel
+  resolution. :class:`~src.persistence.filesystem.FilesystemConnection`.
+- **Provider** (boot level 2) -- the DAO consumers depend on.
+  :class:`~src.persistence.event_stream.EventStreamProviderPort` is
+  the contract; :class:`~src.persistence.event_stream.FilesystemEventStreamProvider`
+  the filesystem-backed implementation.
 
-Built-in implementations: :class:`JsonlEventSink` (append-only
-NDJSON file) and :class:`JsonlPersistenceProvider` (one file per
-channel under the workspace root). Future implementations
-(SQLite, Supabase, S3, ClickHouse, ...) plug in by satisfying the
-same two protocols.
+Consumers (``BusRecorder``, ``AuditNoteSink``, future stores) hold
+a reference to the provider port plus a channel name; they call
+``await provider.append(channel, record)``. The sink/handle layer
+that used to sit between them is now an internal implementation
+detail of the provider.
 """
 
-from src.persistence.jsonl_sink import JsonlEventSink
-from src.persistence.provider import JsonlPersistenceProvider, PersistenceProvider
-from src.persistence.sink import EventSink
+from src.persistence.codec import JsonlCodec, RecordCodec
+from src.persistence.event_stream import (
+    EventStreamProviderPort,
+    FilesystemEventStreamProvider,
+)
+from src.persistence.filesystem import (
+    FilesystemConnection,
+    FilesystemPort,
+    LocalFSAdapter,
+)
 
 __all__ = [
-    "EventSink",
-    "JsonlEventSink",
-    "JsonlPersistenceProvider",
-    "PersistenceProvider",
+    "EventStreamProviderPort",
+    "FilesystemConnection",
+    "FilesystemEventStreamProvider",
+    "FilesystemPort",
+    "JsonlCodec",
+    "LocalFSAdapter",
+    "RecordCodec",
 ]
