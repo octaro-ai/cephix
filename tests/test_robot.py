@@ -245,18 +245,27 @@ async def test_robot_logs_boot_and_shutdown_narrative(
     offline_idx = messages.index("robot offline")
     assert online_idx < offline_idx
 
-    # Boot-level "Entering" markers introduce every category that
-    # boots. The matching closing markers (``... complete``,
-    # ``Leaving ...``, ``shutdown complete``) are intentionally
-    # silenced for readability -- the next "Entering" line and the
-    # final "robot offline" already bracket the section. The robot
-    # under test has BUS (level 4) and KERNEL (level 10).
-    assert any("Entering Boot Level 4 (BUS)" in m for m in messages)
-    assert any("Entering Boot Level 10 (KERNEL)" in m for m in messages)
+    # Boot-level markers introduce every category in BOOT_PRIORITY,
+    # whether populated or empty. The matching closing markers
+    # (``... complete``, ``Leaving ...``, ``shutdown complete``) are
+    # intentionally silenced for readability -- the next "Boot Level"
+    # line and the final "robot offline" already bracket the section.
+    # The robot under test has BUS (level 4) and KERNEL (level 10).
+    assert any("=== Boot Level 4 (BUS) ===" in m for m in messages)
+    assert any("=== Boot Level 10 (KERNEL) ===" in m for m in messages)
+    # The "Entering" wording is gone; the bare marker stands on its own.
+    assert not any("Entering Boot Level" in m for m in messages)
     # Closing markers are off by convention; assert they stay quiet.
     assert not any("Boot Level 4 (BUS) complete" in m for m in messages)
     assert not any("Leaving Boot Level 4 (BUS)" in m for m in messages)
     assert not any("Boot Level 4 (BUS) shutdown complete" in m for m in messages)
+    # Empty levels surface with the "-- empty" suffix so the log
+    # mirrors the architecture, not just the inventory. BUS_PROVIDER
+    # (level 5) is reserved-but-empty in this robot, so it must be
+    # logged. BACKEND (level 0) and CONNECTION (level 1) likewise.
+    assert any("=== Boot Level 5 (BUS_PROVIDER) -- empty ===" in m for m in messages)
+    assert any("=== Boot Level 0 (BACKEND) -- empty ===" in m for m in messages)
+    assert any("=== Boot Level 1 (CONNECTION) -- empty ===" in m for m in messages)
 
 
 async def test_robot_uses_symmetric_boot_and_shutdown_verbs(

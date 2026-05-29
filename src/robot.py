@@ -346,9 +346,10 @@ class Robot:
         """
         self._phase = RobotPhase.ATTACHING
 
-        for prio, category, group in self._group_by_category(
-            self._skeleton_components()
-        ):
+        for prio, category, group in self._categories_in_phase(skeleton=True):
+            if not group:
+                self._log_phase_marker(prio, category, "boot_empty")
+                continue
             self._log_phase_marker(prio, category, "boot_enter")
             for component in group:
                 await self._start_component(component)
@@ -385,9 +386,10 @@ class Robot:
         """Phase 3: start userspace components, broadcast ``RobotLifecycle(phase="ready")``."""
         self._phase = RobotPhase.ACTIVATING
 
-        for prio, category, group in self._group_by_category(
-            self._userspace_components()
-        ):
+        for prio, category, group in self._categories_in_phase(skeleton=False):
+            if not group:
+                self._log_phase_marker(prio, category, "boot_empty")
+                continue
             self._log_phase_marker(prio, category, "boot_enter")
             for component in group:
                 await self._start_component(component)
@@ -615,11 +617,11 @@ class Robot:
         """Bucket ``components`` by category, ordered by boot priority.
 
         Each tuple is ``(priority, category, components_in_category)``.
-        The robot iterates these to log a phase marker per
-        category and then walks its members. Categories that
-        nobody registered for this robot are skipped, so a robot
-        without channels does not print an empty
-        ``CHANNEL`` phase header.
+        Only categories that actually have members are returned --
+        this is the inventory-only view, used today by the shutdown
+        path. The boot path uses :meth:`_categories_in_phase` instead,
+        which surfaces *every* level (including empty ones) so the
+        log mirrors the architecture, not just the actual inventory.
         """
         groups: dict[ComponentCategory, list[RobotComponent]] = {}
         for c in components:
@@ -633,12 +635,44 @@ class Robot:
             key=lambda t: t[0],
         )
 
+    def _categories_in_phase(
+        self,
+        *,
+        skeleton: bool,
+    ) -> list[tuple[int, ComponentCategory, list[RobotComponent]]]:
+        """Return every category in this boot phase, ordered by priority.
+
+        Differs from :meth:`_group_by_category` in one crucial way:
+        the returned list contains an entry for **every** category
+        whose boot priority falls into the requested phase
+        (``skeleton=True`` -> categories in
+        :data:`SKELETON_CATEGORIES`; ``skeleton=False`` -> the rest),
+        whether or not this robot has components there. Empty
+        categories surface with an empty member list.
+
+        The boot path uses this so the log mirrors the architecture
+        (e.g. a reserved-but-empty ``BUS_PROVIDER`` shows up as
+        ``=== Boot Level 5 (BUS_PROVIDER) -- empty ===``), not just
+        the actual inventory.
+        """
+        grouped: dict[ComponentCategory, list[RobotComponent]] = {}
+        for c in self._components:
+            grouped.setdefault(c.component_category, []).append(c)
+        result: list[tuple[int, ComponentCategory, list[RobotComponent]]] = []
+        for cat, prio in sorted(BOOT_PRIORITY.items(), key=lambda kv: kv[1]):
+            is_skeleton = cat in SKELETON_CATEGORIES
+            if skeleton != is_skeleton:
+                continue
+            result.append((prio, cat, grouped.get(cat, [])))
+        return result
+
     @staticmethod
     def _log_phase_marker(
         priority: int,
         category: ComponentCategory,
         kind: Literal[
             "boot_enter",
+            "boot_empty",
             "boot_complete",
             "shutdown_enter",
             "shutdown_complete",
@@ -646,28 +680,29 @@ class Robot:
     ) -> None:
         """Emit a Linux-style boot-level marker on the robot logger.
 
-        Four kinds, two pairs:
+        Five kinds:
 
-        - ``boot_enter`` / ``boot_complete`` -- bracket a category
-          while it boots. ``boot_enter`` is logged before the first
-          component of the category starts; ``boot_complete`` is
-          logged once they are all up.
+        - ``boot_enter`` -- introduces a category whose members are
+          about to start. Logged once before the first component of
+          the category boots.
+        - ``boot_empty`` -- single-line marker for a category that
+          exists in :data:`BOOT_PRIORITY` but has no components in
+          this robot. Logged in lieu of the ``boot_enter`` so the
+          boot log mirrors the *architecture*, not just the actual
+          inventory: a reserved level (e.g. ``BUS_PROVIDER``) shows
+          up as ``=== Boot Level 5 (BUS_PROVIDER) -- empty ===``.
+        - ``boot_complete`` -- closing bracket of ``boot_enter``;
+          currently silenced for readability.
         - ``shutdown_enter`` / ``shutdown_complete`` -- mirror on
-          shutdown. ``shutdown_enter`` is logged before the first
-          component of the category begins teardown;
-          ``shutdown_complete`` is logged once the category is
-          fully gone.
+          shutdown; also silenced.
 
         ``priority`` and ``category`` come from
         :data:`src.components.BOOT_PRIORITY` so the marker matches
-        the boot-priority numbers in the log line. The single-method
-        shape replaces the old four-method spread (``_phase_enter``,
-        ``_phase_exit``, ``_phase_leave``, ``_phase_down``) where
-        ``exit`` and ``leave`` were English synonyms and the boot /
-        shutdown side was ambiguous from the name alone.
+        the boot-priority numbers in the log line.
         """
         templates = {
-            "boot_enter": "=== Entering Boot Level %d (%s) ===",
+            "boot_enter": "=== Boot Level %d (%s) ===",
+            "boot_empty": "=== Boot Level %d (%s) -- empty ===",
             "boot_complete": "=== Boot Level %d (%s) complete ===",
             "shutdown_enter": "=== Leaving Boot Level %d (%s) ===",
             "shutdown_complete": "=== Boot Level %d (%s) shutdown complete ===",
