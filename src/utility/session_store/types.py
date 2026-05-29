@@ -43,6 +43,37 @@ def new_message_id() -> str:
     return f"{_MESSAGE_ID_PREFIX}{uuid.uuid4().hex[:_MESSAGE_ID_HEX_LENGTH]}"
 
 
+@dataclass(frozen=True)
+class SessionSummary:
+    """Listing-level metadata for one session.
+
+    Returned by :meth:`SessionStorePort.list_sessions` so a UI can
+    render a sessions sidebar / ``/sessions`` list without reading
+    every message of every session.
+
+    - ``session_id`` -- the opaque session token.
+    - ``title`` -- human-friendly name. ``None`` until one is assigned
+      (manually via ``rename`` or by a future auto-titler). The title
+      is the only summary field stored out-of-band (in the store's
+      ``index.json``); everything else is derived from the session's
+      own messages so the index can never drift out of sync with the
+      conversation.
+    - ``created_at`` -- timestamp of the first message (ISO-8601 UTC).
+      Empty for a session that exists but has no messages yet.
+    - ``last_activity_at`` -- timestamp of the most recent message.
+    - ``message_count`` -- number of persisted message records.
+    - ``model_id`` -- the model of the most recent assistant message,
+      if any; ``None`` otherwise.
+    """
+
+    session_id: str
+    title: str | None = None
+    created_at: str = ""
+    last_activity_at: str = ""
+    message_count: int = 0
+    model_id: str | None = None
+
+
 @dataclass(frozen=True, kw_only=True)
 class SessionMessage:
     """One record persisted to the session JSONL file.

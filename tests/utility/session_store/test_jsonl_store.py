@@ -183,11 +183,113 @@ def test_list_sessions_empty_workspace(tmp_path: Path) -> None:
     assert store.list_sessions() == []
 
 
-async def test_list_sessions_returns_known_ids_sorted(tmp_path: Path) -> None:
+async def test_list_sessions_returns_summaries(tmp_path: Path) -> None:
     store = JsonlSessionStore(sessions_dir=tmp_path)
     for sid in ("sess_b", "sess_a", "sess_c"):
         await store.append(sid, _user_msg("x"))
-    assert store.list_sessions() == ["sess_a", "sess_b", "sess_c"]
+    summaries = store.list_sessions()
+    assert {s.session_id for s in summaries} == {"sess_a", "sess_b", "sess_c"}
+    # All have one message, no title yet.
+    for s in summaries:
+        assert s.message_count == 1
+        assert s.title is None
+
+
+async def test_list_sessions_orders_most_recent_first(tmp_path: Path) -> None:
+    store = JsonlSessionStore(sessions_dir=tmp_path)
+    await store.append(
+        "sess_old",
+        SessionMessage(
+            id=new_message_id(),
+            created_at="2024-01-01T00:00:00Z",
+            message=ChatMessage(role="user", content="x"),
+        ),
+    )
+    await store.append(
+        "sess_new",
+        SessionMessage(
+            id=new_message_id(),
+            created_at="2024-06-01T00:00:00Z",
+            message=ChatMessage(role="user", content="y"),
+        ),
+    )
+    order = [s.session_id for s in store.list_sessions()]
+    assert order == ["sess_new", "sess_old"]
+
+
+async def test_summary_derives_fields_from_messages(tmp_path: Path) -> None:
+    store = JsonlSessionStore(sessions_dir=tmp_path)
+    sid = "sess_sum"
+    await store.append(
+        sid,
+        SessionMessage(
+            id=new_message_id(),
+            created_at="2024-01-01T00:00:00Z",
+            message=ChatMessage(role="user", content="hi"),
+        ),
+    )
+    await store.append(
+        sid,
+        SessionMessage(
+            id=new_message_id(),
+            created_at="2024-01-01T00:05:00Z",
+            message=ChatMessage(role="assistant", content="hello"),
+            model="gpt-4o-mini",
+        ),
+    )
+    (summary,) = store.list_sessions()
+    assert summary.session_id == sid
+    assert summary.created_at == "2024-01-01T00:00:00Z"
+    assert summary.last_activity_at == "2024-01-01T00:05:00Z"
+    assert summary.message_count == 2
+    assert summary.model_id == "gpt-4o-mini"
+
+
+async def test_set_title_appears_in_summary(tmp_path: Path) -> None:
+    store = JsonlSessionStore(sessions_dir=tmp_path)
+    sid = "sess_title"
+    await store.append(sid, _user_msg("x"))
+    store.set_title(sid, "Relativitätstheorie")
+    (summary,) = store.list_sessions()
+    assert summary.title == "Relativitätstheorie"
+
+
+async def test_set_title_empty_clears_title(tmp_path: Path) -> None:
+    store = JsonlSessionStore(sessions_dir=tmp_path)
+    sid = "sess_clear"
+    await store.append(sid, _user_msg("x"))
+    store.set_title(sid, "Temp")
+    store.set_title(sid, "")
+    (summary,) = store.list_sessions()
+    assert summary.title is None
+
+
+async def test_set_title_persists_across_instances(tmp_path: Path) -> None:
+    store = JsonlSessionStore(sessions_dir=tmp_path)
+    sid = "sess_persist"
+    await store.append(sid, _user_msg("x"))
+    store.set_title(sid, "Persisted")
+
+    reopened = JsonlSessionStore(sessions_dir=tmp_path)
+    (summary,) = reopened.list_sessions()
+    assert summary.title == "Persisted"
+
+
+def test_set_title_rejects_bad_session_id(tmp_path: Path) -> None:
+    store = JsonlSessionStore(sessions_dir=tmp_path)
+    with pytest.raises(ValueError):
+        store.set_title("../escape", "x")
+
+
+async def test_corrupt_index_is_ignored(tmp_path: Path) -> None:
+    store = JsonlSessionStore(sessions_dir=tmp_path)
+    sid = "sess_robust"
+    await store.append(sid, _user_msg("x"))
+    (tmp_path / "index.json").write_text("{ not json", encoding="utf-8")
+    # A broken index must not crash listing; titles just fall back to None.
+    (summary,) = store.list_sessions()
+    assert summary.session_id == sid
+    assert summary.title is None
 
 
 # ---------------------------------------------------------------------------

@@ -195,6 +195,7 @@ def _register_builtins() -> None:
     from src.actor.echo import EchoActor
     from src.actor.llm.mock_actor import MockLLMActor
     from src.actor.llm.openai_actor import LLMActorOpenAI
+    from src.utility.capability_collector import CapabilityCollector
     from src.utility.firmware_store import MarkdownFirmwareStore
     from src.utility.model_catalog import ModelCatalog
     from src.utility.session_store import JsonlSessionStore
@@ -206,6 +207,7 @@ def _register_builtins() -> None:
 
     register(AsyncioBus)
     register(BaseKernel)
+    register(CapabilityCollector)
     register(ChatKernel)
     register(CredentialProvider)
     register(EchoActor)

@@ -31,16 +31,27 @@ ship without an extra dependency.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from src.bus.messages import ErrorInfo, ResultStatus
+from src.bus.messages import (
+    ComponentInfo,
+    ComponentLifecycle,
+    ErrorInfo,
+    LifecyclePhase,
+    ResultStatus,
+    component_lifecycle_topic,
+)
 
 if TYPE_CHECKING:
     from src.bus.ports import BusPort
+    from src.command.spec import CommandSpec
+
+logger = logging.getLogger(__name__)
 
 
 INSTANCE_ID_LENGTH: int = 12
@@ -261,6 +272,20 @@ class RobotComponent:
     component_category: ClassVar[ComponentCategory]
     component_description: ClassVar[str] = ""
 
+    provides_commands: ClassVar[tuple["CommandSpec", ...]] = ()
+    """Commands this component advertises on the bus.
+
+    Default empty: a component opts in to the command layer by listing
+    :class:`~src.command.spec.CommandSpec` entries here and implementing
+    the matching ``cmd_*`` handler methods. The owner serializes these
+    into :attr:`src.bus.messages.ComponentInfo.metadata` so the
+    ``CapabilityCollector`` can build the capability manifest, and the
+    component wires them to the bus via
+    :func:`src.command.wiring.wire_commands` in its ``start`` hook.
+    "Alles kann nichts muss": components without commands simply leave
+    this empty.
+    """
+
     @property
     def instance_id(self) -> str:
         """Stable, unique short ID for *this* component instance.
@@ -295,6 +320,46 @@ class RobotComponent:
         # the instance.
         object.__setattr__(self, "_instance_id", new_id)
         return new_id
+
+    def component_info(self) -> ComponentInfo:
+        """Bus-free self-description as a :class:`ComponentInfo`.
+
+        The single place that renders a component into the
+        :class:`~src.bus.messages.ComponentInfo` shape, including the
+        serialized :attr:`provides_commands` under
+        ``metadata["provides_commands"]`` (each entry built via
+        :meth:`~src.command.spec.CommandSpec.manifest_entry` so it
+        already carries ``owner_component`` / ``owner_instance_id``).
+
+        Shared by two callers so both produce identical snapshots:
+
+        - :meth:`BusComponent.announce_lifecycle` -- a bus-attached
+          component announcing *itself* on ``component.lifecycle.<name>``.
+        - the owner (the robot / a kernel) when it has to publish a
+          ``ComponentLifecycle`` on a component's behalf -- in the
+          failure path, where the component can no longer speak for
+          itself.
+
+        Pure and bus-free on purpose: a plain :class:`RobotComponent`
+        has no bus to announce on, but it can still *describe* itself,
+        and the owner needs exactly that description to bridge it.
+        """
+        metadata: dict[str, Any] = {}
+        specs = self.provides_commands
+        if specs:
+            metadata["provides_commands"] = [
+                spec.manifest_entry(
+                    owner_component=self.component_name,
+                    owner_instance_id=self.instance_id,
+                )
+                for spec in specs
+            ]
+        return ComponentInfo(
+            category=self.component_category.value,
+            name=self.component_name,
+            description=self.component_description,
+            metadata=metadata,
+        )
 
     async def start(self) -> None:
         """Bring the component online.
@@ -425,3 +490,59 @@ class BusComponent(RobotComponent):
     async def start(self, bus: "BusPort") -> None:  # type: ignore[override]
         """Bring the component online on ``bus``."""
         raise NotImplementedError(f"{type(self).__name__}.start() not implemented")
+
+    async def announce_lifecycle(
+        self,
+        bus: "BusPort",
+        phase: LifecyclePhase,
+        *,
+        message: str = "",
+    ) -> None:
+        """Self-publish this component's :class:`ComponentLifecycle`.
+
+        The capability story is component-driven: a bus-attached
+        component announces *itself* -- ``"ready"`` at the end of its
+        own ``start(bus)`` (carrying its
+        :attr:`provides_commands` via :meth:`component_info`), and
+        ``"shutdown"`` at the start of its ``stop()`` (the bus boots
+        first / stops last, so it is still alive then). The
+        ``CapabilityCollector`` aggregates these into the retained
+        ``harness.capabilities`` manifest, so a component going offline
+        cleanly retracts its capabilities instead of leaving a stale
+        boot snapshot.
+
+        Only :class:`BusComponent` carries this method: a plain
+        :class:`RobotComponent` has no bus to announce on (the bus
+        itself, actors, off-bus utilities). Their lifecycle, when it
+        matters, is published by the owner -- and only in the failure
+        path, because in the happy path a component that cannot speak
+        for itself simply has no bus presence (it shows up as
+        ``started`` / ``stopped`` in the boot log, not
+        ``attached`` / ``detached``).
+
+        Broadcast + retained: a late subscriber (a UI connecting after
+        boot) reads the component's current state from the retained
+        slot. Best-effort: a publish failure is logged but never
+        aborts the lifecycle.
+        """
+        info = self.component_info()
+        try:
+            await bus.publish_broadcast(
+                ComponentLifecycle(
+                    topic=component_lifecycle_topic(self.component_name),
+                    principal=f"component:{self.component_name}",
+                    source=self.component_name,
+                    source_id=self.instance_id,
+                    run_id="",
+                    phase=phase,
+                    info=info,
+                    message=message,
+                ),
+                retain=True,
+            )
+        except Exception:
+            logger.exception(
+                "%s: failed to announce lifecycle (phase=%s)",
+                type(self).__name__,
+                phase,
+            )

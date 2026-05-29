@@ -80,7 +80,14 @@ defaults:
     chatbot:
       bus: {name: asyncio}
       persistence: {name: jsonl}
-      telemetry: {name: bus_recorder}
+      telemetry:
+        - {name: bus_recorder}
+        # Boots at the telemetry level so it is subscribed before any
+        # component announces capabilities (subscribe_all does not
+        # replay retained events). Aggregates the commands every
+        # component self-announces into the retained harness.capabilities
+        # manifest, so channels/UIs render a failsafe, dynamic surface.
+        - {name: capability-collector}
       audit: {name: audit_note_sink}
       control_plane: {name: control_plane}
       utility:
@@ -145,6 +152,10 @@ defaults:
 
     telemetry:
       - {name: bus_recorder, channel: telemetry}
+      # Read-mostly observer that boots at the telemetry level. Builds
+      # the retained harness.capabilities manifest from the commands
+      # components self-announce. Needs no persistence sink.
+      - {name: capability-collector}
 
     audit:
       - {name: audit_note_sink, channel: audit}

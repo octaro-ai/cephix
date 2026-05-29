@@ -5,18 +5,25 @@ from __future__ import annotations
 import pytest
 
 from src.bus import (
+    CommandNotify,
+    CommandRequest,
+    CommandResponse,
     ComponentInfo,
     ComponentLifecycle,
     ComponentRequest,
     ComponentResponse,
     ErrorInfo,
     Failable,
+    HarnessCapabilities,
     KernelPhase,
     LifecycleAware,
     MountEvent,
     RobotInput,
     RobotLifecycle,
     RobotOutput,
+    command_notify_topic,
+    command_request_topic,
+    command_response_topic,
     component_lifecycle_topic,
     component_mount_topic,
 )
@@ -344,8 +351,8 @@ def test_component_info_carries_metadata() -> None:
 
 
 def test_component_lifecycle_topic_format() -> None:
-    assert component_lifecycle_topic("echo") == "component.echo.lifecycle"
-    assert component_lifecycle_topic("kernel.base") == "component.kernel.base.lifecycle"
+    assert component_lifecycle_topic("echo") == "component.lifecycle.echo"
+    assert component_lifecycle_topic("kernel.base") == "component.lifecycle.kernel.base"
 
 
 def test_component_lifecycle_topic_rejects_empty_name() -> None:
@@ -363,7 +370,7 @@ def test_component_lifecycle_event_basics() -> None:
         phase="ready",
         info=info,
     )
-    assert evt.topic == "component.echo.lifecycle"
+    assert evt.topic == "component.lifecycle.echo"
     assert evt.phase == "ready"
     assert evt.info.name == "echo"
     assert evt.parent == ""
@@ -420,7 +427,7 @@ def test_component_lifecycle_rejects_unknown_phase() -> None:
 
 
 def test_mount_topic_format() -> None:
-    assert component_mount_topic("kernel.base") == "component.kernel.base.mount"
+    assert component_mount_topic("kernel.base") == "component.mount.kernel.base"
 
 
 def test_mount_event_mounted_basics() -> None:
@@ -507,3 +514,169 @@ def test_mount_event_rejects_unknown_phase() -> None:
             slot="actor",
             mounted=info,
         )
+
+
+# ---------------------------------------------------------------------------
+# Command topic helpers
+# ---------------------------------------------------------------------------
+
+
+def test_command_topic_helpers_without_discriminator() -> None:
+    assert command_request_topic("chat.session.new") == "command.request.chat.session.new"
+    assert command_response_topic("chat.session.new") == "command.response.chat.session.new"
+    assert command_notify_topic("chat.session.titled") == "command.notify.chat.session.titled"
+
+
+def test_command_topic_helpers_with_discriminator() -> None:
+    assert command_request_topic("mail.send", "gmail") == "command.request.mail.send@gmail"
+    assert command_response_topic("mail.send", "gmail") == "command.response.mail.send@gmail"
+    assert command_notify_topic("mail.sent", "gmail") == "command.notify.mail.sent@gmail"
+
+
+def test_command_topic_kind_is_a_prefix() -> None:
+    """Big-endian layout: the kind segment enables prefix subscriptions."""
+    for action in ("chat.session.new", "mail.send"):
+        assert command_request_topic(action).startswith("command.request.")
+        assert command_response_topic(action).startswith("command.response.")
+        assert command_notify_topic(action).startswith("command.notify.")
+
+
+def test_command_topic_helpers_reject_empty_action() -> None:
+    for helper in (command_request_topic, command_response_topic, command_notify_topic):
+        with pytest.raises(ValueError, match="non-empty action"):
+            helper("")
+
+
+# ---------------------------------------------------------------------------
+# CommandRequest / CommandResponse / CommandNotify
+# ---------------------------------------------------------------------------
+
+
+def test_command_request_basics() -> None:
+    req = CommandRequest(
+        **_COMMON,
+        correlation_id="cmd-1",
+        action="chat.session.new",
+        payload={"k": "v"},
+    )
+    assert req.action == "chat.session.new"
+    assert req.target is None
+    assert req.payload == {"k": "v"}
+    assert req.correlation_id == "cmd-1"
+
+
+def test_command_request_carries_target_discriminator() -> None:
+    req = CommandRequest(
+        **_COMMON,
+        correlation_id="cmd-1",
+        action="mail.send",
+        target="gmail",
+    )
+    assert req.target == "gmail"
+
+
+def test_command_request_requires_action() -> None:
+    with pytest.raises(ValueError, match="action"):
+        CommandRequest(**_COMMON, correlation_id="cmd-1", action="")
+
+
+def test_command_request_requires_correlation_id() -> None:
+    with pytest.raises(ValueError, match="correlation_id"):
+        CommandRequest(**_COMMON, action="chat.session.new")
+
+
+def test_command_response_success() -> None:
+    resp = CommandResponse(
+        **_COMMON,
+        correlation_id="cmd-1",
+        action="chat.session.new",
+        payload={"session_id": "sess-9"},
+    )
+    assert resp.status == "ok"
+    assert resp.error is None
+    assert resp.payload == {"session_id": "sess-9"}
+
+
+def test_command_response_error_carries_error_info() -> None:
+    resp = CommandResponse(
+        **_COMMON,
+        correlation_id="cmd-1",
+        action="chat.session.new",
+        status="error",
+        error=ErrorInfo(code="command.denied", message="nope"),
+    )
+    assert resp.status == "error"
+    assert resp.error is not None
+    assert resp.error.code == "command.denied"
+
+
+def test_command_response_requires_action() -> None:
+    with pytest.raises(ValueError, match="action"):
+        CommandResponse(**_COMMON, correlation_id="cmd-1", action="")
+
+
+def test_command_response_requires_correlation_id() -> None:
+    with pytest.raises(ValueError, match="correlation_id"):
+        CommandResponse(**_COMMON, action="chat.session.new")
+
+
+def test_command_response_is_failable() -> None:
+    assert issubclass(CommandResponse, Failable)
+    with pytest.raises(ValueError, match="status='ok' must not"):
+        CommandResponse(
+            **_COMMON,
+            correlation_id="cmd-1",
+            action="chat.session.new",
+            error=ErrorInfo(code="boom"),
+        )
+
+
+def test_command_notify_basics() -> None:
+    note = CommandNotify(
+        **_COMMON,
+        action="chat.session.titled",
+        payload={"session_id": "sess-9", "title": "Einstein"},
+    )
+    assert note.action == "chat.session.titled"
+    assert note.correlation_id is None
+    assert note.payload["title"] == "Einstein"
+
+
+def test_command_notify_requires_action() -> None:
+    with pytest.raises(ValueError, match="action"):
+        CommandNotify(**_COMMON, action="")
+
+
+# ---------------------------------------------------------------------------
+# HarnessCapabilities
+# ---------------------------------------------------------------------------
+
+
+def test_harness_capabilities_defaults_empty() -> None:
+    cap = HarnessCapabilities(**_COMMON)
+    assert cap.commands == ()
+    assert cap.models == ()
+    assert cap.tools == ()
+    assert cap.skills == ()
+    assert cap.settings == ()
+
+
+def test_harness_capabilities_is_global_no_session_field() -> None:
+    """The global manifest carries no per-session active model/io."""
+    cap = HarnessCapabilities(**_COMMON)
+    assert not hasattr(cap, "session_id")
+    assert not hasattr(cap, "model")
+    assert not hasattr(cap, "inputs")
+    assert not hasattr(cap, "outputs")
+
+
+def test_harness_capabilities_carries_commands() -> None:
+    cap = HarnessCapabilities(
+        **_COMMON,
+        commands=(
+            {"action": "chat.session.new", "label": "New chat"},
+            {"action": "chat.session.list", "label": "List chats"},
+        ),
+    )
+    assert len(cap.commands) == 2
+    assert cap.commands[0]["action"] == "chat.session.new"

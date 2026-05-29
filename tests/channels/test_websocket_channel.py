@@ -337,3 +337,177 @@ async def test_port_conflict_without_range_raises() -> None:
             await occupant.stop()
     finally:
         await bus_a.stop()
+
+
+# ---------------------------------------------------------------------------
+# Command layer: command / command_response / capabilities frames
+# ---------------------------------------------------------------------------
+
+
+async def _connect_and_welcome(session: aiohttp.ClientSession, port: int):
+    ws = await session.ws_connect(f"ws://127.0.0.1:{port}/ws")
+    welcome = json.loads((await asyncio.wait_for(ws.receive(), timeout=2.0)).data)
+    assert welcome["type"] == "welcome"
+    return ws
+
+
+async def _recv_frame_of_type(ws, expected_type: str, *, timeout: float = 2.0):
+    """Receive frames until one of ``expected_type`` arrives."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while True:
+        remaining = deadline - asyncio.get_event_loop().time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError(expected_type)
+        msg = await asyncio.wait_for(ws.receive(), timeout=remaining)
+        if msg.type != aiohttp.WSMsgType.TEXT:
+            continue
+        frame = json.loads(msg.data)
+        if frame.get("type") == expected_type:
+            return frame
+
+
+async def test_command_frame_publishes_command_request() -> None:
+    from src.bus import CommandRequest, command_request_topic
+
+    bus = AsyncioBus()
+    requests: list[CommandRequest] = []
+
+    async def collect(event: RobotEvent) -> None:
+        if isinstance(event, CommandRequest):
+            requests.append(event)
+
+    bus.subscribe(command_request_topic("chat.session.new"), collect)
+
+    channel = WebsocketChannel(host="127.0.0.1", port=0)
+    await bus.start()
+    try:
+        await channel.start(bus)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with await _connect_and_welcome(
+                    session, channel.actual_port
+                ) as ws:
+                    await ws.send_json(
+                        {
+                            "type": "command",
+                            "action": "chat.session.new",
+                            "correlation_id": "cmd-xyz",
+                        }
+                    )
+                    await asyncio.sleep(0.05)
+        finally:
+            await channel.stop()
+    finally:
+        await bus.stop()
+
+    assert len(requests) == 1
+    assert requests[0].action == "chat.session.new"
+    assert requests[0].correlation_id == "cmd-xyz"
+    assert requests[0].source == "channel.websocket"
+
+
+async def test_command_response_routes_back_by_correlation_id() -> None:
+    from src.bus import CommandResponse, command_response_topic
+
+    bus = AsyncioBus()
+    channel = WebsocketChannel(host="127.0.0.1", port=0)
+    await bus.start()
+    try:
+        await channel.start(bus)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with await _connect_and_welcome(
+                    session, channel.actual_port
+                ) as ws:
+                    await ws.send_json(
+                        {
+                            "type": "command",
+                            "action": "chat.session.new",
+                            "correlation_id": "cmd-route",
+                        }
+                    )
+                    await asyncio.sleep(0.05)
+                    await bus.publish(
+                        CommandResponse(
+                            topic=command_response_topic("chat.session.new"),
+                            principal="system",
+                            source="chat",
+                            run_id="run-1",
+                            correlation_id="cmd-route",
+                            action="chat.session.new",
+                            payload={"session_id": "sess_new"},
+                        )
+                    )
+                    frame = await _recv_frame_of_type(ws, "command_response")
+        finally:
+            await channel.stop()
+    finally:
+        await bus.stop()
+
+    assert frame["correlation_id"] == "cmd-route"
+    assert frame["status"] == "ok"
+    assert frame["payload"]["session_id"] == "sess_new"
+
+
+async def test_capabilities_frame_sent_on_connect_from_retained() -> None:
+    from src.bus import HARNESS_CAPABILITIES_TOPIC, HarnessCapabilities
+
+    bus = AsyncioBus()
+    channel = WebsocketChannel(host="127.0.0.1", port=0)
+    await bus.start()
+    try:
+        await bus.publish_broadcast(
+            HarnessCapabilities(
+                topic=HARNESS_CAPABILITIES_TOPIC,
+                principal="system",
+                source="capability-collector",
+                run_id="boot-1",
+                commands=({"action": "chat.session.new", "label": "New chat"},),
+            ),
+            retain=True,
+        )
+        await channel.start(bus)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with await _connect_and_welcome(
+                    session, channel.actual_port
+                ) as ws:
+                    frame = await _recv_frame_of_type(ws, "capabilities")
+        finally:
+            await channel.stop()
+    finally:
+        await bus.stop()
+
+    assert frame["commands"][0]["action"] == "chat.session.new"
+
+
+async def test_capabilities_update_broadcast_to_connected_sessions() -> None:
+    from src.bus import HARNESS_CAPABILITIES_TOPIC, HarnessCapabilities
+
+    bus = AsyncioBus()
+    channel = WebsocketChannel(host="127.0.0.1", port=0)
+    await bus.start()
+    try:
+        await channel.start(bus)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with await _connect_and_welcome(
+                    session, channel.actual_port
+                ) as ws:
+                    await bus.publish_broadcast(
+                        HarnessCapabilities(
+                            topic=HARNESS_CAPABILITIES_TOPIC,
+                            principal="system",
+                            source="capability-collector",
+                            run_id="boot-1",
+                            commands=({"action": "chat.session.list"},),
+                        ),
+                        retain=True,
+                    )
+                    frame = await _recv_frame_of_type(ws, "capabilities")
+        finally:
+            await channel.stop()
+    finally:
+        await bus.stop()
+
+    assert frame["commands"][0]["action"] == "chat.session.list"

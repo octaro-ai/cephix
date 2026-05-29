@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from src.utility.session_store.types import SessionMessage
+from src.utility.session_store.types import SessionMessage, SessionSummary
 
 
 class SessionStorePort(ABC):
@@ -71,5 +71,19 @@ class SessionStorePort(ABC):
         """
 
     @abstractmethod
-    def list_sessions(self) -> list[str]:
-        """Return all known session ids, sorted lexicographically."""
+    def list_sessions(self) -> list[SessionSummary]:
+        """Return a :class:`SessionSummary` per known session.
+
+        Ordered most-recently-active first so a UI can render a chat
+        sidebar directly. Sessions with no messages yet still appear
+        (empty ``created_at``/``last_activity_at``).
+        """
+
+    @abstractmethod
+    def set_title(self, session_id: str, title: str) -> None:
+        """Assign (or replace) the human-friendly title of ``session_id``.
+
+        The title is the one piece of session metadata not derivable
+        from the messages, so it is persisted out-of-band. An empty
+        ``title`` clears any existing title.
+        """

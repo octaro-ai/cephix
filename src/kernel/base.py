@@ -207,7 +207,21 @@ class BaseKernel(KernelPort):
         )
         await self._publish_actor_mount(phase="mounted")
 
+        # Self-announce: the kernel is online and ready. Carries its
+        # ``provides_commands`` via ``component_info()`` so the
+        # CapabilityCollector can add them to the manifest. A
+        # subclass that wires more on top (e.g. ChatKernel's command
+        # handlers) does so synchronously after ``super().start()``,
+        # before the event loop hands the announce to the collector,
+        # so no command can arrive ahead of its handler.
+        await self.announce_lifecycle(bus, "ready")
+
     async def stop(self) -> None:
+        # Announce shutdown first, while the bus is still alive (it
+        # boots first / stops last), so the collector retracts this
+        # kernel's capabilities before we tear anything down.
+        if self._bus is not None:
+            await self.announce_lifecycle(self._bus, "shutdown")
         await self._publish_actor_mount(phase="unmounted")
         if self._subscription is not None:
             await self._subscription.unsubscribe()

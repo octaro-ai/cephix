@@ -22,18 +22,21 @@ process touching the same files is a misconfiguration.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import uuid
 from pathlib import Path
 
 from src.components import ComponentCategory, RobotComponent
 from src.utility.session_store.ports import SessionStorePort
-from src.utility.session_store.types import SessionMessage
+from src.utility.session_store.types import SessionMessage, SessionSummary
 
 logger = logging.getLogger(__name__)
 
 _SESSION_ID_PREFIX = "sess_"
 _SESSION_ID_HEX_LENGTH = 12
+_INDEX_FILENAME = "index.json"
 
 
 class JsonlSessionStore(RobotComponent, SessionStorePort):
@@ -168,19 +171,99 @@ class JsonlSessionStore(RobotComponent, SessionStorePort):
                 out = out[-limit:]
         return out
 
-    def list_sessions(self) -> list[str]:
-        """Enumerate every persisted session id, sorted lexicographically."""
+    def list_sessions(self) -> list[SessionSummary]:
+        """Build a :class:`SessionSummary` for every persisted session.
+
+        Every field except the title is derived from the session's own
+        JSONL so the listing can never drift from the conversation; the
+        title is pulled from the ``index.json`` sidecar. Ordered
+        most-recently-active first (ties broken by session id) so the
+        result drops straight into a chat sidebar.
+        """
         if not self._sessions_dir.exists():
             return []
-        return sorted(
-            p.stem
-            for p in self._sessions_dir.glob("*.jsonl")
-            if p.is_file()
+        titles = self._read_index()
+        summaries = [
+            self._summarize(path.stem, path, titles.get(path.stem))
+            for path in self._sessions_dir.glob("*.jsonl")
+            if path.is_file()
+        ]
+        summaries.sort(
+            key=lambda s: (s.last_activity_at, s.session_id), reverse=True
         )
+        return summaries
+
+    def set_title(self, session_id: str, title: str) -> None:
+        """Persist (or clear) the title of ``session_id`` in the index."""
+        self._validate_session_id(session_id)
+        index = self._read_index()
+        if title:
+            index[session_id] = title
+        else:
+            index.pop(session_id, None)
+        self._write_index(index)
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _summarize(
+        self, session_id: str, path: Path, title: str | None
+    ) -> SessionSummary:
+        """Derive a :class:`SessionSummary` from one session file."""
+        messages = self.messages(session_id)
+        if not messages:
+            return SessionSummary(session_id=session_id, title=title)
+        model_id: str | None = None
+        for msg in reversed(messages):
+            if msg.model:
+                model_id = msg.model
+                break
+        return SessionSummary(
+            session_id=session_id,
+            title=title,
+            created_at=messages[0].created_at,
+            last_activity_at=messages[-1].created_at,
+            message_count=len(messages),
+            model_id=model_id,
+        )
+
+    def _index_path(self) -> Path:
+        return self._sessions_dir / _INDEX_FILENAME
+
+    def _read_index(self) -> dict[str, str]:
+        """Load the ``session_id -> title`` map; tolerate missing/corrupt.
+
+        A missing or unreadable index is treated as empty rather than
+        fatal: the index only holds titles, and a session without a
+        title is perfectly valid.
+        """
+        path = self._index_path()
+        if not path.exists():
+            return {}
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            logger.warning(
+                "JsonlSessionStore: ignoring unreadable session index %s", path
+            )
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {
+            str(k): str(v) for k, v in data.items() if isinstance(v, str)
+        }
+
+    def _write_index(self, index: dict[str, str]) -> None:
+        """Write the title index atomically (temp file + replace)."""
+        self._sessions_dir.mkdir(parents=True, exist_ok=True)
+        path = self._index_path()
+        tmp = path.with_suffix(".json.tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(index, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+        os.replace(tmp, path)
 
     def _session_path(self, session_id: str) -> Path:
         return self._sessions_dir / f"{session_id}.jsonl"

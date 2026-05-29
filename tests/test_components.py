@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from src.actor.echo import EchoActor
@@ -234,3 +236,77 @@ async def test_component_health_check_can_be_overridden() -> None:
     assert h.error is not None
     assert h.error.code == "cache_only"
     assert h.metadata == {"model": "gpt-5"}
+
+
+# ---------------------------------------------------------------------------
+# component_info() + self-announced lifecycle
+# ---------------------------------------------------------------------------
+
+
+def test_component_info_without_commands_has_empty_metadata() -> None:
+    class _Plain(RobotComponent):
+        component_name = "plain-info"
+        component_category = ComponentCategory.ACTOR
+
+    info = _Plain().component_info()
+    assert info.name == "plain-info"
+    assert info.category == "actor"
+    assert info.metadata == {}
+
+
+def test_component_info_serializes_provides_commands() -> None:
+    from src.command import CommandSpec
+
+    class _WithCmd(RobotComponent):
+        component_name = "cmd-info"
+        component_category = ComponentCategory.KERNEL
+        provides_commands = (
+            CommandSpec(action="x.y.z", handler="h", label="Z"),
+        )
+
+    c = _WithCmd()
+    entries = c.component_info().metadata["provides_commands"]
+    assert entries[0]["action"] == "x.y.z"
+    assert entries[0]["owner_component"] == "cmd-info"
+    assert entries[0]["owner_instance_id"] == c.instance_id
+
+
+class _AnnouncingComponent(BusComponent):
+    component_name = "announcer"
+    component_category = ComponentCategory.BUS_UTILITY
+
+    async def start(self, bus: AsyncioBus) -> None:  # type: ignore[override]
+        await self.announce_lifecycle(bus, "ready")
+
+    async def stop(self) -> None:
+        pass
+
+
+async def test_bus_component_self_announces_ready_retained() -> None:
+    from src.bus.messages import ComponentLifecycle, component_lifecycle_topic
+
+    bus = AsyncioBus()
+    seen: list[ComponentLifecycle] = []
+
+    async def handler(event) -> None:
+        if isinstance(event, ComponentLifecycle):
+            seen.append(event)
+
+    await bus.start()
+    try:
+        bus.subscribe_all(handler)
+        comp = _AnnouncingComponent()
+        await comp.start(bus)
+        await comp.announce_lifecycle(bus, "shutdown")
+        await asyncio.sleep(0.02)
+
+        # Retained slot carries the latest phase for late subscribers.
+        retained = bus.retained(component_lifecycle_topic("announcer"))
+        assert isinstance(retained, ComponentLifecycle)
+        assert retained.phase == "shutdown"
+    finally:
+        await bus.stop()
+
+    phases = [e.phase for e in seen]
+    assert "ready" in phases
+    assert "shutdown" in phases

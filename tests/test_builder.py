@@ -799,6 +799,28 @@ class TestBuilderChatKernel:
         )
         assert any(isinstance(c, ChatKernel) for c in robot.components)
 
+        # The chatbot template also wires the capability collector so
+        # the command layer's manifest is published.
+        from src.components import ComponentCategory
+        from src.kernel.chat import ChatKernel as _ChatKernel
+        from src.utility.capability_collector import CapabilityCollector
+
+        collectors = [
+            c for c in robot.components if isinstance(c, CapabilityCollector)
+        ]
+        assert len(collectors) == 1
+        # It boots at the telemetry level (subscribed before anyone
+        # announces capabilities) ...
+        assert collectors[0].component_category is ComponentCategory.TELEMETRY
+        # ... which means it comes up ahead of the command-providing
+        # kernel in boot order.
+        order = list(robot.components)  # robot.components is boot order
+        collector_pos = order.index(collectors[0])
+        kernel_pos = next(
+            i for i, c in enumerate(order) if isinstance(c, _ChatKernel)
+        )
+        assert collector_pos < kernel_pos
+
 
 # ---------------------------------------------------------------------------
 # Templates: blueprint resolution + slot-merge semantics

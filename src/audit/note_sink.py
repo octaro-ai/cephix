@@ -44,6 +44,7 @@ class AuditNoteSink(BusComponent):
             return
         self._bus = bus
         self._subscription = bus.subscribe(AUDIT_TOPIC, self._record)
+        await self.announce_lifecycle(bus, "ready")
 
     async def drain(self) -> None:
         try:
@@ -54,6 +55,8 @@ class AuditNoteSink(BusComponent):
             )
 
     async def stop(self) -> None:
+        if self._bus is not None:
+            await self.announce_lifecycle(self._bus, "shutdown")
         if self._subscription is not None:
             try:
                 await self._subscription.unsubscribe()

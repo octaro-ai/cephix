@@ -694,3 +694,190 @@ class TestFinalize:
         assert roles == ["user", "assistant", "user"]
         assert second_call[0]["content"] == "first"
         assert second_call[-1]["content"] == "second"
+
+
+# ---------------------------------------------------------------------------
+# Session commands (chat.session.{new,list,open,rename})
+# ---------------------------------------------------------------------------
+
+
+async def _invoke_command(
+    *,
+    bus: AsyncioBus,
+    action: str,
+    payload: dict[str, Any] | None = None,
+):
+    """Publish a CommandRequest and return the matching CommandResponse."""
+    from src.bus import (
+        CommandRequest,
+        CommandResponse,
+        command_request_topic,
+        command_response_topic,
+    )
+
+    responses: list[CommandResponse] = []
+
+    async def collect(event: RobotEvent) -> None:
+        if isinstance(event, CommandResponse):
+            responses.append(event)
+
+    bus.subscribe(command_response_topic(action), collect)
+    await bus.publish(
+        CommandRequest(
+            topic=command_request_topic(action),
+            principal="user-1",
+            source="channel.test",
+            run_id="run-cmd",
+            correlation_id=f"cmd-{action}",
+            action=action,
+            payload=payload or {},
+        )
+    )
+    for _ in range(5):
+        await asyncio.sleep(0.02)
+    assert responses, f"no CommandResponse for {action}"
+    return responses[-1]
+
+
+class TestSessionCommands:
+    async def test_kernel_advertises_session_commands(self, tmp_path: Path) -> None:
+        actions = {spec.action for spec in ChatKernel.provides_commands}
+        assert actions == {
+            "chat.session.new",
+            "chat.session.list",
+            "chat.session.open",
+            "chat.session.rename",
+        }
+
+    async def test_session_new_creates_session(self, tmp_path: Path) -> None:
+        bus = AsyncioBus()
+        await bus.start()
+        try:
+            kernel, actor, sessions, _, _ = await _build_running_kernel(
+                bus=bus, sessions_dir=tmp_path
+            )
+            try:
+                resp = await _invoke_command(bus=bus, action="chat.session.new")
+            finally:
+                await kernel.stop()
+                await actor.stop()
+        finally:
+            await bus.stop()
+
+        assert resp.status == "ok"
+        sid = resp.payload["session_id"]
+        assert sid.startswith("sess_")
+        assert any(s.session_id == sid for s in sessions.list_sessions())
+
+    async def test_session_list_returns_summaries(self, tmp_path: Path) -> None:
+        bus = AsyncioBus()
+        await bus.start()
+        try:
+            kernel, actor, sessions, _, _ = await _build_running_kernel(
+                bus=bus, sessions_dir=tmp_path
+            )
+            await sessions.append(
+                "sess_known",
+                SessionMessage(
+                    id=new_message_id(),
+                    created_at="2024-01-01T00:00:00Z",
+                    message=ChatMessage(role="user", content="hi"),
+                ),
+            )
+            try:
+                resp = await _invoke_command(bus=bus, action="chat.session.list")
+            finally:
+                await kernel.stop()
+                await actor.stop()
+        finally:
+            await bus.stop()
+
+        assert resp.status == "ok"
+        ids = [s["session_id"] for s in resp.payload["sessions"]]
+        assert "sess_known" in ids
+
+    async def test_session_open_returns_history(self, tmp_path: Path) -> None:
+        bus = AsyncioBus()
+        await bus.start()
+        try:
+            kernel, actor, sessions, _, _ = await _build_running_kernel(
+                bus=bus, sessions_dir=tmp_path
+            )
+            await sessions.append(
+                "sess_open",
+                SessionMessage(
+                    id=new_message_id(),
+                    created_at="2024-01-01T00:00:00Z",
+                    message=ChatMessage(role="user", content="remember this"),
+                ),
+            )
+            try:
+                resp = await _invoke_command(
+                    bus=bus,
+                    action="chat.session.open",
+                    payload={"session_id": "sess_open"},
+                )
+            finally:
+                await kernel.stop()
+                await actor.stop()
+        finally:
+            await bus.stop()
+
+        assert resp.status == "ok"
+        assert resp.payload["session_id"] == "sess_open"
+        assert resp.payload["created"] is False
+        assert resp.payload["messages"][0]["content"] == "remember this"
+
+    async def test_session_open_without_id_errors(self, tmp_path: Path) -> None:
+        bus = AsyncioBus()
+        await bus.start()
+        try:
+            kernel, actor, _, _, _ = await _build_running_kernel(
+                bus=bus, sessions_dir=tmp_path
+            )
+            try:
+                resp = await _invoke_command(
+                    bus=bus, action="chat.session.open", payload={}
+                )
+            finally:
+                await kernel.stop()
+                await actor.stop()
+        finally:
+            await bus.stop()
+
+        assert resp.status == "error"
+        assert resp.error is not None
+        assert resp.error.code == "command.handler_failed"
+
+    async def test_session_rename_sets_title(self, tmp_path: Path) -> None:
+        bus = AsyncioBus()
+        await bus.start()
+        try:
+            kernel, actor, sessions, _, _ = await _build_running_kernel(
+                bus=bus, sessions_dir=tmp_path
+            )
+            await sessions.append(
+                "sess_rename",
+                SessionMessage(
+                    id=new_message_id(),
+                    created_at="2024-01-01T00:00:00Z",
+                    message=ChatMessage(role="user", content="x"),
+                ),
+            )
+            try:
+                resp = await _invoke_command(
+                    bus=bus,
+                    action="chat.session.rename",
+                    payload={"session_id": "sess_rename", "title": "My Chat"},
+                )
+            finally:
+                await kernel.stop()
+                await actor.stop()
+        finally:
+            await bus.stop()
+
+        assert resp.status == "ok"
+        (summary,) = [
+            s for s in sessions.list_sessions() if s.session_id == "sess_rename"
+        ]
+        assert summary.title == "My Chat"

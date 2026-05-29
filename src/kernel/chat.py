@@ -36,10 +36,14 @@ remain untouched -- this is the canonical extension model the
 from __future__ import annotations
 
 import logging
+from dataclasses import asdict
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from src.actor.llm.ports import LLMActorPort
 from src.actor.llm.types import ChatMessage
+from src.bus.messages import CommandRequest
+from src.command import CommandSpec, wire_commands
 from src.components import ComponentCategory
 from src.kernel.base import BaseKernel
 from src.kernel.run import RunContext
@@ -47,6 +51,9 @@ from src.utility.firmware_store.ports import FirmwareStorePort
 from src.utility.model_catalog.ports import ModelCatalogPort
 from src.utility.session_store.ports import SessionStorePort
 from src.utility.session_store.types import SessionMessage, new_message_id
+
+if TYPE_CHECKING:
+    from src.bus.ports import BusPort, Subscription
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +93,39 @@ class ChatKernel(BaseKernel):
         "OCF-shaped JSONL."
     )
 
+    provides_commands = (
+        CommandSpec(
+            action="chat.session.new",
+            handler="cmd_session_new",
+            label="New chat",
+            description="Start a fresh conversation session.",
+            ui_hints={"shortcut": "/new", "group": "session"},
+        ),
+        CommandSpec(
+            action="chat.session.list",
+            handler="cmd_session_list",
+            label="Sessions",
+            description="List existing conversation sessions.",
+            ui_hints={"shortcut": "/sessions", "group": "session"},
+        ),
+        CommandSpec(
+            action="chat.session.open",
+            handler="cmd_session_open",
+            label="Open chat",
+            description="Open an existing session and load its history.",
+            args_schema={"session_id": "string"},
+            ui_hints={"shortcut": "/open", "group": "session"},
+        ),
+        CommandSpec(
+            action="chat.session.rename",
+            handler="cmd_session_rename",
+            label="Rename chat",
+            description="Set a human-friendly title for a session.",
+            args_schema={"session_id": "string", "title": "string"},
+            ui_hints={"shortcut": "/rename", "group": "session"},
+        ),
+    )
+
     def __init__(
         self,
         *,
@@ -106,6 +146,73 @@ class ChatKernel(BaseKernel):
         self._firmware = firmware
         self._sessions = sessions
         self._model_catalog = model_catalog
+        self._command_subs: list[Subscription] = []
+
+    # ------------------------------------------------------------------
+    # Lifecycle: wire the session commands on top of the base loop
+    # ------------------------------------------------------------------
+
+    async def start(self, bus: "BusPort") -> None:
+        await super().start(bus)
+        self._command_subs = wire_commands(self, bus)
+
+    async def stop(self) -> None:
+        for sub in self._command_subs:
+            try:
+                await sub.unsubscribe()
+            except Exception:
+                logger.exception("ChatKernel: failed to unsubscribe a command")
+        self._command_subs = []
+        await super().stop()
+
+    # ------------------------------------------------------------------
+    # Command handlers (deterministic, no actor/LLM involvement)
+    # ------------------------------------------------------------------
+
+    async def cmd_session_new(self, request: CommandRequest) -> dict:
+        """Create a fresh session and return its id."""
+        session_id = self._sessions.new_session()
+        self._sessions.open(session_id)
+        return {"session_id": session_id}
+
+    async def cmd_session_list(self, request: CommandRequest) -> dict:
+        """Return a summary per known session (most recent first)."""
+        return {
+            "sessions": [asdict(s) for s in self._sessions.list_sessions()]
+        }
+
+    async def cmd_session_open(self, request: CommandRequest) -> dict:
+        """Open a session (lazy-create) and return its history."""
+        session_id = str(request.payload.get("session_id") or "").strip()
+        if not session_id:
+            raise ValueError("chat.session.open requires a 'session_id'")
+        created = self._sessions.open(session_id)
+        history = self._sessions.messages(session_id, limit=None)
+        return {
+            "session_id": session_id,
+            "created": created,
+            "messages": [self._serialize_message(m) for m in history],
+        }
+
+    async def cmd_session_rename(self, request: CommandRequest) -> dict:
+        """Assign a human-friendly title to a session."""
+        session_id = str(request.payload.get("session_id") or "").strip()
+        if not session_id:
+            raise ValueError("chat.session.rename requires a 'session_id'")
+        title = str(request.payload.get("title") or "")
+        self._sessions.set_title(session_id, title)
+        return {"session_id": session_id, "title": title}
+
+    @staticmethod
+    def _serialize_message(message: SessionMessage) -> dict:
+        """Render a stored message for transport to a channel/UI."""
+        return {
+            "id": message.id,
+            "created_at": message.created_at,
+            "role": message.message.role,
+            "content": message.message.content,
+            "model": message.model,
+        }
 
     # ------------------------------------------------------------------
     # Phase overrides

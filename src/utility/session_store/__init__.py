@@ -24,11 +24,16 @@ the field shapes -- the structural alignment is already there.
 
 from src.utility.session_store.ports import SessionStorePort
 from src.utility.session_store.store import JsonlSessionStore
-from src.utility.session_store.types import SessionMessage, new_message_id
+from src.utility.session_store.types import (
+    SessionMessage,
+    SessionSummary,
+    new_message_id,
+)
 
 __all__ = [
     "JsonlSessionStore",
     "SessionMessage",
     "SessionStorePort",
+    "SessionSummary",
     "new_message_id",
 ]

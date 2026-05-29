@@ -120,9 +120,12 @@ class CredentialProvider(BusComponent, CredentialProviderPort):
     async def start(self, bus: BusPort) -> None:  # type: ignore[override]
         """Attach the bus so later resolves can emit audit notes."""
         self._bus = bus
+        await self.announce_lifecycle(bus, "ready")
 
     async def stop(self) -> None:
         """Detach the bus. Stores stay loaded; audits go silent."""
+        if self._bus is not None:
+            await self.announce_lifecycle(self._bus, "shutdown")
         self._bus = None
 
     # ---- Lookup -----------------------------------------------------------

@@ -57,6 +57,46 @@ syserr-like deliveries: clients should render ``status="error"``
 distinctly (red banner, retry affordance, ...). The optional
 ``error`` block mirrors the bus-side :class:`ErrorInfo`.
 
+Command layer (beyond conversation):
+
+Client -> Server (invoke a command)::
+
+    {
+        "type": "command",
+        "action": "chat.session.new",
+        "target": null,
+        "payload": {},
+        "correlation_id": "cmd-..."
+    }
+
+The channel publishes a :class:`CommandRequest` on
+``command.request.<action>`` (+ ``@<target>``) and remembers the
+``correlation_id -> session`` mapping so the matching
+:class:`CommandResponse` routes back to the originating client only.
+
+Server -> Client (command result)::
+
+    {
+        "type": "command_response",
+        "action": "chat.session.new",
+        "correlation_id": "cmd-...",
+        "status": "ok",
+        "payload": {...},
+        "error": {...}        # only when status != "ok"
+    }
+
+Server -> Client (capability manifest, on connect + on change)::
+
+    {
+        "type": "capabilities",
+        "commands": [{"action": "chat.session.new", "label": "New chat", ...}],
+        "models": [...], "tools": [...], "skills": [...], "settings": [...]
+    }
+
+The manifest is the retained ``harness.capabilities`` snapshot. UIs
+render strictly what it advertises -- a command absent from the
+manifest gets no button / no slash-command.
+
 Routing semantics: each connection is a session with its own
 ``session_id``. Every incoming text creates a new ``run_id`` that the
 channel maps back to its session. ``RobotOutput`` events are routed
@@ -92,13 +132,18 @@ from typing import Any
 from aiohttp import WSMsgType, web
 
 from src.bus.messages import (
+    HARNESS_CAPABILITIES_TOPIC,
     INPUT_TOPIC,
     LIFECYCLE_TOPIC,
     OUTPUT_TOPIC,
+    CommandRequest,
+    CommandResponse,
+    HarnessCapabilities,
     RobotEvent,
     RobotInput,
     RobotLifecycle,
     RobotOutput,
+    command_request_topic,
 )
 from src.bus.ports import BusPort, Subscription
 from src.channels.ports import ChannelPort
@@ -178,9 +223,13 @@ class WebsocketChannel(ChannelPort):
         self._site: web.TCPSite | None = None
         self._output_subscription: Subscription | None = None
         self._lifecycle_subscription: Subscription | None = None
+        self._all_subscription: Subscription | None = None
 
         self._sessions: dict[str, web.WebSocketResponse] = {}
         self._run_to_session: dict[str, str] = {}
+        # correlation_id -> session_id, so a CommandResponse routes back
+        # to the one client that issued the command.
+        self._corr_to_session: dict[str, str] = {}
         self._actual_port: int | None = None
 
         self._robot_id: str | None = None
@@ -211,6 +260,14 @@ class WebsocketChannel(ChannelPort):
             self._output_topic,
             self._handle_output,
         )
+        # The command layer rides on dynamic topics
+        # (``command.response.<action>``) and the capability manifest
+        # on its own retained topic. A single all-subscriber catches
+        # both kinds without enumerating actions; the channel filters
+        # for what concerns it. The retained manifest is read
+        # synchronously on connect (subscribe_all does not replay
+        # retained events).
+        self._all_subscription = bus.subscribe_all(self._handle_bus_event)
 
         app = web.Application()
         app.router.add_get(self._path, self._handle_ws)
@@ -226,6 +283,8 @@ class WebsocketChannel(ChannelPort):
             self._actual_port,
             self._path,
         )
+
+        await self.announce_lifecycle(bus, "ready")
 
     async def _bind_with_resolution(self) -> int:
         """Try ``port``, then ``port_range``, then ``0`` as last resort.
@@ -286,6 +345,8 @@ class WebsocketChannel(ChannelPort):
         return fallback
 
     async def stop(self) -> None:
+        if self._bus is not None:
+            await self.announce_lifecycle(self._bus, "shutdown")
         self._shutting_down = True
         for ws in list(self._sessions.values()):
             try:
@@ -307,6 +368,10 @@ class WebsocketChannel(ChannelPort):
         if self._lifecycle_subscription is not None:
             await self._lifecycle_subscription.unsubscribe()
             self._lifecycle_subscription = None
+        if self._all_subscription is not None:
+            await self._all_subscription.unsubscribe()
+            self._all_subscription = None
+        self._corr_to_session.clear()
         self._actual_port = None
         self._bus = None
         self._robot_id = None
@@ -409,6 +474,13 @@ class WebsocketChannel(ChannelPort):
             welcome["robot"] = robot_block
         await ws.send_json(welcome)
 
+        # Hand the client the current capability manifest straight
+        # away (read from the retained slot, like identity above) so
+        # it can render its command surface before any traffic flows.
+        capabilities_frame = self._retained_capabilities_frame()
+        if capabilities_frame is not None:
+            await ws.send_json(capabilities_frame)
+
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
@@ -425,6 +497,9 @@ class WebsocketChannel(ChannelPort):
             for run_id, sid in list(self._run_to_session.items()):
                 if sid == session_id:
                     self._run_to_session.pop(run_id, None)
+            for corr_id, sid in list(self._corr_to_session.items()):
+                if sid == session_id:
+                    self._corr_to_session.pop(corr_id, None)
 
         return ws
 
@@ -436,6 +511,9 @@ class WebsocketChannel(ChannelPort):
             return
 
         msg_type = data.get("type")
+        if msg_type == "command":
+            await self._handle_command_frame(session_id, data)
+            return
         if msg_type != "input":
             logger.debug("ignoring unsupported message type %r on session %s", msg_type, session_id)
             return
@@ -466,6 +544,123 @@ class WebsocketChannel(ChannelPort):
                 payload=payload,
             )
         )
+
+    async def _handle_command_frame(
+        self, session_id: str, data: dict[str, Any]
+    ) -> None:
+        """Forward a client ``command`` frame as a :class:`CommandRequest`."""
+        action = data.get("action")
+        if not isinstance(action, str) or not action:
+            logger.debug(
+                "ignoring command frame without action on session %s",
+                session_id,
+            )
+            return
+        target = data.get("target")
+        target = target if isinstance(target, str) and target else None
+        correlation_id = data.get("correlation_id")
+        if not isinstance(correlation_id, str) or not correlation_id:
+            correlation_id = f"cmd-{uuid.uuid4().hex[:12]}"
+        payload = dict(data.get("payload") or {})
+
+        self._corr_to_session[correlation_id] = session_id
+        principal = self._principal_template.format(session=session_id)
+        bus = self._require_bus()
+        await bus.publish(
+            CommandRequest(
+                topic=command_request_topic(action, target),
+                principal=principal,
+                source="channel.websocket",
+                source_id=self.instance_id,
+                run_id=_new_run_id(),
+                correlation_id=correlation_id,
+                action=action,
+                target=target,
+                payload=payload,
+            )
+        )
+
+    async def _handle_bus_event(self, event: RobotEvent) -> None:
+        """All-subscriber: route command responses + capability updates.
+
+        ``subscribe_all`` delivers a copy of every bus event; the
+        channel acts only on the two kinds it bridges to clients and
+        ignores the rest (inputs, outputs handled elsewhere, phases,
+        lifecycle, ...).
+        """
+        if isinstance(event, CommandResponse):
+            await self._route_command_response(event)
+        elif isinstance(event, HarnessCapabilities):
+            await self._broadcast_capabilities(event)
+
+    async def _route_command_response(self, event: CommandResponse) -> None:
+        correlation_id = event.correlation_id or ""
+        session_id = self._corr_to_session.pop(correlation_id, None)
+        if session_id is None:
+            return
+        ws = self._sessions.get(session_id)
+        if ws is None or ws.closed:
+            return
+        frame: dict[str, Any] = {
+            "type": "command_response",
+            "action": event.action,
+            "target": event.target,
+            "correlation_id": event.correlation_id,
+            "status": event.status,
+            "payload": dict(event.payload) if isinstance(event.payload, dict) else {},
+        }
+        if event.error is not None:
+            frame["error"] = {
+                "code": event.error.code,
+                "message": event.error.message,
+                "details": dict(event.error.details),
+            }
+        try:
+            await ws.send_json(frame)
+        except (ConnectionResetError, asyncio.CancelledError):
+            raise
+        except Exception:
+            logger.exception(
+                "failed to send command_response to session %s", session_id
+            )
+
+    async def _broadcast_capabilities(self, event: HarnessCapabilities) -> None:
+        """Push a fresh capability manifest to every connected client."""
+        frame = self._capabilities_frame(event)
+        for session_id, ws in list(self._sessions.items()):
+            if ws.closed:
+                continue
+            try:
+                await ws.send_json(frame)
+            except (ConnectionResetError, asyncio.CancelledError):
+                raise
+            except Exception:
+                logger.debug(
+                    "failed to send capabilities to session %s",
+                    session_id,
+                    exc_info=True,
+                )
+
+    def _retained_capabilities_frame(self) -> dict[str, Any] | None:
+        """Read the retained capability manifest synchronously, if any."""
+        bus = self._bus
+        if bus is None:
+            return None
+        retained = bus.retained(HARNESS_CAPABILITIES_TOPIC)
+        if isinstance(retained, HarnessCapabilities):
+            return self._capabilities_frame(retained)
+        return None
+
+    @staticmethod
+    def _capabilities_frame(event: HarnessCapabilities) -> dict[str, Any]:
+        return {
+            "type": "capabilities",
+            "commands": [dict(c) for c in event.commands],
+            "models": [dict(m) for m in event.models],
+            "tools": [dict(t) for t in event.tools],
+            "skills": [dict(s) for s in event.skills],
+            "settings": [dict(s) for s in event.settings],
+        }
 
     async def _handle_output(self, event: RobotEvent) -> None:
         if not isinstance(event, RobotOutput):

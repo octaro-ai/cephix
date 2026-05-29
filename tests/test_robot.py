@@ -79,6 +79,44 @@ def _make_robot(
     )
 
 
+def test_component_manifest_roster_is_capability_free() -> None:
+    """The roster is pure "who exists" -- no commands leak into it.
+
+    Capabilities are component-driven and travel on each component's
+    self-published ``ComponentLifecycle`` (aggregated by the
+    CapabilityCollector), not on the boot roster.
+    """
+    from src.command import CommandSpec
+
+    log: list[str] = []
+    kernel = _RecordingComponent("kernel", log, category=ComponentCategory.KERNEL)
+    kernel.provides_commands = (
+        CommandSpec(action="chat.session.new", handler="cmd_new", label="New chat"),
+    )
+    robot = _make_robot(kernel=kernel)
+
+    manifest = {info.name: info for info in robot.component_manifest}
+    assert all(
+        "provides_commands" not in info.metadata for info in manifest.values()
+    )
+
+
+def test_component_info_serializes_provides_commands() -> None:
+    from src.command import CommandSpec
+
+    log: list[str] = []
+    kernel = _RecordingComponent("kernel", log, category=ComponentCategory.KERNEL)
+    kernel.provides_commands = (
+        CommandSpec(action="chat.session.new", handler="cmd_new", label="New chat"),
+    )
+
+    info = kernel.component_info()
+    entries = info.metadata["provides_commands"]
+    assert entries[0]["action"] == "chat.session.new"
+    assert entries[0]["owner_component"] == "kernel"
+    assert entries[0]["owner_instance_id"] == kernel.instance_id
+
+
 async def test_robot_starts_bus_kernel_then_channels_in_priority_order() -> None:
     log: list[str] = []
     bus = AsyncioBus()

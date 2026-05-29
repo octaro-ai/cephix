@@ -230,7 +230,7 @@ def build_robot_from_config(
     persistence = _build_persistence_provider(
         cfg.get("persistence"), workspace, library=library
     )
-    telemetry = _build_telemetry(
+    telemetry_components = _build_telemetry_components(
         cfg.get("telemetry"), persistence, library=library
     )
     audit = _build_audit(cfg.get("audit"), persistence, library=library)
@@ -258,9 +258,8 @@ def build_robot_from_config(
         *utilities,
         *bus_utilities,
         *channels,
+        *telemetry_components,
     ]
-    if telemetry is not None:
-        components.append(telemetry)
     if audit is not None:
         components.append(audit)
 
@@ -1033,43 +1032,74 @@ def _build_persistence_provider(
     return JsonlPersistenceProvider(candidate)
 
 
-def _build_telemetry(
+def _build_telemetry_components(
     spec: Any,
     persistence: PersistenceProvider | None,
     *,
     library: ComponentLibrary,
-) -> BusRecorder | None:
-    """Build the telemetry component from ``robot.yaml#telemetry``.
+) -> list[RobotComponent]:
+    """Build the telemetry-level observers from ``robot.yaml#telemetry``.
 
-    Returns ``None`` when the slot is absent or no persistence is
-    available -- without a sink, the recorder is a passive observer
-    with side effects and nothing more.
+    The ``telemetry`` slot accepts either a single mapping (the common
+    ``{name: bus_recorder}`` case) or a list of mappings. Telemetry is
+    the boot level for read-mostly, bus-wide observers that must come up
+    right after the bus -- today the ``bus_recorder`` and the
+    ``capability-collector`` (which has to be subscribed before anyone
+    announces capabilities).
+
+    Heterogeneous construction: the ``bus_recorder`` is sink-bound and
+    is skipped when no persistence is available (a recorder with no sink
+    is a no-op). Every other telemetry component (e.g. the
+    ``capability-collector``) is built generically via the library and
+    needs no sink, so it is built regardless of persistence. Each
+    resulting component's category is verified to be ``TELEMETRY``.
     """
+    out: list[RobotComponent] = []
+    for entry in _normalize_observer_specs(spec, slot="telemetry"):
+        enriched = _apply_library_defaults(
+            entry, category="telemetry", library=library
+        )
+        name = str(enriched.get("name", "bus_recorder"))
+        if name == "bus_recorder":
+            if persistence is None:
+                logger.info(
+                    "telemetry configured but no persistence available; "
+                    "skipping BusRecorder"
+                )
+                continue
+            channel = str(enriched.get("channel", _DEFAULT_TELEMETRY_CHANNEL))
+            out.append(BusRecorder(sink=persistence.open(channel)))
+            continue
+
+        component = _build_with_library(
+            entry, category="telemetry", library=library
+        )
+        if component.component_category is not ComponentCategory.TELEMETRY:
+            raise ConfigError(
+                f"telemetry component {name!r} resolved to "
+                f"{type(component).__name__} with category "
+                f"{component.component_category.value}; expected telemetry"
+            )
+        out.append(component)
+    return out
+
+
+def _normalize_observer_specs(spec: Any, *, slot: str) -> list[dict[str, Any]]:
+    """Accept a single mapping or a list of mappings for an observer slot."""
     if spec is None:
-        return None
-    if not isinstance(spec, dict):
-        raise ConfigError("robot.yaml#telemetry must be a mapping")
-
-    enriched = _apply_library_defaults(
-        spec, category="telemetry", library=library
+        return []
+    if isinstance(spec, dict):
+        return [spec]
+    if isinstance(spec, list):
+        for index, entry in enumerate(spec):
+            if not isinstance(entry, dict):
+                raise ConfigError(
+                    f"robot.yaml#{slot}[{index}] must be a mapping"
+                )
+        return [dict(entry) for entry in spec]
+    raise ConfigError(
+        f"robot.yaml#{slot} must be a mapping or a list of mappings"
     )
-
-    name = str(enriched.get("name", "bus_recorder"))
-    if name != "bus_recorder":
-        raise ConfigError(
-            f"unknown telemetry component {name!r}; "
-            "the only built-in telemetry component is 'bus_recorder'"
-        )
-
-    if persistence is None:
-        logger.info(
-            "telemetry configured but no persistence available; "
-            "skipping BusRecorder"
-        )
-        return None
-
-    channel = str(enriched.get("channel", _DEFAULT_TELEMETRY_CHANNEL))
-    return BusRecorder(sink=persistence.open(channel))
 
 
 def _build_audit(

@@ -95,36 +95,47 @@ AUDIT_TOPIC = "audit.note"
 KERNEL_PHASE_TOPIC = "kernel.phase"
 INPUT_TOPIC = "input.message"
 OUTPUT_TOPIC = "output.message"
+HARNESS_CAPABILITIES_TOPIC = "harness.capabilities"
+"""Retained broadcast of the robot's current capability manifest.
+
+Published by the ``CapabilityCollector`` whenever the set of available
+commands (later: models, input/output modalities, settings, tools,
+skills) changes. UIs subscribe to learn what they may render; the
+retained slot lets a late-joining channel pull the latest manifest as
+its first event.
+"""
 
 
 def component_lifecycle_topic(name: str) -> str:
-    """Per-component lifecycle topic: ``component.<name>.lifecycle``.
+    """Per-component lifecycle topic: ``component.lifecycle.<name>``.
 
-    Each component owns its own retain slot via this dedicated topic,
-    so a slow-updating component does not get its retained snapshot
-    clobbered by a chatty neighbour. Subscribers that want to watch
-    *one* component subscribe directly; observers that want to watch
-    every component fall back to :meth:`BusPort.subscribe_all` and
-    filter on the topic prefix until wildcard subscriptions land in
-    the bus.
+    Big-endian / hierarchical naming (general -> specific, like
+    reverse-DNS and the ``command.<kind>.<action>`` topics): the
+    ``lifecycle`` kind sits right after ``component`` so a subscriber
+    can prefix-match ``component.lifecycle.`` to catch *every*
+    component's lifecycle regardless of name. Each component still owns
+    its own retain slot (the ``<name>`` suffix), so a slow-updating
+    component does not get its retained snapshot clobbered by a chatty
+    neighbour.
 
-    The entity-first hierarchy (``component.<name>.*``) clusters all
-    events for a single component together -- ``component.<name>.lifecycle``,
-    ``component.<name>.mount``, future ``component.<name>.metrics`` --
-    so per-component filtering in logs and dashboards is one prefix
-    match.
+    Observers that want to watch every component fall back to
+    :meth:`BusPort.subscribe_all` and filter on the topic prefix until
+    a ``subscribe_prefix`` lands in the bus -- at which point the
+    big-endian layout makes ``component.lifecycle.`` the natural
+    subscription.
     """
     if not name:
         raise ValueError("component_lifecycle_topic requires a non-empty name")
-    return f"component.{name}.lifecycle"
+    return f"component.lifecycle.{name}"
 
 
 def component_mount_topic(name: str) -> str:
-    """Per-component mount-event topic: ``component.<name>.mount``.
+    """Per-component mount-event topic: ``component.mount.<name>``.
 
     Mirrors :func:`component_lifecycle_topic` for :class:`MountEvent`
-    streams. Mount events are intentionally *not* retained: the
-    authoritative "what is currently mounted" snapshot lives in the
+    streams, same big-endian layout (``component.mount.`` prefix-matches
+    every mount stream). Mount events are intentionally *not* retained:
+    the authoritative "what is currently mounted" snapshot lives in the
     retained :class:`ComponentLifecycle` (via
     :attr:`ComponentInfo.metadata`). Mount events are the realtime
     stream of transitions for subscribers that need to react when
@@ -132,7 +143,51 @@ def component_mount_topic(name: str) -> str:
     """
     if not name:
         raise ValueError("component_mount_topic requires a non-empty name")
-    return f"component.{name}.mount"
+    return f"component.mount.{name}"
+
+
+def _command_topic(kind: str, action: str, discriminator: str | None) -> str:
+    if not action:
+        raise ValueError("command topic requires a non-empty action")
+    base = f"command.{kind}.{action}"
+    if discriminator:
+        return f"{base}@{discriminator}"
+    return base
+
+
+def command_request_topic(action: str, discriminator: str | None = None) -> str:
+    """Topic a command request rides on: ``command.request.<action>``.
+
+    Big-endian / hierarchical naming (general -> specific, like
+    reverse-DNS): the ``request`` kind sits right after ``command`` so a
+    subscriber can prefix-match ``command.request.`` to catch every
+    request regardless of action. With a ``discriminator`` (a routing
+    target such as a mail-account id when two instances of the same
+    component coexist), the suffix ``@<discriminator>`` is appended:
+    ``command.request.<action>@<disc>``.
+    """
+    return _command_topic("request", action, discriminator)
+
+
+def command_response_topic(action: str, discriminator: str | None = None) -> str:
+    """Topic a command response rides on: ``command.response.<action>``.
+
+    Mirrors :func:`command_request_topic` with the ``@<discriminator>``
+    suffix when set.
+    """
+    return _command_topic("response", action, discriminator)
+
+
+def command_notify_topic(action: str, discriminator: str | None = None) -> str:
+    """Topic a fire-and-forget command notification rides on.
+
+    ``command.notify.<action>`` (+ ``@<discriminator>``). The
+    big-endian layout lets a channel prefix-subscribe ``command.notify.``
+    to receive every "something changed" signal (e.g.
+    ``chat.session.titled`` once an async titler assigns a name)
+    without enumerating actions.
+    """
+    return _command_topic("notify", action, discriminator)
 
 
 def _new_event_id() -> str:
@@ -720,7 +775,7 @@ class ComponentLifecycle(LifecycleAware, RobotEvent):
     """Per-component lifecycle phase transition.
 
     Each component owns its own lifecycle topic:
-    ``component.<info.name>.lifecycle`` (built via
+    ``component.lifecycle.<info.name>`` (built via
     :func:`component_lifecycle_topic`). Retain semantics are the
     standard "one retained event per topic", so a late subscriber
     sees the component's most recent state without needing a
@@ -775,7 +830,7 @@ class MountEvent(RobotEvent):
 
     Published by composite components (kernels, tool layers, SOP
     libraries, ...) when one of their managed slots gets wired or
-    unwired. Travels on ``component.<owner>.mount`` (built via
+    unwired. Travels on ``component.mount.<owner>`` (built via
     :func:`component_mount_topic`).
 
     Use cases:
@@ -840,3 +895,141 @@ class MountEvent(RobotEvent):
             raise ValueError(
                 "MountEvent(phase='unmounted') must not carry a mounted ComponentInfo"
             )
+
+
+@dataclass(frozen=True, kw_only=True)
+class CommandRequest(RobotEvent):
+    """Request to perform a robot-level command (not a conversation turn).
+
+    Commands are deliberate, structured operations on the robot --
+    "start a new chat session", "list sessions", "switch model" --
+    distinct from conversational :class:`RobotInput`. They ride on
+    ``command.request.<action>`` (see :func:`command_request_topic`),
+    and the component that advertises the action subscribes that topic
+    directly: there is no central dispatcher. Each command is one
+    request and (for the common case) one :class:`CommandResponse`,
+    correlated end-to-end via ``correlation_id`` -- the same mechanic
+    as :class:`ComponentRequest`/:class:`ComponentResponse`.
+
+    Fields:
+
+    - ``action`` -- the command verb in ``<domain>.<entity>.<verb>``
+      form (``"chat.session.new"``). Kept as a clean string so audit
+      and telemetry can group every ``chat.session.new`` regardless
+      of which instance handled it.
+    - ``target`` -- optional discriminator routing the command to one
+      of several instances of the same component (``"gmail"`` vs.
+      ``"yahoo"`` for two mail drivers). ``None`` means the single,
+      undiscriminated instance.
+    - ``payload`` -- structured command arguments.
+
+    ``correlation_id`` is mandatory: a command without a way to route
+    its response back is a programming error.
+    """
+
+    action: str = ""
+    target: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.action:
+            raise ValueError("CommandRequest requires a non-empty action")
+        if not self.correlation_id:
+            raise ValueError("CommandRequest requires a correlation_id")
+
+
+@dataclass(frozen=True, kw_only=True)
+class CommandResponse(Failable, RobotEvent):
+    """Reply to a :class:`CommandRequest`.
+
+    ``correlation_id`` must exactly match the originating request so
+    the bus / the requesting channel can route the response back.
+    Inherits :class:`Failable`: success carries the result on
+    ``payload`` with ``status="ok"``; a refusal or failure carries
+    ``status="error"`` and a structured :class:`ErrorInfo`. A guard
+    that denies a command, or a handler that raises, surfaces here --
+    the requester sees a normal error response under its
+    ``correlation_id`` and can inform the user (or the LLM) accordingly.
+
+    ``action`` / ``target`` mirror the request for easy correlation in
+    logs without joining on ``correlation_id``.
+    """
+
+    action: str = ""
+    target: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not self.action:
+            raise ValueError("CommandResponse requires a non-empty action")
+        if not self.correlation_id:
+            raise ValueError("CommandResponse requires a correlation_id")
+
+
+@dataclass(frozen=True, kw_only=True)
+class CommandNotify(RobotEvent):
+    """Fire-and-forget broadcast that a command-related state changed.
+
+    Unlike :class:`CommandResponse`, a notify is not a reply to a
+    specific request and needs no ``correlation_id``. It rides on
+    ``command.notify.<action>`` (see :func:`command_notify_topic`) and
+    is meant for "something changed, anyone who cares may update":
+    an async titler assigning ``chat.session.titled``, a session being
+    renamed in another tab, a tool being mounted. Channels subscribed
+    to the bus pick it up and refresh their view.
+    """
+
+    action: str = ""
+    target: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.action:
+            raise ValueError("CommandNotify requires a non-empty action")
+
+
+@dataclass(frozen=True, kw_only=True)
+class HarnessCapabilities(RobotEvent):
+    """Retained snapshot of what this robot offers, robot-wide.
+
+    Published by the ``CapabilityCollector`` on
+    :data:`HARNESS_CAPABILITIES_TOPIC` with ``retain=True`` every time
+    the set of available capabilities changes (a component with
+    commands boots or stops, later: a tool mount, a model added). UIs
+    read the retained slot on connect and subscribe for updates, then
+    render strictly what the manifest advertises -- no capability in
+    the manifest means no button / no slash-command. This makes the
+    UI failsafe as a structural property rather than defensive code.
+
+    **Scope: global.** This event answers "what does this robot offer
+    at all" and carries no ``session_id``. Capabilities that depend on
+    the active session -- the *active* model and its concrete
+    ``supports_*`` flags, the resolved input/output modalities, the
+    *chosen* setting values -- live in a separate per-session
+    ``HarnessContext`` event on ``harness.context@<session_id>`` (a
+    later chunk). The split exists because commands like
+    ``chat.session.new`` must be advertised *before* any session
+    exists, while model/upload/audio affordances are inherently
+    per-session.
+
+    Chunk 1 fills only :attr:`commands`. The remaining (also global)
+    slots are part of the schema already so later chunks fill them
+    without reshaping the event:
+
+    - :attr:`models` -- the *available* models (not the active one).
+    - :attr:`tools` / :attr:`skills` -- the mounted tools / skills.
+    - :attr:`settings` -- the settings *schema* (key / type / values /
+      default). The chosen value is per-session and lives in
+      ``HarnessContext``.
+
+    Each entry in :attr:`commands` is a serialized command descriptor:
+    ``{action, label, description, args_schema, risk_class,
+    discriminator, ui_hints, owner_component, owner_instance_id}``.
+    """
+
+    commands: tuple[dict[str, Any], ...] = ()
+    models: tuple[dict[str, Any], ...] = ()
+    tools: tuple[dict[str, Any], ...] = ()
+    skills: tuple[dict[str, Any], ...] = ()
+    settings: tuple[dict[str, Any], ...] = ()

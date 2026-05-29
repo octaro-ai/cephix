@@ -215,7 +215,18 @@ class Robot:
 
     @property
     def component_manifest(self) -> tuple[ComponentInfo, ...]:
-        """Manifest snapshot for ``RobotLifecycle`` ``boot``/``ready`` payloads."""
+        """Roster snapshot for ``RobotLifecycle`` ``boot``/``ready`` payloads.
+
+        Pure "who exists" information: category, name, description. The
+        robot is the skeleton; it does *not* advertise capabilities
+        here. Commands (later: tools, models) are component-driven and
+        travel on each component's self-published
+        :class:`~src.bus.messages.ComponentLifecycle`, which the
+        ``CapabilityCollector`` aggregates. Keeping the roster
+        capability-free leaves a single source of truth for "what the
+        robot can do" -- the live per-component lifecycle, not the boot
+        snapshot.
+        """
         return tuple(
             ComponentInfo(
                 category=c.component_category.value,

@@ -67,9 +67,12 @@ async def test_recorder_persists_every_routable_publish() -> None:
         await recorder.stop()
         await bus.stop()
 
-    topics = [r["topic"] for r in sink.records]
+    # Filter the recorder's own self-announced ComponentLifecycle: it is
+    # a wide-event sink and records its own lifecycle too.
+    data = [r for r in sink.records if r["event_type"] != "ComponentLifecycle"]
+    topics = [r["topic"] for r in data]
     assert topics == ["input.a", "output.a"]
-    types = [r["event_type"] for r in sink.records]
+    types = [r["event_type"] for r in data]
     assert types == ["RobotInput", "RobotOutput"]
 
 
@@ -89,8 +92,9 @@ async def test_recorder_persists_broadcasts_too() -> None:
         await recorder.stop()
         await bus.stop()
 
-    assert len(sink.records) == 1
-    assert sink.records[0]["topic"] == "robot.lifecycle"
+    data = [r for r in sink.records if r["event_type"] != "ComponentLifecycle"]
+    assert len(data) == 1
+    assert data[0]["topic"] == "robot.lifecycle"
 
 
 async def test_recorder_picks_up_audit_notes() -> None:
@@ -119,8 +123,9 @@ async def test_recorder_picks_up_audit_notes() -> None:
         await recorder.stop()
         await bus.stop()
 
-    assert len(sink.records) == 1
-    record = sink.records[0]
+    data = [r for r in sink.records if r["event_type"] != "ComponentLifecycle"]
+    assert len(data) == 1
+    record = data[0]
     assert record["topic"] == AUDIT_TOPIC
     assert record["event_type"] == "RobotAuditNote"
     assert record["action"] == "approval.deny"
