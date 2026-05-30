@@ -1125,9 +1125,18 @@ def _build_persistence_components(
     (only ``filesystem-events`` ships today; future entries might be
     ``database-events``, ``object-store-events``, or a composite).
 
+    Path semantics:
+
+    - ``path:`` (default: the workspace) -- root of the
+      :class:`FilesystemConnection`. Every utility wired to this
+      connection (events, sessions, ...) sees paths relative to it.
+    - ``directory:`` (default: ``logs``) -- the provider's bucket
+      *inside* that root. Telemetry / audit channels land under
+      ``<root>/<directory>/``; a session store using the same
+      connection keeps its own bucket (``sessions/``).
+
     Library defaults under ``components.persistence[name=<name>]``
-    fill missing fields (today: ``path: logs`` for
-    ``filesystem-events``).
+    fill missing fields.
     """
     entries = _normalize_observer_specs(spec, slot="persistence")
     all_components: list[RobotComponent] = []
@@ -1165,16 +1174,26 @@ def _build_persistence_components(
             )
         used_ids.add(persistence_id)
 
-        # Resolve root path: relative paths anchor at the workspace,
-        # absolute paths are taken as-is. Without a workspace the
-        # entry is silently dropped so a workspace-less robot still
-        # boots (other entries with absolute paths may still apply).
-        raw_path = enriched.get("path", "logs")
-        candidate = Path(str(raw_path)).expanduser()
-        if not candidate.is_absolute():
+        # Resolve connection root. ``path:`` is the user override --
+        # relative paths anchor at the workspace, absolute paths
+        # land as-is. Default = workspace (so the connection is
+        # shared between events and the session store, each with
+        # its own bucket below). Without a workspace and no absolute
+        # ``path:``, the entry is silently dropped so a
+        # workspace-less robot still boots.
+        raw_path = enriched.get("path")
+        if raw_path is None:
             if workspace is None:
                 continue
-            candidate = Path(workspace) / candidate
+            root = Path(workspace)
+        else:
+            candidate = Path(str(raw_path)).expanduser()
+            if candidate.is_absolute():
+                root = candidate
+            else:
+                if workspace is None:
+                    continue
+                root = Path(workspace) / candidate
 
         # Adapter (BACKEND) -- ``adapter:`` may name a future
         # ``s3-fs`` etc.; today only the local FS adapter ships.
@@ -1187,16 +1206,22 @@ def _build_persistence_components(
         adapter = LocalFSAdapter()
 
         # Connection (CONNECTION) -- holds the adapter + root.
-        connection = FilesystemConnection(adapter=adapter, root=candidate)
+        connection = FilesystemConnection(adapter=adapter, root=root)
 
         # Codec (library, not a component). Future codecs sit next
         # to ``jsonl`` in :mod:`src.persistence.codec`.
         codec_name = str(enriched.get("codec", "jsonl"))
         codec = _resolve_codec(codec_name)
 
-        # Provider (PROVIDER) -- the DAO observers depend on.
+        # Provider (PROVIDER) -- the DAO observers depend on. Its
+        # ``directory:`` is the provider's bucket inside the shared
+        # root, defaulting to ``logs/`` so a fresh workspace ends up
+        # with ``<root>/logs/telemetry.jsonl``,
+        # ``<root>/logs/audit.jsonl``, ... while sibling utilities
+        # (session store) keep their own bucket.
+        directory = str(enriched.get("directory", "logs"))
         provider = FilesystemEventStreamProvider(
-            connection=connection, codec=codec
+            connection=connection, directory=directory, codec=codec
         )
 
         all_components.extend((adapter, connection, provider))

@@ -92,7 +92,11 @@ def _observer_path(observer: BusRecorder | AuditNoteSink) -> Path:
     provider = observer._provider  # type: ignore[attr-defined]
     connection = provider._connection  # type: ignore[attr-defined]
     codec_ext = provider._codec.extension  # type: ignore[attr-defined]
-    return Path(connection.path_for(observer.channel, suffix=codec_ext))
+    directory = provider._directory  # type: ignore[attr-defined]
+    channel = (
+        f"{directory}/{observer.channel}" if directory else observer.channel
+    )
+    return Path(connection.path_for(channel, suffix=codec_ext))
 
 
 def _bus_of(robot: Robot) -> AsyncioBus:
@@ -467,8 +471,16 @@ def test_builder_persistence_list_form_with_ids(tmp_path: Path) -> None:
     )
     recorder = next(c for c in robot.components if isinstance(c, BusRecorder))
     audit = next(c for c in robot.components if isinstance(c, AuditNoteSink))
-    assert _observer_path(recorder) == tmp_path / "logs-b" / "telemetry.jsonl"
-    assert _observer_path(audit) == tmp_path / "logs-a" / "audit.jsonl"
+    # ``path:`` sets the connection root; the provider's default
+    # ``directory: logs`` adds the channel bucket below it.
+    assert (
+        _observer_path(recorder)
+        == tmp_path / "logs-b" / "logs" / "telemetry.jsonl"
+    )
+    assert (
+        _observer_path(audit)
+        == tmp_path / "logs-a" / "logs" / "audit.jsonl"
+    )
 
 
 def test_builder_rejects_unknown_persistence_reference(tmp_path: Path) -> None:
@@ -537,7 +549,9 @@ def test_builder_persistence_absolute_path_wins(tmp_path: Path) -> None:
         workspace=tmp_path / "ws",
     )
     recorder = next(c for c in robot.components if isinstance(c, BusRecorder))
-    assert _observer_path(recorder) == abs_root / "telemetry.jsonl"
+    # Connection root is the absolute path; the provider still adds
+    # its default ``directory: logs`` bucket below it.
+    assert _observer_path(recorder) == abs_root / "logs" / "telemetry.jsonl"
 
 
 def test_builder_rejects_unknown_persistence_type(tmp_path: Path) -> None:

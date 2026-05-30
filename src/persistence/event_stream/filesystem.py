@@ -55,8 +55,9 @@ class FilesystemEventStreamProvider(RobotComponent):
     component_description = (
         "Append-only event streams backed by a FilesystemConnection. "
         "Implements EventStreamProviderPort at boot level 2; receives "
-        "the connection by constructor injection. Channels resolve "
-        "to files in the connection's root, encoded by the configured "
+        "the connection by constructor injection. Channels resolve to "
+        "files under the provider's ``directory`` subdir of the "
+        "connection root (default 'logs/'), encoded by the configured "
         "codec (JSONL by default)."
     )
 
@@ -64,6 +65,7 @@ class FilesystemEventStreamProvider(RobotComponent):
         self,
         *,
         connection: FilesystemConnection,
+        directory: str = "logs",
         codec: RecordCodec | None = None,
     ) -> None:
         if not isinstance(connection, FilesystemConnection):
@@ -72,7 +74,18 @@ class FilesystemEventStreamProvider(RobotComponent):
                 "FilesystemConnection, got "
                 f"{type(connection).__name__}"
             )
+        # The directory is the provider's bucket inside the shared
+        # connection root: telemetry / audit / ... all land under
+        # ``<root>/<directory>/``. An empty string means "channels
+        # sit directly under root", which is fine for tests but not
+        # the default -- a workspace shared with other utilities
+        # would otherwise collide.
+        if not isinstance(directory, str):
+            raise TypeError(
+                "FilesystemEventStreamProvider.directory must be a string"
+            )
         self._connection = connection
+        self._directory = directory.strip("/").strip("\\")
         self._codec: RecordCodec = codec or JsonlCodec()
         # channel -> writer; lazily opened on first append, closed on stop().
         self._writers: dict[str, AppendWriter] = {}
@@ -81,6 +94,10 @@ class FilesystemEventStreamProvider(RobotComponent):
     @property
     def connection(self) -> FilesystemConnection:
         return self._connection
+
+    @property
+    def directory(self) -> str:
+        return self._directory
 
     @property
     def codec(self) -> RecordCodec:
@@ -162,8 +179,11 @@ class FilesystemEventStreamProvider(RobotComponent):
             writer = self._writers.get(channel)
             if writer is not None:
                 return writer
+            resolved = (
+                f"{self._directory}/{channel}" if self._directory else channel
+            )
             writer = await self._connection.open_append(
-                channel, suffix=self._codec.extension
+                resolved, suffix=self._codec.extension
             )
             self._writers[channel] = writer
             return writer

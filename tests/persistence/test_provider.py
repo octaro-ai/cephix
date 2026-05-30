@@ -18,8 +18,14 @@ from src.persistence import (
 
 
 def _build_provider(root: Path) -> FilesystemEventStreamProvider:
+    # ``directory=""`` keeps channels directly under ``root`` so the
+    # tests can assert on flat ``<root>/<channel>.<ext>`` paths. The
+    # production default (``directory="logs"``) is exercised through
+    # the builder tests.
     connection = FilesystemConnection(adapter=LocalFSAdapter(), root=root)
-    return FilesystemEventStreamProvider(connection=connection, codec=JsonlCodec())
+    return FilesystemEventStreamProvider(
+        connection=connection, directory="", codec=JsonlCodec()
+    )
 
 
 def test_provider_metadata_marks_it_as_provider_level_2() -> None:
@@ -119,7 +125,7 @@ async def test_uses_codec_extension(tmp_path: Path) -> None:
 
     connection = FilesystemConnection(adapter=LocalFSAdapter(), root=tmp_path)
     provider = FilesystemEventStreamProvider(
-        connection=connection, codec=FakeCodec()
+        connection=connection, directory="", codec=FakeCodec()
     )
     await provider.start()
     try:

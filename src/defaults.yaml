@@ -139,7 +139,8 @@ defaults:
       # The model catalog ships its bundled `llmprice` snapshot;
       # the markdown firmware store reads <workspace>/firmware/;
       # the session store routes through the default persistence
-      # connection -> <persistence-root>/sessions/.
+      # connection -> <connection-root>/sessions/ (workspace by
+      # default, so sessions land at <workspace>/sessions/).
       - {name: model-catalog}
       - {name: firmware-store}
       - {name: session-store}
@@ -157,11 +158,18 @@ defaults:
       # Robot-wide persistence layer. Three components per entry --
       # backend adapter (level 0), filesystem connection (level 1),
       # event-stream provider (level 2) -- synthesized by the builder
-      # from a single line. Channels resolve to `<root>/<channel>.jsonl`;
-      # channel names with a slash become subdirectories on disk.
-      # Override `adapter:` to swap the backend (future: `s3-fs`, ...),
-      # `codec:` to swap the format (future: `json`, `parquet`, ...).
-      - {name: filesystem-events, path: logs, adapter: local-fs, codec: jsonl}
+      # from a single line. The connection root defaults to the
+      # workspace; the provider writes its channels under the
+      # `directory:` subdir (default `logs/`) so a fresh workspace
+      # ends up with <workspace>/logs/telemetry.jsonl,
+      # <workspace>/logs/audit.jsonl, while sibling utilities like
+      # the session store keep their own bucket
+      # (<workspace>/sessions/). Override `path:` to anchor the
+      # connection elsewhere (relative -> workspace, absolute as-is);
+      # override `adapter:` to swap the backend (future: `s3-fs`, ...);
+      # override `codec:` to swap the format (future: `json`,
+      # `parquet`, ...).
+      - {name: filesystem-events, directory: logs, adapter: local-fs, codec: jsonl}
 
     telemetry:
       - {name: bus_recorder, channel: telemetry}
