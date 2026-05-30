@@ -192,6 +192,14 @@ class AsyncioBus(BusPort, RobotComponent):
             is_all=True,
         )
         self._all_subscriptions.append(sub)
+        # Replay every retained broadcast in insertion order so a
+        # late subscriber sees the same "always-true" facts a
+        # topic-scoped ``subscribe_broadcast`` already gets. Without
+        # this, a telemetry recorder attached after the robot's
+        # ``RobotLifecycle.boot`` would miss the anchor event that
+        # marks "this is where the stream begins".
+        for retained in self._retained.values():
+            sub.queue.put_nowait(retained)
         if self._running:
             self._ensure_consumer(sub)
         return sub

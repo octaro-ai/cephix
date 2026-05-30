@@ -335,16 +335,21 @@ class Robot:
     async def _phase2_skeleton(self) -> None:
         """Phase 2: start skeleton components, broadcast ``RobotLifecycle(phase="boot")``.
 
-        Skeleton components start in priority order: the bus first
-        (priority 0, ``start()`` without arguments), then
-        cross-cutting observers (telemetry, ``start(bus)``). The
-        bus is registered on the robot as soon as it is up so the
-        observers can attach to it. Only after every skeleton
-        component is online is the lifecycle ``boot`` event
-        broadcast -- otherwise the first lifecycle event would slip
-        past observers that are about to subscribe.
+        Skeleton boots in priority order (BACKEND, CONNECTION,
+        PROVIDER, UTILITY, BUS, BUS_PROVIDER, TELEMETRY). The bus
+        is registered on the robot as soon as it is up so later
+        skeleton components can attach to it.
+
+        The lifecycle ``boot`` event is broadcast (retained) **the
+        moment the bus is up**, *before* the bus-aware skeleton
+        levels (bus_provider, telemetry) attach. Combined with
+        ``subscribe_all``'s retained replay, this guarantees that
+        a telemetry recorder sees ``RobotLifecycle.boot`` as its
+        very first event -- the stream anchor that says "this is
+        where recording begins".
         """
         self._phase = RobotPhase.ATTACHING
+        boot_announced = False
 
         for prio, category, group in self._categories_in_phase(skeleton=True):
             if not group:
@@ -355,19 +360,33 @@ class Robot:
                 await self._start_component(component)
                 # Once the bus is up, every subsequent skeleton
                 # component needs it as a constructor-time argument.
-                # Cache it as soon as it appears.
+                # Cache it as soon as it appears, and announce the
+                # retained ``boot`` event immediately so any later
+                # subscriber sees it first.
                 if (
                     self._bus is None
                     and component.component_category is ComponentCategory.BUS
                 ):
                     self._bus = self._locate_bus()
+                    await self._announce_boot()
+                    boot_announced = True
             # self._log_phase_marker(prio, category, "boot_complete")  # closing marker silenced -- noisy in dense logs
 
         if self._bus is None:
             # No bus component was registered at all -- _locate_bus
             # raises with the canonical error message.
             self._bus = self._locate_bus()
+        if not boot_announced:
+            # Defensive: the loop never reached a BUS-level component
+            # (shouldn't happen since _locate_bus would have raised
+            # above). Keep the contract that ``boot`` is always
+            # broadcast before phase 3.
+            await self._announce_boot()
+        self._phase = RobotPhase.ATTACHED
 
+    async def _announce_boot(self) -> None:
+        """Broadcast the retained ``RobotLifecycle(phase="boot")``."""
+        assert self._bus is not None
         boot = RobotLifecycle(
             topic=LIFECYCLE_TOPIC,
             principal=self._system_principal(),
@@ -380,7 +399,6 @@ class Robot:
             components=self.component_manifest,
         )
         await self._bus.publish_broadcast(boot, retain=True)
-        self._phase = RobotPhase.ATTACHED
 
     async def _phase3_userspace(self) -> None:
         """Phase 3: start userspace components, broadcast ``RobotLifecycle(phase="ready")``."""
