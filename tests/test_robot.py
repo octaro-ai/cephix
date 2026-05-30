@@ -260,10 +260,10 @@ async def test_robot_logs_boot_and_shutdown_narrative(
     assert not any("Leaving Boot Level 4 (BUS)" in m for m in messages)
     assert not any("Boot Level 4 (BUS) shutdown complete" in m for m in messages)
     # Empty levels surface with the "-- empty" suffix so the log
-    # mirrors the architecture, not just the inventory. BUS_PROVIDER
+    # mirrors the architecture, not just the inventory. BUS_UTILITY
     # (level 5) is reserved-but-empty in this robot, so it must be
     # logged. BACKEND (level 0) and CONNECTION (level 1) likewise.
-    assert any("=== Boot Level 5 (BUS_PROVIDER) -- empty ===" in m for m in messages)
+    assert any("=== Boot Level 5 (BUS_UTILITY) -- empty ===" in m for m in messages)
     assert any("=== Boot Level 0 (BACKEND) -- empty ===" in m for m in messages)
     assert any("=== Boot Level 1 (CONNECTION) -- empty ===" in m for m in messages)
 

@@ -200,6 +200,7 @@ def _register_builtins() -> None:
     from src.utility.model_catalog import ModelCatalog
     from src.utility.session_store import FilesystemSessionStore
     from src.bus.asyncio_bus import AsyncioBus
+    from src.channels.heartbeat import HeartbeatChannel
     from src.channels.websocket import WebsocketChannel
     from src.credentials.provider import CredentialProvider
     from src.kernel.base import BaseKernel
@@ -209,6 +210,7 @@ def _register_builtins() -> None:
         FilesystemEventStreamProvider,
         LocalFSAdapter,
     )
+    from src.tool_execution import MCSToolExecutionLayer
 
     register(AsyncioBus)
     register(BaseKernel)
@@ -220,8 +222,10 @@ def _register_builtins() -> None:
     register(FilesystemEventStreamProvider)
     register(FilesystemFirmwareStore)
     register(FilesystemSessionStore)
+    register(HeartbeatChannel)
     register(LLMActorOpenAI)
     register(LocalFSAdapter)
+    register(MCSToolExecutionLayer)
     register(MockLLMActor)
     register(ModelCatalog)
     register(WebsocketChannel)

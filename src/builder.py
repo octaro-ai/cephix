@@ -251,11 +251,23 @@ def build_robot_from_config(
         workspace=workspace,
         connections=connection_index,
     )
+    bus_providers = _build_components_list(
+        cfg.get("bus_provider"),
+        section_name="bus_provider",
+        expected_category=ComponentCategory.BUS_PROVIDER,
+        library=library,
+        workspace=workspace,
+        connections=connection_index,
+    )
 
     # Index utilities by ``component_name`` so the kernel builder can
     # inject the right instance by convention without the YAML having
-    # to repeat references.
-    utility_index = _index_components_by_name(utilities + bus_utilities)
+    # to repeat references. Bus providers (tool execution layers,
+    # future federated bus bridges) are indexed the same way so
+    # channels and kernels can pick them up via Convention-DI.
+    utility_index = _index_components_by_name(
+        utilities + bus_utilities + bus_providers
+    )
 
     # Kernels (singular or plural form). Each kernel owns a nested
     # ``actor:`` mapping, built and injected into the kernel.
@@ -278,7 +290,9 @@ def build_robot_from_config(
     channel_specs = _normalize_singular_or_list(
         cfg, singular="channel", plural="channels"
     )
-    channels = _build_channels(channel_specs, library=library)
+    channels = _build_channels(
+        channel_specs, library=library, utilities=utility_index
+    )
     telemetry_components = _build_observer_components(
         cfg.get("telemetry"),
         slot="telemetry",
@@ -328,6 +342,7 @@ def build_robot_from_config(
         *kernels,
         *utilities,
         *bus_utilities,
+        *bus_providers,
         *channels,
         *telemetry_components,
         *audit_components,
@@ -793,11 +808,45 @@ def _build_channels(
     channel_specs: list[dict[str, Any]],
     *,
     library: ComponentLibrary,
+    utilities: dict[str, RobotComponent] | None = None,
 ) -> list[ChannelPort]:
+    """Build channel components, with Convention-DI for shared services.
+
+    Convention-DI: if the channel's constructor declares a
+    ``tool_layer`` parameter and one isn't passed explicitly, the
+    builder injects the single ``tool-execution`` BUS_PROVIDER
+    instance from ``utilities``. Symmetric to how kernels receive
+    their utilities by convention.
+    """
+    import inspect
+
     out: list[ChannelPort] = []
     for index, spec in enumerate(channel_specs):
+        spec_dict = dict(spec)
+        extras: dict[str, Any] = {}
+        if utilities:
+            from src.registry import _import_class, get  # noqa: I001
+
+            try:
+                cls = (
+                    _import_class(spec_dict["class"])
+                    if "class" in spec_dict
+                    else get(spec_dict.get("name", ""))
+                )
+            except Exception:
+                cls = None
+            if cls is not None:
+                try:
+                    sig = inspect.signature(cls)
+                except (ValueError, TypeError):
+                    sig = None
+                if sig is not None and "tool_layer" in sig.parameters and "tool_layer" not in spec_dict:
+                    tool_layer = utilities.get("tool-execution")
+                    if tool_layer is not None:
+                        extras["tool_layer"] = tool_layer
+
         component = _build_with_library(
-            spec, category="channel", library=library
+            spec_dict, category="channel", library=library, **extras
         )
         if not isinstance(component, ChannelPort):
             raise ConfigError(

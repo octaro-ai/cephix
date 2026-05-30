@@ -189,10 +189,10 @@ BOOT_PRIORITY: dict[ComponentCategory, int] = {
     ComponentCategory.PROVIDER: 2,
     ComponentCategory.UTILITY: 3,
     ComponentCategory.BUS: 4,
-    ComponentCategory.BUS_PROVIDER: 5,
+    ComponentCategory.BUS_UTILITY: 5,    # off-bus -> bus-attached helpers
     ComponentCategory.TELEMETRY: 6,
     ComponentCategory.AUDIT: 7,
-    ComponentCategory.BUS_UTILITY: 8,
+    ComponentCategory.BUS_PROVIDER: 8,   # services that publish on the bus (tool layer, ...)
     ComponentCategory.ACTOR: 9,
     ComponentCategory.KERNEL: 10,
     ComponentCategory.CHANNEL: 11,
@@ -202,19 +202,24 @@ BOOT_PRIORITY: dict[ComponentCategory, int] = {
 # Categories that make up the robot's *skeleton*: Phase 2, before the
 # ``RobotLifecycle`` ``boot`` event and before userspace starts.
 #
-# Resource bringup (backend/connection/provider) and off-bus utilities
-# come up first, then the bus, then optional bus_provider bridges, then
-# telemetry (must witness the lifecycle ``boot`` broadcast).
+# Resource bringup (backend/connection/provider/utility) comes up
+# first, then the bus, then ``BUS_UTILITY`` (bus-attached helpers
+# like the credential provider whose audits are only emitted at
+# runtime when actors and kernels resolve secrets -- by then audit
+# is long online), then telemetry (must witness the lifecycle
+# ``boot`` broadcast).
 #
-# ``AUDIT`` is *not* in here: audit notes only come from userspace
-# components that boot in Phase 3.
+# ``AUDIT`` and ``BUS_PROVIDER`` are *not* in here: the audit sink
+# starts after the skeleton (it has nothing to record until
+# userspace boots), and bus providers (e.g. tool execution layers)
+# offer their services to userspace and naturally belong there.
 SKELETON_CATEGORIES: frozenset[ComponentCategory] = frozenset({
     ComponentCategory.BACKEND,
     ComponentCategory.CONNECTION,
     ComponentCategory.PROVIDER,
     ComponentCategory.UTILITY,
     ComponentCategory.BUS,
-    ComponentCategory.BUS_PROVIDER,
+    ComponentCategory.BUS_UTILITY,
     ComponentCategory.TELEMETRY,
 })
 

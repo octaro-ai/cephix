@@ -30,3 +30,4 @@ What becomes easier? What becomes harder? What do we accept as trade-off?
 - [0002 — Diagrams: Mermaid + C4 via Structurizr](0002-diagrams-mermaid-and-c4.md)
 - [0003 — Wire-format codec is not abstracted (for now)](0003-no-codec-abstraction-yet.md)
 - [0004 — Credential layers: build-time, preboot, runtime](0004-credential-layers.md)
+- [0005 — Robot per user, multi-mailbox tenancy within a robot](0005-robot-per-user-and-multi-mailbox-tenancy.md)
