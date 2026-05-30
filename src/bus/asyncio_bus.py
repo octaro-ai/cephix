@@ -192,14 +192,23 @@ class AsyncioBus(BusPort, RobotComponent):
             is_all=True,
         )
         self._all_subscriptions.append(sub)
-        # Replay every retained broadcast in insertion order so a
-        # late subscriber sees the same "always-true" facts a
-        # topic-scoped ``subscribe_broadcast`` already gets. Without
-        # this, a telemetry recorder attached after the robot's
-        # ``RobotLifecycle.boot`` would miss the anchor event that
-        # marks "this is where the stream begins".
-        for retained in self._retained.values():
-            sub.queue.put_nowait(retained)
+        # NB: subscribe_all does NOT replay retained events. That's
+        # deliberate, not an oversight:
+        #
+        # - ``announce_lifecycle`` publishes every ``ComponentLifecycle``
+        #   with ``retain=True``, so the retained map fills up with one
+        #   entry per attached component plus ``RobotLifecycle``,
+        #   ``HarnessCapabilities``, MountEvents, etc. A late
+        #   ``subscribe_all`` that replays would see all of that as if
+        #   it were live -- and the typical consumers
+        #   (``BusRecorder``, ``CapabilityCollector``,
+        #   ``WebsocketChannel``) would double-count.
+        #
+        # - ``subscribe_broadcast(topic, ...)`` is the right tool for
+        #   "give me the current state of X". Consumers that need a
+        #   retained anchor can also pull it synchronously via
+        #   ``bus.retained(topic)`` (see ``WebsocketChannel.start`` and
+        #   ``BusRecorder.start``).
         if self._running:
             self._ensure_consumer(sub)
         return sub

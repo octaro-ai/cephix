@@ -342,11 +342,12 @@ class Robot:
 
         The lifecycle ``boot`` event is broadcast (retained) **the
         moment the bus is up**, *before* the bus-aware skeleton
-        levels (bus_provider, telemetry) attach. Combined with
-        ``subscribe_all``'s retained replay, this guarantees that
-        a telemetry recorder sees ``RobotLifecycle.boot`` as its
-        very first event -- the stream anchor that says "this is
-        where recording begins".
+        levels (bus_provider, telemetry) attach. The telemetry
+        recorder reads it synchronously from the retained slot in
+        its own ``start()`` and writes it as the stream's first
+        record -- the anchor that says "this is where recording
+        begins". ``subscribe_all`` deliberately does not replay
+        retained events (see ``AsyncioBus.subscribe_all``).
         """
         self._phase = RobotPhase.ATTACHING
         boot_announced = False

@@ -20,7 +20,7 @@ import dataclasses
 import logging
 from typing import Any
 
-from src.bus.messages import RobotEvent
+from src.bus.messages import LIFECYCLE_TOPIC, RobotEvent, RobotLifecycle
 from src.bus.ports import BusPort, Subscription
 from src.components import BusComponent, ComponentCategory
 from src.persistence import EventStreamProviderPort
@@ -83,6 +83,23 @@ class BusRecorder(BusComponent):
             self.instance_id,
             self._channel,
         )
+        # Stream anchor: write the retained ``RobotLifecycle.boot``
+        # as the first record so the file begins with "this is who
+        # I am, this is what was on the manifest at boot time".
+        # ``subscribe_all`` deliberately does not replay retained
+        # events (otherwise a recorder restart would double-write
+        # every component's ``ComponentLifecycle.ready`` snapshot),
+        # so the anchor is pulled explicitly here. The phase 2
+        # ordering guarantees ``boot`` is already in the retained
+        # slot at this point.
+        boot = bus.retained(LIFECYCLE_TOPIC)
+        if isinstance(boot, RobotLifecycle):
+            try:
+                await self._record(boot)
+            except Exception:
+                logger.exception(
+                    "BusRecorder: failed to write retained boot anchor"
+                )
         self._subscription = bus.subscribe_all(self._record)
         await self.announce_lifecycle(bus, "ready")
 

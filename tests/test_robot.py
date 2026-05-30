@@ -617,12 +617,18 @@ async def test_robot_logs_rollback_on_failed_startup(
     assert "robot online (Ctrl-C to stop)" not in messages
 
 
-async def test_telemetry_component_starts_before_lifecycle_boot_is_published() -> None:
-    """A TELEMETRY component subscribes via subscribe_all in Phase 2,
-    so it must witness the lifecycle ``boot`` event live -- otherwise
-    the very first lifecycle event is missing from the recording.
+async def test_telemetry_component_records_lifecycle_boot_as_anchor() -> None:
+    """A TELEMETRY recorder must produce a stream that begins with the
+    ``RobotLifecycle.boot`` anchor.
+
+    Phase 2 publishes ``boot`` (retained) the moment the bus is up,
+    which is *before* the TELEMETRY skeleton level attaches. The
+    recorder therefore picks up the anchor by reading the retained
+    slot synchronously in its own ``start()``, then subscribes for
+    the live tail. ``subscribe_all`` deliberately does not replay
+    retained events, so this explicit read is the contract.
     """
-    from src.bus import RobotLifecycle
+    from src.bus import LIFECYCLE_TOPIC, RobotLifecycle
     from src.bus.messages import RobotEvent
     from src.bus.ports import BusPort, Subscription
 
@@ -637,6 +643,11 @@ async def test_telemetry_component_starts_before_lifecycle_boot_is_published() -
             self._subscription: Subscription | None = None
 
         async def start(self, bus: BusPort) -> None:
+            # Same pattern as the production BusRecorder: pull the
+            # retained boot anchor first, then go live.
+            anchor = bus.retained(LIFECYCLE_TOPIC)
+            if isinstance(anchor, RobotLifecycle):
+                await self._record(anchor)
             self._subscription = bus.subscribe_all(self._record)
 
         async def stop(self) -> None:
