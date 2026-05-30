@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcs-driver-mailbox"
+version = "0.1.0"
+description = "MCS ToolDriver for mailbox operations (in-process stub today; adapter-backed once mcs-adapter-imap / -graph lands)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Danny Gerst", email = "d.gerst@bizrock.de" }]
+keywords = ["mcs", "mcs-driver", "mailbox", "llm", "function-calling"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "mcs-driver-core>=0.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+# Namespace-package layout per the MCS convention. The package
+# contributes one leaf (`mcs/driver/mailbox/`) to the shared `mcs.*`
+# namespace; sibling packages (`mcs-driver-core`, future
+# `mcs-driver-rest`, etc.) contribute their own leaves the same way.
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["mcs*"]
+namespaces = true

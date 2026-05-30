@@ -1,42 +1,55 @@
-"""``MCSToolExecutionLayer`` -- BUS_PROVIDER, MCS-backed tool layer (stub).
+"""``MCSToolExecutionLayer`` -- BUS_PROVIDER, hosts MCS ToolDrivers.
 
 Boot category :attr:`~src.components.ComponentCategory.BUS_PROVIDER`
 (boot priority 8). Starts after AUDIT (every tool invocation can be
 audited) and before ACTOR/KERNEL/CHANNEL (consumers reach the layer
 exclusively through the bus -- no shared references).
 
+The layer is the bus-facing seam for the Model Context Standard
+(MCS). It owns one or more :class:`mcs.driver.core.MCSToolDriver`
+instances, aggregates their tool catalogues, and routes invocations
+back to the driver that owns each tool. There is no in-line stub
+anymore -- every tool is contributed by a ToolDriver built the
+MCS way (port -> adapter -> tooldriver).
+
 Two entry points on the bus, mirroring MCS's two call paths:
 
 - **Direct tool invocation** (the "I know the tool, run it"
-  pattern). Topic: ``tool.invoke``. Producers (Heartbeat,
-  Channels, future schedulers) publish a
-  :class:`ComponentRequest` with ``action=<tool_name>`` and
-  arguments in ``payload``. The layer dispatches by ``action``,
-  runs the matching tool, and replies with a
+  pattern). Topic: ``tool.invoke``. Producers (HeartbeatChannel,
+  future schedulers) publish a :class:`ComponentRequest` with
+  ``action=<tool_name>`` and arguments in ``payload``. The layer
+  dispatches by ``action``, calls the owning driver's
+  ``execute_tool`` (wrapped in :func:`asyncio.to_thread` because
+  MCS's ``execute_tool`` is synchronous), and replies with a
   :class:`ComponentResponse` carrying the result.
 
-- **LLM-shaped tool invocation** (the "here's an LLM output,
-  figure out if it called a tool" pattern). Topic:
-  ``tool.process_llm_output``. Producers (Actors, Kernels) send
-  a request carrying the raw LLM text/dict; the layer routes it
-  through MCS's ``process_llm_response`` and replies with the
-  parsed result + agent-facing messages.
+- **LLM-shaped tool invocation** (``tool.process_llm_output``)
+  -- planned. Producers (Actors, Kernels) will send a request
+  carrying the raw LLM text/dict; the layer will route it
+  through a higher-level MCS Driver's ``process_llm_response``
+  and reply with the parsed result + agent-facing messages.
+  Not implemented in this iteration.
 
-  *Not implemented yet*: only the direct path is wired in the
-  stub. The LLM path lands in the next iteration when MCS engine
-  + RestDriver are pulled in.
+Today's drivers, wired by the layer's default constructor:
 
-Status: **stub catalog**, no real MCS engine yet. Mailbox
-``mailbox.fetch_unread`` returns five dummy messages so the bus
-flow can be smoke-tested end-to-end. The interface this exposes on
-the bus is exactly the shape the MCS-backed version will keep --
-only the handler bodies change.
+- :class:`MailboxToolDriver` -- in-process, exposes
+  ``mailbox.fetch_unread`` and returns a constant batch of dummy
+  messages. No adapter or port layer until a real backend is
+  introduced.
+
+Swapping in a real ToolDriver is a constructor swap: the layer
+takes whatever ToolDrivers it is given and asks no questions
+about how (or whether) they reach external backends.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Sequence
 from typing import Any
+
+from mcs.driver.core import MCSToolDriver, Tool
 
 from src.bus.messages import (
     ComponentRequest,
@@ -53,6 +66,7 @@ from src.tool_execution.ports import (
     ToolExecutionLayerPort,
     ToolInvocationResult,
 )
+from mcs.driver.mailbox import MailboxToolDriver
 
 logger = logging.getLogger(__name__)
 
@@ -60,59 +74,87 @@ logger = logging.getLogger(__name__)
 _TOOL_INVOKE_TOPIC = "tool.invoke"
 
 
-_STUB_FETCH_UNREAD = ToolDescriptor(
-    name="mailbox.fetch_unread",
-    title="Fetch unread mails",
-    description=(
-        "Return the most recent unread messages from the configured "
-        "mailbox, up to ``limit`` entries. Stub: returns five fixed "
-        "dummy messages until the MCS IMAP adapter lands."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "limit": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 50,
-                "default": 5,
-            },
-            "mailbox_id": {"type": "string"},
-        },
-    },
-)
+def _default_tool_drivers() -> list[MCSToolDriver]:
+    """Driver set the layer wires by default at boot.
+
+    Today: a single :class:`MailboxToolDriver` whose
+    ``execute_tool`` runs entirely in-process, so a fresh robot
+    can exercise the full bus -> tool -> response path end-to-end
+    without configuring a backend. When real backends arrive
+    (IMAP, JMAP, ...) they ship as ``mcs-adapter-*`` packages
+    behind a then-introduced ``MailboxAdapterPort`` and the
+    ToolDriver delegates to them.
+    """
+    return [MailboxToolDriver()]
 
 
 class MCSToolExecutionLayer(BusComponent, ToolExecutionLayerPort):
-    """Bus-attached tool execution surface (MCS-backed in a later iteration).
+    """Bus-attached tool execution surface backed by MCS ToolDrivers.
 
-    Holds the tool registry and dispatches requests on the
-    ``tool.invoke`` topic. Replies are :class:`ComponentResponse`
-    instances correlated by ``correlation_id`` so
-    :meth:`BusPort.request` callers get their result back without
-    extra plumbing.
+    Holds an ordered list of MCS ToolDrivers and dispatches
+    requests on the ``tool.invoke`` topic. Replies are
+    :class:`ComponentResponse` instances correlated by
+    ``correlation_id`` so :meth:`BusPort.request` callers get
+    their result back without extra plumbing.
 
     The layer never holds direct references from consumers; the bus
     is the only contact surface. That keeps the layer
-    hot-swappable (different engine, different adapter mix, future
-    federation) without touching producers.
+    hot-swappable (different driver mix, different adapters,
+    future federation) without touching producers.
     """
 
     component_name = "tool-execution"
     component_category = ComponentCategory.BUS_PROVIDER
     component_description = (
-        "Bus-attached tool execution layer. Subscribes ``tool.invoke`` "
-        "for direct tool invocations and dispatches by ``action``. "
-        "Currently ships with a stub mailbox.fetch_unread tool; the "
-        "MCS engine drop-in is planned for the next iteration."
+        "Bus-attached tool execution layer. Hosts MCS ToolDrivers "
+        "(built per the MCS Port -> Adapter -> ToolDriver pattern) "
+        "and dispatches direct ``tool.invoke`` requests by action "
+        "to the owning driver. Sync ``execute_tool`` is run on a "
+        "worker thread so the bus loop stays responsive."
     )
 
-    def __init__(self) -> None:
-        self._tools: dict[str, ToolDescriptor] = {
-            _STUB_FETCH_UNREAD.name: _STUB_FETCH_UNREAD,
-        }
+    def __init__(
+        self,
+        *,
+        tool_drivers: Sequence[MCSToolDriver] | None = None,
+    ) -> None:
+        drivers = (
+            list(tool_drivers)
+            if tool_drivers is not None
+            else _default_tool_drivers()
+        )
+        for index, driver in enumerate(drivers):
+            if not isinstance(driver, MCSToolDriver):
+                raise TypeError(
+                    f"MCSToolExecutionLayer.tool_drivers[{index}] must "
+                    f"be an MCSToolDriver, got {type(driver).__name__}"
+                )
+        self._drivers: list[MCSToolDriver] = drivers
+        self._tool_index: dict[str, tuple[MCSToolDriver, Tool]] = {}
+        self._rebuild_index()
         self._bus: BusPort | None = None
         self._invoke_subscription: Subscription | None = None
+
+    def _rebuild_index(self) -> None:
+        """Recompute name -> (driver, Tool) lookup from the driver list.
+
+        Last writer wins on collision and a warning is logged; in
+        practice driver authors namespace their tools (the MCS
+        convention is ``<capability>.<verb>``) so collisions are
+        rare and the warning is the right signal.
+        """
+        index: dict[str, tuple[MCSToolDriver, Tool]] = {}
+        for driver in self._drivers:
+            for tool in driver.list_tools():
+                if tool.name in index:
+                    logger.warning(
+                        "MCSToolExecutionLayer: tool name collision on "
+                        "%r; %s overrides earlier registration",
+                        tool.name,
+                        type(driver).__name__,
+                    )
+                index[tool.name] = (driver, tool)
+        self._tool_index = index
 
     # ---- BusComponent lifecycle --------------------------------------------
 
@@ -121,13 +163,15 @@ class MCSToolExecutionLayer(BusComponent, ToolExecutionLayerPort):
         self._invoke_subscription = bus.subscribe(
             _TOOL_INVOKE_TOPIC, self._handle_invoke
         )
+        names = sorted(self._tool_index)
         logger.info(
-            "%s (%s) ready with %d tool(s) on %s: %s",
+            "%s (%s) ready with %d driver(s), %d tool(s) on %s: %s",
             type(self).__name__,
             self.instance_id,
-            len(self._tools),
+            len(self._drivers),
+            len(names),
             _TOOL_INVOKE_TOPIC,
-            ", ".join(sorted(self._tools)),
+            ", ".join(names) if names else "<none>",
         )
         await self.announce_lifecycle(bus, "ready")
 
@@ -143,16 +187,23 @@ class MCSToolExecutionLayer(BusComponent, ToolExecutionLayerPort):
 
     # ---- Direct ToolExecutionLayerPort surface (off-bus) -------------------
 
-    def list_tools(self):
-        return tuple(self._tools[name] for name in sorted(self._tools))
+    def list_tools(self) -> Sequence[ToolDescriptor]:
+        """Return aggregated, sorted descriptors across every driver."""
+        return tuple(
+            self._to_descriptor(tool)
+            for _, tool in sorted(
+                self._tool_index.values(), key=lambda pair: pair[1].name
+            )
+        )
 
-    async def invoke_tool(self, name, arguments) -> ToolInvocationResult:
-        """Direct off-bus invocation. Used by tests and by code paths
-        that already hold the layer instance (today: none -- the bus
-        path is the canonical one)."""
-        if name not in self._tools:
+    async def invoke_tool(
+        self, name: str, arguments: Any
+    ) -> ToolInvocationResult:
+        """Direct off-bus invocation, used by tests and code paths
+        that already hold the layer instance."""
+        if name not in self._tool_index:
             raise KeyError(
-                f"unknown tool {name!r}; registered: {sorted(self._tools)}"
+                f"unknown tool {name!r}; registered: {sorted(self._tool_index)}"
             )
         return await self._run(name, dict(arguments))
 
@@ -174,12 +225,12 @@ class MCSToolExecutionLayer(BusComponent, ToolExecutionLayerPort):
         tool_name = event.action
         arguments = dict(event.payload or {})
 
-        if tool_name not in self._tools:
+        if tool_name not in self._tool_index:
             await self._reply_error(
                 event,
                 code="tool.unknown",
                 message=f"unknown tool {tool_name!r}",
-                details={"registered": sorted(self._tools)},
+                details={"registered": sorted(self._tool_index)},
             )
             return
 
@@ -260,44 +311,55 @@ class MCSToolExecutionLayer(BusComponent, ToolExecutionLayerPort):
             )
         )
 
-    # ---- Internal handler dispatch (engine boundary) -----------------------
+    # ---- Internal dispatch (engine boundary) -------------------------------
 
     async def _run(
         self, name: str, arguments: dict[str, Any]
     ) -> ToolInvocationResult:
-        """Single in-process dispatch. The MCS engine will replace
-        this body with ``asyncio.to_thread(driver.execute_tool, ...)``
-        once the orchestrator is wired in."""
-        handler = self._handler_for(name)
+        """Run a tool on its owning driver.
+
+        MCS's ``execute_tool`` is synchronous (so adapter authors
+        do not have to write async wrappers around imaplib /
+        msal / etc.). We hop to a worker thread with
+        :func:`asyncio.to_thread` so the bus loop stays responsive
+        even when an adapter blocks on network IO.
+        """
+        driver, _ = self._tool_index[name]
         try:
-            result_payload = await handler(arguments)
+            result_payload = await asyncio.to_thread(
+                driver.execute_tool, name, arguments
+            )
         except Exception as exc:
             return ToolInvocationResult(
                 name=name, success=False, error=str(exc)
             )
         return ToolInvocationResult(name=name, success=True, result=result_payload)
 
-    def _handler_for(self, name: str):
-        if name == _STUB_FETCH_UNREAD.name:
-            return self._stub_fetch_unread
-        raise KeyError(f"no handler bound for {name!r}")
+    # ---- MCS Tool -> cephix ToolDescriptor adapter -------------------------
 
     @staticmethod
-    async def _stub_fetch_unread(arguments: dict[str, Any]) -> dict[str, Any]:
-        """Fixed-batch dummy fetch. Replaced by MCS IMAP adapter later."""
-        limit = int(arguments.get("limit", 5) or 5)
-        limit = max(1, min(limit, 50))
-        mailbox_id = str(arguments.get("mailbox_id", "stub-mailbox"))
-        return {
-            "mailbox_id": mailbox_id,
-            "fetched_at": "stub-timestamp",
-            "messages": [
-                {
-                    "id": f"stub-msg-{i}",
-                    "from": f"sender{i}@example.com",
-                    "subject": f"Stub message {i}",
-                    "snippet": f"This is dummy mail body number {i}.",
-                }
-                for i in range(1, limit + 1)
-            ],
-        }
+    def _to_descriptor(tool: Tool) -> ToolDescriptor:
+        """Convert an MCS :class:`Tool` to the cephix-facing descriptor.
+
+        The two shapes match for the most part; this method does
+        the field rename / parameter-flatten so consumers of the
+        cephix port (``ToolExecutionLayerPort``) do not have to
+        depend on the MCS types directly.
+        """
+        properties: dict[str, Any] = {}
+        required: list[str] = []
+        for param in tool.parameters or ():
+            properties[param.name] = dict(param.schema or {})
+            if not properties[param.name].get("description"):
+                properties[param.name]["description"] = param.description
+            if param.required:
+                required.append(param.name)
+        schema: dict[str, Any] = {"type": "object", "properties": properties}
+        if required:
+            schema["required"] = required
+        return ToolDescriptor(
+            name=tool.name,
+            title=tool.title or tool.name,
+            description=tool.description or tool.title or tool.name,
+            parameters=schema,
+        )
