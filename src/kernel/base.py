@@ -217,12 +217,15 @@ class BaseKernel(KernelPort):
         await self.announce_lifecycle(bus, "ready")
 
     async def stop(self) -> None:
-        # Announce shutdown first, while the bus is still alive (it
-        # boots first / stops last), so the collector retracts this
-        # kernel's capabilities before we tear anything down.
+        # Tear down in reverse of ``start``: ``start`` mounted the
+        # actor before announcing ``ready``, so ``stop`` unmounts the
+        # actor before announcing ``shutdown``. The mount/unmount
+        # pair frames the actor's lifetime; the ready/shutdown pair
+        # frames the kernel's. The bus is still alive at this point
+        # (it boots first / stops last), so both events go out.
+        await self._publish_actor_mount(phase="unmounted")
         if self._bus is not None:
             await self.announce_lifecycle(self._bus, "shutdown")
-        await self._publish_actor_mount(phase="unmounted")
         if self._subscription is not None:
             await self._subscription.unsubscribe()
             self._subscription = None

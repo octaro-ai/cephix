@@ -1,9 +1,7 @@
-"""Cephix persistence layer -- DAO-modelled, format-orthogonal.
+"""Cephix persistence layer -- DAO-modelled.
 
-Four levels, each with one clear responsibility:
+Three levels, each with one clear responsibility:
 
-- **Codec** (library, no lifecycle) -- record-to-bytes serialization.
-  Default: :class:`~src.persistence.codec.JsonlCodec`.
 - **Backend** (boot level 0) -- abstract filesystem driver,
   e.g. :class:`~src.persistence.filesystem.LocalFSAdapter`.
   Implements :class:`~src.persistence.filesystem.FilesystemPort`.
@@ -12,7 +10,9 @@ Four levels, each with one clear responsibility:
 - **Provider** (boot level 2) -- the DAO consumers depend on.
   :class:`~src.persistence.event_stream.EventStreamProviderPort` is
   the contract; :class:`~src.persistence.event_stream.FilesystemEventStreamProvider`
-  the filesystem-backed implementation.
+  the filesystem-backed implementation. Records are serialized as
+  JSONL inline; a different wire format would be a separate
+  provider, not a configurable knob.
 
 Consumers (``BusRecorder``, ``AuditNoteSink``, future stores) hold
 a reference to the provider port plus a channel name; they call
@@ -21,7 +21,6 @@ that used to sit between them is now an internal implementation
 detail of the provider.
 """
 
-from src.persistence.codec import JsonlCodec, RecordCodec
 from src.persistence.event_stream import (
     EventStreamProviderPort,
     FilesystemEventStreamProvider,
@@ -37,7 +36,5 @@ __all__ = [
     "FilesystemConnection",
     "FilesystemEventStreamProvider",
     "FilesystemPort",
-    "JsonlCodec",
     "LocalFSAdapter",
-    "RecordCodec",
 ]

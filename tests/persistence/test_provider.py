@@ -12,20 +12,17 @@ from src.persistence import (
     EventStreamProviderPort,
     FilesystemConnection,
     FilesystemEventStreamProvider,
-    JsonlCodec,
     LocalFSAdapter,
 )
 
 
 def _build_provider(root: Path) -> FilesystemEventStreamProvider:
     # ``directory=""`` keeps channels directly under ``root`` so the
-    # tests can assert on flat ``<root>/<channel>.<ext>`` paths. The
+    # tests can assert on flat ``<root>/<channel>.jsonl`` paths. The
     # production default (``directory="logs"``) is exercised through
     # the builder tests.
     connection = FilesystemConnection(adapter=LocalFSAdapter(), root=root)
-    return FilesystemEventStreamProvider(
-        connection=connection, directory="", codec=JsonlCodec()
-    )
+    return FilesystemEventStreamProvider(connection=connection, directory="")
 
 
 def test_provider_metadata_marks_it_as_provider_level_2() -> None:
@@ -114,24 +111,13 @@ async def test_stop_closes_open_writers(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_uses_codec_extension(tmp_path: Path) -> None:
-    """The provider asks the codec for its extension -- not hardcoded."""
-
-    class FakeCodec:
-        extension = ".ndjson"
-
-        def encode_line(self, record):  # type: ignore[no-untyped-def]
-            return json.dumps(dict(record))
-
-    connection = FilesystemConnection(adapter=LocalFSAdapter(), root=tmp_path)
-    provider = FilesystemEventStreamProvider(
-        connection=connection, directory="", codec=FakeCodec()
-    )
+async def test_writes_jsonl_extension(tmp_path: Path) -> None:
+    """Channels resolve to ``<channel>.jsonl`` -- the wire format is fixed."""
+    provider = _build_provider(tmp_path)
     await provider.start()
     try:
         await provider.append("telemetry", {"a": 1})
         await provider.flush()
     finally:
         await provider.stop()
-    assert (tmp_path / "telemetry.ndjson").exists()
-    assert not (tmp_path / "telemetry.jsonl").exists()
+    assert (tmp_path / "telemetry.jsonl").exists()

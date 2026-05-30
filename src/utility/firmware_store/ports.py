@@ -32,10 +32,12 @@ class FirmwareStorePort(ABC):
         """Assemble the documents into a single system-prompt string."""
 
     @abstractmethod
-    def refresh(self) -> None:
-        """Re-read every document from disk.
+    async def refresh(self) -> None:
+        """Re-read every document from the underlying storage.
 
         Cheap (a handful of small Markdown files); intended for
         runtime commands that let the operator hot-reload the
-        firmware without restarting the robot.
+        firmware without restarting the robot. Async because
+        concrete stores route IO through an injected transport
+        (``FilesystemConnection`` today).
         """

@@ -61,9 +61,7 @@ from src.persistence import (
     EventStreamProviderPort,
     FilesystemConnection,
     FilesystemEventStreamProvider,
-    JsonlCodec,
     LocalFSAdapter,
-    RecordCodec,
 )
 from src.registry import ConfigError, build
 from src.robot import ControlPlaneConfig, Robot, RobotIdentity
@@ -820,31 +818,34 @@ def _build_components_list(
         item = dict(item)
         extras: dict[str, Any] = {}
         name = item.get("name")
-        if isinstance(name, str):
-            if (
-                workspace is not None
-                and name == "firmware-store"
-                and "firmware_dir" not in item
-            ):
-                firmware_dir = Path(workspace) / "firmware"
-                _seed_firmware(firmware_dir)
-                extras["firmware_dir"] = str(firmware_dir)
-            elif name == "session-store" and "connection" not in item:
-                connection = _resolve_session_store_connection(
-                    item, connections
+        if isinstance(name, str) and name in {"session-store", "firmware-store"}:
+            if "connection" not in item:
+                connection = _resolve_persistence_connection(
+                    name, item, connections
                 )
                 if connection is None:
                     raise ConfigError(
-                        "session-store needs a FilesystemConnection but "
-                        "no persistence stack is configured; declare a "
+                        f"{name} needs a FilesystemConnection but no "
+                        "persistence stack is configured; declare a "
                         "persistence entry (e.g. 'filesystem-events') "
                         "or pass an explicit connection: <id>."
                     )
                 extras["connection"] = connection
-                # ``persistence:`` is a routing hint for the builder,
-                # not a kwarg the store understands -- drop it before
-                # the spec walks into ``build()``.
-                item.pop("persistence", None)
+            else:
+                connection = item["connection"]
+            # ``persistence:`` is a routing hint for the builder,
+            # not a kwarg the store understands -- drop it before
+            # the spec walks into ``build()``.
+            item.pop("persistence", None)
+            # firmware-store also needs its starter templates seeded
+            # into the resolved directory on first build (copy-if-
+            # missing). Anchor the seed at the connection root + the
+            # store's ``directory`` field so the layout matches what
+            # the store will read at startup.
+            if name == "firmware-store":
+                directory = str(item.get("directory", "firmware"))
+                seed_dir = Path(connection.root) / directory if directory else Path(connection.root)
+                _seed_firmware(seed_dir)
         component = _build_with_library(
             item, category=section_name, library=library, **extras
         )
@@ -864,11 +865,12 @@ def _build_components_list(
     return out
 
 
-def _resolve_session_store_connection(
+def _resolve_persistence_connection(
+    consumer_name: str,
     spec: dict[str, Any],
     connections: dict[str, FilesystemConnection] | None,
 ) -> FilesystemConnection | None:
-    """Pick the :class:`FilesystemConnection` the session store binds to.
+    """Pick the :class:`FilesystemConnection` a utility binds to.
 
     Selection (mirrors observer ``persistence:`` semantics):
 
@@ -890,7 +892,7 @@ def _resolve_session_store_connection(
         if connection is None:
             available = sorted(connections.keys()) or ["<none>"]
             raise ConfigError(
-                f"session-store references persistence id "
+                f"{consumer_name} references persistence id "
                 f"{requested_id!r} but no such stack is configured; "
                 f"available: {available}"
             )
@@ -901,9 +903,9 @@ def _resolve_session_store_connection(
         return connections[_DEFAULT_PERSISTENCE_ID]
     available = sorted(connections.keys())
     raise ConfigError(
-        f"session-store needs a persistence id (multiple stacks "
+        f"{consumer_name} needs a persistence id (multiple stacks "
         f"available: {available}); add 'persistence: <id>' to the "
-        "session-store entry."
+        f"{consumer_name} entry."
     )
 
 
@@ -1212,11 +1214,6 @@ def _build_persistence_components(
         # Connection (CONNECTION) -- holds the adapter + root.
         connection = FilesystemConnection(adapter=adapter, root=root)
 
-        # Codec (library, not a component). Future codecs sit next
-        # to ``jsonl`` in :mod:`src.persistence.codec`.
-        codec_name = str(enriched.get("codec", "jsonl"))
-        codec = _resolve_codec(codec_name)
-
         # Provider (PROVIDER) -- the DAO observers depend on. Its
         # ``directory:`` is the provider's bucket inside the shared
         # root, defaulting to ``logs/`` so a fresh workspace ends up
@@ -1225,27 +1222,13 @@ def _build_persistence_components(
         # (session store) keep their own bucket.
         directory = str(enriched.get("directory", "logs"))
         provider = FilesystemEventStreamProvider(
-            connection=connection, directory=directory, codec=codec
+            connection=connection, directory=directory
         )
 
         all_components.extend((adapter, connection, provider))
         provider_index[persistence_id] = provider
         connection_index[persistence_id] = connection
     return all_components, provider_index, connection_index
-
-
-def _resolve_codec(name: str) -> RecordCodec:
-    """Map a YAML ``codec:`` string to a :class:`RecordCodec` instance.
-
-    Today only ``jsonl`` ships. Future codecs (``json``, ``msgpack``,
-    ``parquet``) register here so persistence entries can pick them
-    with a single string.
-    """
-    if name == "jsonl":
-        return JsonlCodec()
-    raise ConfigError(
-        f"unknown codec {name!r}; the only built-in codec today is 'jsonl'"
-    )
 
 
 def _resolve_default_persistence(

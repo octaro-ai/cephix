@@ -196,7 +196,7 @@ def _register_builtins() -> None:
     from src.actor.llm.mock_actor import MockLLMActor
     from src.actor.llm.openai_actor import LLMActorOpenAI
     from src.utility.capability_collector import CapabilityCollector
-    from src.utility.firmware_store import MarkdownFirmwareStore
+    from src.utility.firmware_store import FilesystemFirmwareStore
     from src.utility.model_catalog import ModelCatalog
     from src.utility.session_store import FilesystemSessionStore
     from src.bus.asyncio_bus import AsyncioBus
@@ -218,10 +218,10 @@ def _register_builtins() -> None:
     register(EchoActor)
     register(FilesystemConnection)
     register(FilesystemEventStreamProvider)
+    register(FilesystemFirmwareStore)
     register(FilesystemSessionStore)
     register(LLMActorOpenAI)
     register(LocalFSAdapter)
-    register(MarkdownFirmwareStore)
     register(MockLLMActor)
     register(ModelCatalog)
     register(WebsocketChannel)

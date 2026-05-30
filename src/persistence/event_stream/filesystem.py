@@ -2,8 +2,10 @@
 
 Implements :class:`EventStreamProviderPort`. Receives a
 :class:`~src.persistence.filesystem.FilesystemConnection` by
-constructor injection and a :class:`~src.persistence.codec.RecordCodec`
-to turn records into bytes (JSONL by default).
+constructor injection. Records are serialized as JSONL inline:
+one JSON object per line, NDJSON-style. The wire format is fixed
+on purpose -- a future need for another format (parquet, msgpack)
+would be a separate provider, not a configurable knob here.
 
 Internally caches one :class:`AppendWriter` per channel so the hot
 path (``append``) is one dict lookup + one ``write_line``. The
@@ -21,16 +23,19 @@ Boot log:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Mapping
 from typing import Any
 
 from src.components import ComponentCategory, RobotComponent
-from src.persistence.codec import JsonlCodec, RecordCodec
 from src.persistence.filesystem import FilesystemConnection
 from src.persistence.filesystem.port import AppendWriter
 
 logger = logging.getLogger(__name__)
+
+
+_FILE_EXTENSION = ".jsonl"
 
 
 class FilesystemEventStreamProvider(RobotComponent):
@@ -40,11 +45,9 @@ class FilesystemEventStreamProvider(RobotComponent):
 
     - ``connection`` -- the level-1 :class:`FilesystemConnection`
       that resolves channels to file paths and opens writers.
-    - ``codec`` -- a :class:`RecordCodec` (defaults to
-      :class:`JsonlCodec`). Sits next to the storage layer in its
-      own subpackage because format is orthogonal to backend: a
-      future DB provider can reuse :class:`JsonlCodec` to write
-      JSON into a BLOB column.
+    - ``directory`` -- the provider's bucket inside the shared
+      connection root. Channels resolve to
+      ``<root>/<directory>/<channel>.jsonl``. Default ``logs/``.
 
     Implements :class:`EventStreamProviderPort` directly; consumers
     type-hint the port, the builder injects this concrete provider.
@@ -56,9 +59,7 @@ class FilesystemEventStreamProvider(RobotComponent):
         "Append-only event streams backed by a FilesystemConnection. "
         "Implements EventStreamProviderPort at boot level 2; receives "
         "the connection by constructor injection. Channels resolve to "
-        "files under the provider's ``directory`` subdir of the "
-        "connection root (default 'logs/'), encoded by the configured "
-        "codec (JSONL by default)."
+        "<root>/<directory>/<channel>.jsonl, one JSON object per line."
     )
 
     def __init__(
@@ -66,7 +67,6 @@ class FilesystemEventStreamProvider(RobotComponent):
         *,
         connection: FilesystemConnection,
         directory: str = "logs",
-        codec: RecordCodec | None = None,
     ) -> None:
         if not isinstance(connection, FilesystemConnection):
             raise TypeError(
@@ -86,7 +86,6 @@ class FilesystemEventStreamProvider(RobotComponent):
             )
         self._connection = connection
         self._directory = directory.strip("/").strip("\\")
-        self._codec: RecordCodec = codec or JsonlCodec()
         # channel -> writer; lazily opened on first append, closed on stop().
         self._writers: dict[str, AppendWriter] = {}
         self._writer_lock = asyncio.Lock()
@@ -99,15 +98,11 @@ class FilesystemEventStreamProvider(RobotComponent):
     def directory(self) -> str:
         return self._directory
 
-    @property
-    def codec(self) -> RecordCodec:
-        return self._codec
-
     # ---- EventStreamProviderPort -------------------------------------------
 
     async def append(self, channel: str, record: Mapping[str, Any]) -> None:
         writer = await self._writer_for(channel)
-        line = self._codec.encode_line(record)
+        line = _encode_line(record)
         await writer.write_line(line)
 
     async def flush(self, channel: str | None = None) -> None:
@@ -183,7 +178,24 @@ class FilesystemEventStreamProvider(RobotComponent):
                 f"{self._directory}/{channel}" if self._directory else channel
             )
             writer = await self._connection.open_append(
-                resolved, suffix=self._codec.extension
+                resolved, suffix=_FILE_EXTENSION
             )
             self._writers[channel] = writer
             return writer
+
+
+def _encode_line(record: Mapping[str, Any]) -> str:
+    """Render ``record`` as a single NDJSON line (no trailing newline).
+
+    ``ensure_ascii=False`` so German umlauts / emoji round-trip
+    cleanly. ``default=str`` so the writer never crashes on rich
+    types like ``datetime`` or ``UUID`` -- they end up as their
+    canonical string representation. Compact separators because
+    each event has its own line; whitespace is just noise.
+    """
+    return json.dumps(
+        dict(record),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    )

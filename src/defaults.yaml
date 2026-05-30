@@ -145,7 +145,7 @@ defaults:
       # ``persistence: <id>`` to bind to a non-default persistence
       # stack when several are declared.
       - {name: model-catalog}
-      - {name: firmware-store}
+      - {name: firmware-store, directory: firmware}
       - {name: session-store, directory: sessions}
 
     channel:
@@ -169,10 +169,9 @@ defaults:
       # the session store keep their own bucket
       # (<workspace>/sessions/). Override `path:` to anchor the
       # connection elsewhere (relative -> workspace, absolute as-is);
-      # override `adapter:` to swap the backend (future: `s3-fs`, ...);
-      # override `codec:` to swap the format (future: `json`,
-      # `parquet`, ...).
-      - {name: filesystem-events, directory: logs, adapter: local-fs, codec: jsonl}
+      # override `adapter:` to swap the backend (future: `s3-fs`, ...).
+      # Records are written as JSONL inline.
+      - {name: filesystem-events, directory: logs, adapter: local-fs}
 
     telemetry:
       - {name: bus_recorder, channel: telemetry}

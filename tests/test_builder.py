@@ -91,12 +91,11 @@ def _observer_path(observer: BusRecorder | AuditNoteSink) -> Path:
     """
     provider = observer._provider  # type: ignore[attr-defined]
     connection = provider._connection  # type: ignore[attr-defined]
-    codec_ext = provider._codec.extension  # type: ignore[attr-defined]
     directory = provider._directory  # type: ignore[attr-defined]
     channel = (
         f"{directory}/{observer.channel}" if directory else observer.channel
     )
-    return Path(connection.path_for(channel, suffix=codec_ext))
+    return Path(connection.path_for(channel, suffix=".jsonl"))
 
 
 def _bus_of(robot: Robot) -> AsyncioBus:
@@ -778,7 +777,7 @@ class TestBuilderChatKernel:
         self, tmp_path: Path
     ) -> None:
         from src.kernel.chat import ChatKernel
-        from src.utility.firmware_store import MarkdownFirmwareStore
+        from src.utility.firmware_store import FilesystemFirmwareStore
         from src.utility.model_catalog import ModelCatalog
         from src.utility.session_store import FilesystemSessionStore
 
@@ -787,7 +786,7 @@ class TestBuilderChatKernel:
             workspace=tmp_path,
         )
         kernel = next(c for c in robot.components if isinstance(c, ChatKernel))
-        assert isinstance(kernel._firmware, MarkdownFirmwareStore)
+        assert isinstance(kernel._firmware, FilesystemFirmwareStore)
         assert isinstance(kernel._sessions, FilesystemSessionStore)
         assert isinstance(kernel._model_catalog, ModelCatalog)
 
@@ -816,10 +815,11 @@ class TestBuilderChatKernel:
         ]
         assert store._fs in connections
 
-    def test_firmware_store_dir_defaults_to_workspace_firmware(
+    def test_firmware_store_binds_to_default_persistence_connection(
         self, tmp_path: Path
     ) -> None:
-        from src.utility.firmware_store import MarkdownFirmwareStore
+        from src.persistence.filesystem.connection import FilesystemConnection
+        from src.utility.firmware_store import FilesystemFirmwareStore
 
         robot = build_robot_from_config(
             self._chat_cfg(),
@@ -828,9 +828,18 @@ class TestBuilderChatKernel:
         store = next(
             c
             for c in robot.components
-            if isinstance(c, MarkdownFirmwareStore)
+            if isinstance(c, FilesystemFirmwareStore)
         )
-        assert store._firmware_dir == tmp_path / "firmware"
+        # Shares the FilesystemConnection used by the default
+        # persistence stack -- same root, same adapter chain. The
+        # ``directory`` field selects ``firmware/`` below that root.
+        assert isinstance(store._fs, FilesystemConnection)
+        assert store._directory == "firmware"
+        connections = [
+            c for c in robot.components
+            if isinstance(c, FilesystemConnection)
+        ]
+        assert store._fs in connections
 
     def test_firmware_seeded_into_empty_workspace(
         self, tmp_path: Path
@@ -887,7 +896,7 @@ class TestBuilderChatKernel:
         ``model_catalog``; the builder must not try to pass them
         (or the registry will reject the kwarg).
         """
-        from src.utility.firmware_store import MarkdownFirmwareStore
+        from src.utility.firmware_store import FilesystemFirmwareStore
 
         robot = build_robot_from_config(
             _cfg(
@@ -902,7 +911,7 @@ class TestBuilderChatKernel:
             workspace=tmp_path,
         )
         assert any(
-            isinstance(c, MarkdownFirmwareStore) for c in robot.components
+            isinstance(c, FilesystemFirmwareStore) for c in robot.components
         )
 
     def test_chatbot_template_resolves_to_chat_kernel(

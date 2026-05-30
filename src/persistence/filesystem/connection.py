@@ -155,10 +155,15 @@ class FilesystemConnection(RobotComponent):
         """Return the text at ``<root>/rel_path`` (UTF-8 by default).
 
         Convenience wrapper around :meth:`read_bytes`. Same error
-        semantics: ``FileNotFoundError`` on missing paths.
+        semantics: ``FileNotFoundError`` on missing paths. Performs
+        universal-newline normalization (``\\r\\n`` / ``\\r`` ->
+        ``\\n``) so callers don't have to deal with platform-specific
+        line endings -- matches ``Path.read_text``'s implicit
+        ``newline=None`` behaviour. Use :meth:`read_bytes` if the
+        raw bytes are required.
         """
         raw = await self.read_bytes(rel_path)
-        return raw.decode(encoding)
+        return raw.decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
 
     async def listdir(
         self,

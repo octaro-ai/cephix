@@ -263,6 +263,10 @@ class AsyncioBus(BusPort, RobotComponent):
             raise
 
     async def _remove_subscription(self, sub: _AsyncSubscription) -> None:
+        # Detach from the routing tables FIRST so no new event reaches
+        # this subscription while we wait for its queue to drain. Any
+        # ``publish`` racing with this call has already passed its
+        # ``put`` and will be picked up by ``queue.join`` below.
         async with self._lock:
             if sub.is_all:
                 if sub in self._all_subscriptions:
@@ -278,6 +282,24 @@ class AsyncioBus(BusPort, RobotComponent):
                     subs.remove(sub)
                 if not subs:
                     store.pop(sub.topic, None)
+
+        # Let the consumer drain whatever is still in flight. Without
+        # this, tear-down during shutdown races with phase-3-down
+        # publishes: a recorder cancelled mid-queue silently drops
+        # every ``ComponentLifecycle.shutdown`` that hadn't been
+        # consumed yet, leaving the telemetry log truncated. This is
+        # the bus's contract -- every component treats the queue the
+        # same way, none of them needs to know about ``queue.join``.
+        if sub.task is not None and not sub.task.done():
+            try:
+                await sub.queue.join()
+            except asyncio.CancelledError:
+                # Cancellation propagating into ``_remove_subscription``
+                # is treated as "give up cleanly". The cancel below
+                # tears the consumer down regardless.
+                pass
+
+        async with self._lock:
             if sub.task is not None:
                 sub.task.cancel()
                 task = sub.task
