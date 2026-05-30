@@ -841,6 +841,10 @@ def _build_components_list(
                         "or pass an explicit connection: <id>."
                     )
                 extras["connection"] = connection
+                # ``persistence:`` is a routing hint for the builder,
+                # not a kwarg the store understands -- drop it before
+                # the spec walks into ``build()``.
+                item.pop("persistence", None)
         component = _build_with_library(
             item, category=section_name, library=library, **extras
         )

@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 _SESSION_ID_PREFIX = "sess_"
 _SESSION_ID_HEX_LENGTH = 12
-_SESSIONS_SUBDIR = "sessions"
+_DEFAULT_SESSIONS_DIRECTORY = "sessions"
 _INDEX_FILENAME = "index.json"
 
 
@@ -75,17 +75,34 @@ class FilesystemSessionStore(RobotComponent, SessionStorePort):
         "Append-only chat session store. One JSONL file per session "
         "with OCF message_envelope-shaped records, plus an atomic "
         "title index. Off-bus utility consumed by chat-style kernels. "
-        "Storage routed through an injected FilesystemConnection."
+        "Storage routed through an injected FilesystemConnection; the "
+        "store keeps its own bucket below the connection root, "
+        "configurable via ``directory:`` (default ``sessions/``)."
     )
 
-    def __init__(self, *, connection: FilesystemConnection) -> None:
+    def __init__(
+        self,
+        *,
+        connection: FilesystemConnection,
+        directory: str = _DEFAULT_SESSIONS_DIRECTORY,
+    ) -> None:
         if not isinstance(connection, FilesystemConnection):
             raise TypeError(
                 "FilesystemSessionStore.connection must be a "
                 "FilesystemConnection, got "
                 f"{type(connection).__name__}"
             )
+        if not isinstance(directory, str):
+            raise TypeError(
+                "FilesystemSessionStore.directory must be a string"
+            )
         self._fs = connection
+        # The bucket inside the shared connection root where this
+        # store lives. Empty string means "sit directly under root",
+        # which keeps tests and small workspaces simple. The default
+        # ``sessions/`` keeps the store next to the event provider's
+        # ``logs/`` without collisions.
+        self._directory = directory.strip("/").strip("\\")
         self._writers: dict[str, AppendWriter] = {}
         # Per-session locks are created lazily so we don't pin
         # locks to a non-running loop at construction time.
@@ -224,7 +241,7 @@ class FilesystemSessionStore(RobotComponent, SessionStorePort):
         most-recently-active first (ties broken by session id) so the
         result drops straight into a chat sidebar.
         """
-        names = await self._fs.listdir(PurePath(_SESSIONS_SUBDIR))
+        names = await self._fs.listdir(PurePath(self._directory))
         titles = await self._read_index()
         summaries: list[SessionSummary] = []
         for name in names:
@@ -275,13 +292,16 @@ class FilesystemSessionStore(RobotComponent, SessionStorePort):
             model_id=model_id,
         )
 
-    @staticmethod
-    def _session_rel(session_id: str) -> PurePath:
-        return PurePath(_SESSIONS_SUBDIR) / f"{session_id}.jsonl"
+    def _session_rel(self, session_id: str) -> PurePath:
+        leaf = f"{session_id}.jsonl"
+        return PurePath(self._directory) / leaf if self._directory else PurePath(leaf)
 
-    @staticmethod
-    def _index_rel() -> PurePath:
-        return PurePath(_SESSIONS_SUBDIR) / _INDEX_FILENAME
+    def _index_rel(self) -> PurePath:
+        return (
+            PurePath(self._directory) / _INDEX_FILENAME
+            if self._directory
+            else PurePath(_INDEX_FILENAME)
+        )
 
     async def _read_index(self) -> dict[str, str]:
         """Load the ``session_id -> title`` map; tolerate missing/corrupt.

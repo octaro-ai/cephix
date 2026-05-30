@@ -139,11 +139,14 @@ defaults:
       # The model catalog ships its bundled `llmprice` snapshot;
       # the markdown firmware store reads <workspace>/firmware/;
       # the session store routes through the default persistence
-      # connection -> <connection-root>/sessions/ (workspace by
-      # default, so sessions land at <workspace>/sessions/).
+      # connection and writes to its own bucket below the connection
+      # root (default <connection-root>/sessions/). Override
+      # ``directory:`` to relocate the bucket; override
+      # ``persistence: <id>`` to bind to a non-default persistence
+      # stack when several are declared.
       - {name: model-catalog}
       - {name: firmware-store}
-      - {name: session-store}
+      - {name: session-store, directory: sessions}
 
     channel:
       - name: websocket
