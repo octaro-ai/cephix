@@ -196,6 +196,7 @@ def _register_builtins() -> None:
     from src.actor.llm.mock_actor import MockLLMActor
     from src.actor.llm.openai_actor import LLMActorOpenAI
     from src.utility.capability_collector import CapabilityCollector
+    from src.utility.config_store import FilesystemConfigStore
     from src.utility.firmware_store import FilesystemFirmwareStore
     from src.utility.model_catalog import ModelCatalog
     from src.utility.session_store import FilesystemSessionStore
@@ -218,6 +219,7 @@ def _register_builtins() -> None:
     register(ChatKernel)
     register(CredentialProvider)
     register(EchoActor)
+    register(FilesystemConfigStore)
     register(FilesystemConnection)
     register(FilesystemEventStreamProvider)
     register(FilesystemFirmwareStore)

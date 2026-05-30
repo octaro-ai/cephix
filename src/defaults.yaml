@@ -104,6 +104,7 @@ defaults:
         - {name: model-catalog}
         - {name: firmware-store}
         - {name: session-store}
+        - {name: config-store}
       kernel:
         name: chat
         actor: {name: llm.openai}
@@ -147,6 +148,10 @@ defaults:
       - {name: model-catalog}
       - {name: firmware-store, directory: firmware}
       - {name: session-store, directory: sessions}
+      # Config store reads user-editable YAML lists from
+      # <connection-root>/configs/ (e.g. heartbeats.yaml). The
+      # heartbeat channel picks it up via Convention-DI.
+      - {name: config-store, directory: configs}
 
     channel:
       - name: websocket
@@ -156,6 +161,14 @@ defaults:
         # (let the OS pick) so multiple bots co-exist by default.
         port_range: [8765, 8799]
         path: /ws
+      # Heartbeat: cron-scheduled, fire-and-forget. Schedule list
+      # is loaded from the config-store at boot
+      # (<workspace>/configs/heartbeats.yaml -- a bare YAML list).
+      # ``default_principal`` is the attribution used for every
+      # emitted event whose entry does not override
+      # ``emit.principal``.
+      - name: heartbeat
+        default_principal: "robot:heartbeat"
 
     persistence:
       # Robot-wide persistence layer. Three components per entry --

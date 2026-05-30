@@ -810,43 +810,41 @@ def _build_channels(
     library: ComponentLibrary,
     utilities: dict[str, RobotComponent] | None = None,
 ) -> list[ChannelPort]:
-    """Build channel components, with Convention-DI for shared services.
+    """Build channels from the ``channels:`` YAML section.
 
-    Convention-DI: if the channel's constructor declares a
-    ``tool_layer`` parameter and one isn't passed explicitly, the
-    builder injects the single ``tool-execution`` BUS_PROVIDER
-    instance from ``utilities``. Symmetric to how kernels receive
-    their utilities by convention.
+    Convention-DI:
+
+    - ``heartbeat`` -> ``config_store`` (the indexed instance whose
+      ``component_name == 'config-store'``). The heartbeat needs a
+      config store to load its schedule list from; rather than make
+      the operator repeat ``config_store: config-store`` in the
+      robot.yaml, the builder resolves it from the already-built
+      utility index. Missing config-store is a hard fail with a
+      clear message so the misconfiguration is caught at boot,
+      not at the first tick.
     """
-    import inspect
-
+    utility_index = utilities or {}
     out: list[ChannelPort] = []
     for index, spec in enumerate(channel_specs):
-        spec_dict = dict(spec)
+        if not isinstance(spec, dict):
+            raise ConfigError(
+                f"channel #{index} must be a mapping"
+            )
+        spec = dict(spec)
         extras: dict[str, Any] = {}
-        if utilities:
-            from src.registry import _import_class, get  # noqa: I001
-
-            try:
-                cls = (
-                    _import_class(spec_dict["class"])
-                    if "class" in spec_dict
-                    else get(spec_dict.get("name", ""))
+        name = spec.get("name")
+        if name == "heartbeat" and "config_store" not in spec:
+            config_store = utility_index.get("config-store")
+            if config_store is None:
+                raise ConfigError(
+                    "channel 'heartbeat' needs a config-store utility "
+                    "but none is configured; add `{name: config-store}` "
+                    "to the robot's utility list (or inherit a template "
+                    "that does)."
                 )
-            except Exception:
-                cls = None
-            if cls is not None:
-                try:
-                    sig = inspect.signature(cls)
-                except (ValueError, TypeError):
-                    sig = None
-                if sig is not None and "tool_layer" in sig.parameters and "tool_layer" not in spec_dict:
-                    tool_layer = utilities.get("tool-execution")
-                    if tool_layer is not None:
-                        extras["tool_layer"] = tool_layer
-
+            extras["config_store"] = config_store
         component = _build_with_library(
-            spec_dict, category="channel", library=library, **extras
+            spec, category="channel", library=library, **extras
         )
         if not isinstance(component, ChannelPort):
             raise ConfigError(
@@ -888,6 +886,10 @@ def _build_components_list(
       :class:`FilesystemConnection` from the persistence stack).
       The store routes all its IO through that connection so it
       shares the adapter chain with telemetry and audit.
+    - ``config-store`` -> ``connection`` (a
+      :class:`FilesystemConnection` from the persistence stack).
+      Same auto-injection as the session store; reads user-editable
+      YAML configs from a directory under the connection root.
     """
     if spec is None:
         return []
@@ -904,7 +906,9 @@ def _build_components_list(
         item = dict(item)
         extras: dict[str, Any] = {}
         name = item.get("name")
-        if isinstance(name, str) and name in {"session-store", "firmware-store"}:
+        if isinstance(name, str) and name in {
+            "session-store", "firmware-store", "config-store"
+        }:
             if "connection" not in item:
                 connection = _resolve_persistence_connection(
                     name, item, connections

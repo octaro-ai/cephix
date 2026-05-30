@@ -1,222 +1,408 @@
-"""``HeartbeatChannel`` -- a scheduled input source for the bot.
+"""``HeartbeatChannel`` -- cron-scheduled bus emitter, one entry per config.
 
-The heartbeat is modelled as a CHANNEL (boot priority 11): it
-brings input *into* the bot from the outside (here: a clock), much
-like a WebSocket channel brings input from a user. The robot
-itself does not know that "a heartbeat ticked" -- it sees regular
-:class:`RobotInput` arrivals on a channel-owned topic, exactly the
-same shape an authenticated WebSocket message would take.
+The heartbeat is modelled as a CHANNEL (boot priority 11): it brings
+input *into* the bot from the outside (here: a clock), much like a
+WebSocket channel brings input from a user. The robot itself does
+not know that "a heartbeat ticked" -- it sees regular bus events
+arriving on the topic each heartbeat config nominates.
 
 Architecturally the channel works on behalf of an implicit user
-(the robot's owner): every published event carries the robot's
-identity as ``principal``, never an externally connected client.
-This keeps the bus invariant that every input has a producer
-behind it intact, without inventing a phantom "system" identity.
+(the robot's owner): every published event carries a configurable
+principal (defaulting to the channel's ``default_principal``), never
+an externally connected client.
 
-Cycle:
+Cycle, per configured heartbeat:
 
-1. Wake on a configurable interval (default 5 min).
-2. Direct-invoke a configured tool through the injected
-   :class:`ToolExecutionLayerPort` (default
-   ``mailbox.fetch_unread`` with limit 5).
-3. Publish the result as a :class:`RobotInput` on
-   ``input.heartbeat``. Anyone (a RuleBasedKernel, an audit
-   subscriber, a future UI) can react -- if nobody listens that's
-   fine, the heartbeat keeps ticking.
+1. Compute the next fire time via croniter and sleep until then.
+2. Build the configured event (a :class:`ComponentRequest` or
+   :class:`RobotInput`, picked by ``emit.type`` in the entry's
+   YAML) and **publish fire-and-forget**.
+3. Go back to (1).
 
-The channel does **not** wait for downstream processing or queue
-heartbeat batches if no consumer exists; an idle heartbeat is just
-a publish into a topic with no broadcast subscribers.
+Nothing about the result is awaited. If anyone cares -- a future
+RuleBasedKernel listening on ``tool.invoke`` for the matching
+correlation, a chat kernel reacting to ``input.heartbeat``, an
+audit subscriber -- they subscribe to the bus separately. That
+decoupling means the heartbeat tick latency is bounded by the
+publish call, not by downstream tool execution.
+
+Configuration is loaded from a :class:`ConfigStorePort` (today
+backed by ``configs/heartbeats.yaml``) so the heartbeat code never
+has to be edited when the operator wants to add another scheduled
+event. The channel knows nothing about specific tools, mailboxes
+or kernels; everything is data.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import uuid
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
-from src.bus.messages import RobotInput
+from croniter import croniter
+
+from src.bus.messages import ComponentRequest, RobotEvent, RobotInput
 from src.bus.ports import BusPort
 from src.channels.ports import ChannelPort
 from src.components import ComponentCategory
-from src.tool_execution.ports import ToolExecutionLayerPort
+from src.utility.config_store.ports import ConfigStorePort
 
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_TOPIC = "input.heartbeat"
-_DEFAULT_TOOL = "mailbox.fetch_unread"
-_DEFAULT_INTERVAL_SECONDS = 300.0
-_DEFAULT_PRINCIPAL_TEMPLATE = "robot:heartbeat"
+_DEFAULT_CONFIG_KEY = "heartbeats"
+_DEFAULT_PRINCIPAL = "robot:heartbeat"
+
+
+class EmitType(str, Enum):
+    """What kind of event a heartbeat tick publishes."""
+
+    COMPONENT_REQUEST = "component_request"
+    ROBOT_INPUT = "robot_input"
+
+
+@dataclass(frozen=True)
+class HeartbeatConfig:
+    """One scheduled heartbeat parsed from the config store.
+
+    - ``id`` -- short identifier used for correlation-id prefix,
+      run-id prefix, and log output.
+    - ``cron`` -- standard 5-field cron expression
+      (``minute hour day-of-month month day-of-week``) parsed by
+      croniter. Step values and ranges are supported.
+    - ``emit_type`` -- which event kind to build per tick.
+    - ``emit`` -- the raw ``emit`` mapping from YAML, with
+      ``principal`` already filled from the channel default if the
+      entry omitted it. The per-type builder reads its fields here.
+    """
+
+    id: str
+    cron: str
+    emit_type: EmitType
+    emit: dict[str, Any]
 
 
 class HeartbeatChannel(ChannelPort):
-    """Periodically invoke a tool and publish the result as input.
+    """Cron-driven multi-heartbeat channel.
 
-    Constructor wiring (DI):
+    Constructor wiring (Convention-DI from the builder):
 
-    - ``tool_layer`` -- the :class:`ToolExecutionLayerPort` to call
-      every tick (Convention-DI: the builder injects the single
-      ``tool-execution`` BUS_PROVIDER instance).
-    - ``interval_seconds`` -- delay between ticks (default 300).
-      Set to a small value in tests to keep them fast.
-    - ``tool_name`` -- which tool to invoke (default
-      ``mailbox.fetch_unread``).
-    - ``tool_arguments`` -- arguments passed verbatim to
-      ``invoke_tool``. Default ``{"limit": 5}``.
-    - ``topic`` -- bus topic the resulting input is published on.
-    - ``principal`` -- attribution for the published event.
+    - ``config_store`` -- where the heartbeat list is loaded from.
+      Eagerly read in :meth:`start`. Reference is kept for a future
+      :meth:`refresh` path.
+    - ``config_key`` -- which key to ask the store for, default
+      ``"heartbeats"``.
+    - ``default_principal`` -- principal used for every emitted
+      event whose entry does not set ``emit.principal``. Comes from
+      ``defaults.yaml`` via the Library-layer merge.
 
     Lifecycle:
 
-    - :meth:`start` launches the background tick task.
-    - :meth:`_stop` cancels the task and waits for clean exit.
-      Drain is a no-op (the loop polls; nothing to flush).
+    - :meth:`start` reads the list, parses each entry, and spawns
+      one independent task per valid heartbeat. Invalid entries log
+      and are skipped (one bad config does not break the channel).
+    - :meth:`_stop` cancels every task. Nothing to drain -- the bus
+      already absorbed every previous tick fire-and-forget.
     """
 
     component_name = "heartbeat"
     component_category = ComponentCategory.CHANNEL
     component_description = (
-        "Channel-level scheduled input source. Wakes on a fixed "
-        "interval, directly invokes a configured tool through the "
-        "ToolExecutionLayer, and publishes the result as a "
-        "RobotInput on its configured topic. Acts on behalf of the "
-        "robot's implicit owner; no external connection involved."
+        "Scheduled bus-only channel. Reads a list of heartbeat "
+        "configs from a ConfigStorePort (today: configs/"
+        "heartbeats.yaml). For each entry, runs an independent "
+        "cron-scheduled tick loop and publishes the configured "
+        "event (ComponentRequest or RobotInput) fire-and-forget. "
+        "Holds no direct reference to tool layers, kernels or any "
+        "other downstream consumer -- the bus is the only contact "
+        "surface."
     )
 
     def __init__(
         self,
         *,
-        tool_layer: ToolExecutionLayerPort,
-        interval_seconds: float = _DEFAULT_INTERVAL_SECONDS,
-        tool_name: str = _DEFAULT_TOOL,
-        tool_arguments: dict[str, Any] | None = None,
-        topic: str = _DEFAULT_TOPIC,
-        principal: str = _DEFAULT_PRINCIPAL_TEMPLATE,
+        config_store: ConfigStorePort,
+        config_key: str = _DEFAULT_CONFIG_KEY,
+        default_principal: str = _DEFAULT_PRINCIPAL,
     ) -> None:
-        if not isinstance(tool_layer, ToolExecutionLayerPort):
+        if not isinstance(config_store, ConfigStorePort):
             raise TypeError(
-                "HeartbeatChannel.tool_layer must implement "
-                "ToolExecutionLayerPort, got "
-                f"{type(tool_layer).__name__}"
+                "HeartbeatChannel.config_store must implement "
+                "ConfigStorePort, got "
+                f"{type(config_store).__name__}"
             )
-        if interval_seconds <= 0:
+        if not isinstance(config_key, str) or not config_key:
             raise ValueError(
-                "HeartbeatChannel.interval_seconds must be > 0, "
-                f"got {interval_seconds!r}"
+                "HeartbeatChannel.config_key must be a non-empty string"
             )
-        if not tool_name:
-            raise ValueError("HeartbeatChannel.tool_name must be non-empty")
-        if not topic:
-            raise ValueError("HeartbeatChannel.topic must be non-empty")
-        if not principal:
-            raise ValueError("HeartbeatChannel.principal must be non-empty")
+        if not isinstance(default_principal, str) or not default_principal:
+            raise ValueError(
+                "HeartbeatChannel.default_principal must be a non-empty string"
+            )
 
-        self._tool_layer = tool_layer
-        self._interval = float(interval_seconds)
-        self._tool_name = tool_name
-        self._tool_arguments: dict[str, Any] = (
-            dict(tool_arguments) if tool_arguments else {}
-        )
-        self._topic = topic
-        self._principal = principal
+        self._config_store = config_store
+        self._config_key = config_key
+        self._default_principal = default_principal
 
         self._bus: BusPort | None = None
-        self._task: asyncio.Task[None] | None = None
-        self._tick_count = 0
+        self._tasks: list[asyncio.Task[None]] = []
+        self._configs: list[HeartbeatConfig] = []
 
     # ---- BusComponent lifecycle --------------------------------------------
 
     async def start(self, bus: BusPort) -> None:
-        if self._task is not None:
+        if self._tasks:
             return
         self._bus = bus
-        tool_layer_id = getattr(self._tool_layer, "instance_id", "")
+
+        store_id = getattr(self._config_store, "instance_id", "")
         logger.info(
-            "%s (%s) injected into %s (%s) on tool %r every %.1fs",
-            type(self._tool_layer).__name__,
-            tool_layer_id,
+            "%s (%s) injected into %s (%s)",
+            type(self._config_store).__name__,
+            store_id,
             type(self).__name__,
             self.instance_id,
-            self._tool_name,
-            self._interval,
         )
-        self._task = asyncio.create_task(
-            self._heartbeat_loop(),
-            name=f"heartbeat:{self._tool_name}",
-        )
+
+        raw_entries = self._config_store.configs(self._config_key)
+        self._configs = self._parse_entries(raw_entries)
+
+        if not self._configs:
+            logger.info(
+                "%s (%s) ready with no heartbeats (config key %r empty)",
+                type(self).__name__,
+                self.instance_id,
+                self._config_key,
+            )
+        else:
+            ids = ", ".join(cfg.id for cfg in self._configs)
+            logger.info(
+                "%s (%s) scheduled %d heartbeat(s) from %s (%s): %s",
+                type(self).__name__,
+                self.instance_id,
+                len(self._configs),
+                type(self._config_store).__name__,
+                store_id,
+                ids,
+            )
+
+        for cfg in self._configs:
+            task = asyncio.create_task(
+                self._loop(cfg),
+                name=f"heartbeat:{cfg.id}",
+            )
+            self._tasks.append(task)
+
         await self.announce_lifecycle(bus, "ready")
 
     async def _stop(self) -> None:
         if self._bus is not None:
             await self.announce_lifecycle(self._bus, "shutdown")
-        if self._task is not None:
-            self._task.cancel()
+        for task in self._tasks:
+            task.cancel()
+        for task in self._tasks:
             try:
-                await self._task
+                await task
             except (asyncio.CancelledError, Exception):
                 pass
-            self._task = None
+        self._tasks = []
         self._bus = None
+
+    # ---- Config parsing ----------------------------------------------------
+
+    def _parse_entries(
+        self, raw_entries: list[dict[str, Any]]
+    ) -> list[HeartbeatConfig]:
+        """Parse store entries into :class:`HeartbeatConfig` instances.
+
+        Per-entry failure mode: log a warning, skip the entry,
+        continue. A typo in one entry should never prevent the
+        others from scheduling.
+        """
+        parsed: list[HeartbeatConfig] = []
+        for index, raw in enumerate(raw_entries):
+            try:
+                cfg = self._parse_entry(raw)
+            except (KeyError, ValueError, TypeError) as exc:
+                logger.warning(
+                    "HeartbeatChannel: skipping heartbeat entry #%d: %s",
+                    index,
+                    exc,
+                )
+                continue
+            parsed.append(cfg)
+        return parsed
+
+    def _parse_entry(self, raw: dict[str, Any]) -> HeartbeatConfig:
+        hb_id = raw.get("id")
+        if not isinstance(hb_id, str) or not hb_id:
+            raise ValueError("entry must have a non-empty 'id'")
+        cron = raw.get("cron")
+        if not isinstance(cron, str) or not cron:
+            raise ValueError(f"heartbeat {hb_id!r}: 'cron' must be a non-empty string")
+        if not croniter.is_valid(cron):
+            raise ValueError(
+                f"heartbeat {hb_id!r}: cron expression {cron!r} is not valid"
+            )
+
+        emit = raw.get("emit")
+        if not isinstance(emit, dict):
+            raise ValueError(
+                f"heartbeat {hb_id!r}: 'emit' must be a mapping"
+            )
+        emit = dict(emit)
+
+        raw_type = emit.get("type")
+        if not isinstance(raw_type, str) or not raw_type:
+            raise ValueError(
+                f"heartbeat {hb_id!r}: 'emit.type' must be a non-empty string"
+            )
+        try:
+            emit_type = EmitType(raw_type)
+        except ValueError as exc:
+            valid = ", ".join(t.value for t in EmitType)
+            raise ValueError(
+                f"heartbeat {hb_id!r}: emit.type {raw_type!r} not in "
+                f"({valid})"
+            ) from exc
+
+        topic = emit.get("topic")
+        if not isinstance(topic, str) or not topic:
+            raise ValueError(
+                f"heartbeat {hb_id!r}: 'emit.topic' must be a non-empty string"
+            )
+
+        # Fill principal from the channel default if the entry omitted it.
+        emit.setdefault("principal", self._default_principal)
+        principal = emit["principal"]
+        if not isinstance(principal, str) or not principal:
+            raise ValueError(
+                f"heartbeat {hb_id!r}: 'emit.principal' must be a non-empty string"
+            )
+
+        return HeartbeatConfig(
+            id=hb_id, cron=cron, emit_type=emit_type, emit=emit
+        )
 
     # ---- Loop --------------------------------------------------------------
 
-    async def _heartbeat_loop(self) -> None:
-        """Sleep, invoke, publish, repeat. Cancels cleanly on stop()."""
+    async def _loop(self, cfg: HeartbeatConfig) -> None:
+        """Sleep until cron next-fire, publish, repeat. Cancels cleanly.
+
+        croniter is anchored on the current epoch timestamp rather
+        than ``datetime.now()`` so the next-fire computation is
+        timezone-agnostic and matches ``time.time()`` exactly. A
+        naive ``datetime.now()`` is treated as UTC by croniter,
+        which adds a wall-clock offset to every delay equal to the
+        local timezone (e.g. +2h in MESZ) and effectively breaks
+        scheduling.
+        """
+        iterator = croniter(cfg.cron, time.time())
+        tick = 0
         try:
             while True:
-                await asyncio.sleep(self._interval)
-                await self._tick()
+                next_fire = iterator.get_next(float)
+                delay = max(0.0, next_fire - time.time())
+                await asyncio.sleep(delay)
+                tick += 1
+                await self._fire(cfg, tick)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception(
-                "HeartbeatChannel: tick loop died; no further ticks "
-                "will be emitted until the component is restarted"
+                "HeartbeatChannel: tick loop for %r died; no further "
+                "ticks for this heartbeat until the channel is restarted",
+                cfg.id,
             )
 
-    async def _tick(self) -> None:
-        """One iteration: invoke the tool, publish the result."""
+    async def _fire(self, cfg: HeartbeatConfig, tick: int) -> None:
+        """Build and publish one event for ``cfg``. Best-effort, log on error."""
         if self._bus is None:
             return
-        self._tick_count += 1
-        run_id = f"heartbeat-{self._tick_count:08d}"
+        run_id = f"hb-{cfg.id}-{tick:08d}"
         try:
-            result = await self._tool_layer.invoke_tool(
-                self._tool_name, self._tool_arguments
-            )
+            event = self._build_event(cfg, run_id=run_id)
         except Exception:
             logger.exception(
-                "HeartbeatChannel: invoke_tool(%r) raised; tick skipped",
-                self._tool_name,
+                "HeartbeatChannel: failed to build event for %r (tick %d)",
+                cfg.id,
+                tick,
             )
             return
-
-        payload: dict[str, Any] = {
-            "tool": self._tool_name,
-            "success": result.success,
-            "tick": self._tick_count,
-        }
-        if result.success:
-            payload["result"] = result.result
-        else:
-            payload["error"] = result.error
-
         try:
-            await self._bus.publish(
-                RobotInput(
-                    topic=self._topic,
-                    principal=self._principal,
-                    source=self.component_name,
-                    source_id=self.instance_id,
-                    run_id=run_id,
-                    message="",
-                    payload=payload,
-                )
-            )
+            await self._bus.publish(event)
         except Exception:
             logger.exception(
-                "HeartbeatChannel: failed to publish tick %d on %s",
-                self._tick_count,
-                self._topic,
+                "HeartbeatChannel: failed to publish event for %r (tick %d)",
+                cfg.id,
+                tick,
             )
+
+    # ---- Emit builders -----------------------------------------------------
+
+    def _build_event(
+        self, cfg: HeartbeatConfig, *, run_id: str
+    ) -> RobotEvent:
+        """Dispatch on ``cfg.emit_type`` to the matching builder."""
+        if cfg.emit_type is EmitType.COMPONENT_REQUEST:
+            return self._build_component_request(cfg, run_id=run_id)
+        if cfg.emit_type is EmitType.ROBOT_INPUT:
+            return self._build_robot_input(cfg, run_id=run_id)
+        raise ValueError(
+            f"heartbeat {cfg.id!r}: no builder for emit type {cfg.emit_type!r}"
+        )
+
+    def _build_component_request(
+        self, cfg: HeartbeatConfig, *, run_id: str
+    ) -> ComponentRequest:
+        emit = cfg.emit
+        action = emit.get("action")
+        if not isinstance(action, str) or not action:
+            raise ValueError(
+                f"heartbeat {cfg.id!r}: component_request needs a "
+                "non-empty 'action'"
+            )
+        payload = emit.get("payload") or {}
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"heartbeat {cfg.id!r}: 'emit.payload' must be a mapping"
+            )
+        correlation_id = f"hb-{cfg.id}-{uuid.uuid4().hex[:12]}"
+        return ComponentRequest(
+            topic=emit["topic"],
+            principal=emit["principal"],
+            source=self.component_name,
+            source_id=self.instance_id,
+            run_id=run_id,
+            correlation_id=correlation_id,
+            action=action,
+            payload=dict(payload),
+        )
+
+    def _build_robot_input(
+        self, cfg: HeartbeatConfig, *, run_id: str
+    ) -> RobotInput:
+        emit = cfg.emit
+        message = emit.get("message")
+        if message is not None and not isinstance(message, str):
+            raise ValueError(
+                f"heartbeat {cfg.id!r}: 'emit.message' must be a string"
+            )
+        payload = emit.get("payload") or {}
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"heartbeat {cfg.id!r}: 'emit.payload' must be a mapping"
+            )
+        return RobotInput(
+            topic=emit["topic"],
+            principal=emit["principal"],
+            source=self.component_name,
+            source_id=self.instance_id,
+            run_id=run_id,
+            message=message,
+            payload=dict(payload),
+        )
