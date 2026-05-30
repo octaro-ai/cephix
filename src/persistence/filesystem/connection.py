@@ -97,6 +97,26 @@ class FilesystemConnection(RobotComponent):
             )
         return PurePath(self._root) / f"{channel}{suffix}"
 
+    def resolve(self, rel_path: PurePath) -> PurePath:
+        """Resolve ``rel_path`` against ``root`` with traversal guard.
+
+        Companion to :meth:`path_for` for callers that already hold a
+        ``PurePath`` (typically a ``SessionStore`` building
+        ``sessions/<id>.jsonl`` itself). Empty path resolves to
+        ``root`` -- handy for ``listdir(PurePath())``.
+        """
+        parts = rel_path.parts
+        if parts and parts[0] in ("/", "\\"):
+            raise ValueError(
+                f"path {rel_path!s} must be relative, not absolute"
+            )
+        if any(part == ".." for part in parts):
+            raise ValueError(
+                f"path {rel_path!s} must not contain parent-traversal "
+                "('..') segments"
+            )
+        return PurePath(self._root) / rel_path
+
     async def open_append(
         self,
         channel: str,
@@ -105,6 +125,56 @@ class FilesystemConnection(RobotComponent):
     ) -> AppendWriter:
         """Open an append handle for the given channel."""
         return await self._adapter.open_append(self.path_for(channel, suffix=suffix))
+
+    async def append_path(self, rel_path: PurePath) -> AppendWriter:
+        """Open an append handle for a root-relative path.
+
+        Mirror of :meth:`open_append` for callers that already hold
+        a fully formed ``PurePath`` (e.g. ``sessions/<id>.jsonl``)
+        and don't want to round-trip through the channel/suffix API.
+        """
+        return await self._adapter.open_append(self.resolve(rel_path))
+
+    async def write_bytes(self, rel_path: PurePath, data: bytes) -> None:
+        """Atomically overwrite ``<root>/rel_path`` with ``data``."""
+        await self._adapter.write_bytes(self.resolve(rel_path), data)
+
+    async def read_bytes(self, rel_path: PurePath) -> bytes:
+        """Return the bytes at ``<root>/rel_path``.
+
+        Raises :class:`FileNotFoundError` if the path does not exist.
+        """
+        return await self._adapter.read_bytes(self.resolve(rel_path))
+
+    async def read_text(
+        self,
+        rel_path: PurePath,
+        *,
+        encoding: str = "utf-8",
+    ) -> str:
+        """Return the text at ``<root>/rel_path`` (UTF-8 by default).
+
+        Convenience wrapper around :meth:`read_bytes`. Same error
+        semantics: ``FileNotFoundError`` on missing paths.
+        """
+        raw = await self.read_bytes(rel_path)
+        return raw.decode(encoding)
+
+    async def listdir(
+        self,
+        rel_path: PurePath = PurePath(),
+    ) -> list[str]:
+        """Return the leaf names of entries in ``<root>/rel_path``.
+
+        Empty input lists ``root`` itself. Returns ``[]`` for a
+        missing directory rather than raising -- a fresh workspace
+        has no sessions yet, but that is not an error.
+        """
+        return await self._adapter.listdir(self.resolve(rel_path))
+
+    async def exists(self, rel_path: PurePath) -> bool:
+        """Return whether ``<root>/rel_path`` exists."""
+        return await self._adapter.exists(self.resolve(rel_path))
 
     # ---- RobotComponent lifecycle ------------------------------------------
 

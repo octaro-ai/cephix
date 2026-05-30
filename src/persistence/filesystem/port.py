@@ -38,6 +38,36 @@ class FilesystemPort(Protocol):
         ``flush``, ``close``.
         """
 
+    async def write_bytes(self, path: PurePath, data: bytes) -> None:
+        """Atomically overwrite ``path`` with ``data``.
+
+        Implementations write to a temp file in the same directory
+        and rename it into place so a reader either sees the old
+        version or the new one, never a partial one (POSIX/NTFS
+        ``rename`` is atomic). The parent directory is created
+        on demand so callers don't have to ``mkdir`` first.
+        """
+
+    async def read_bytes(self, path: PurePath) -> bytes:
+        """Return the bytes at ``path``.
+
+        Raises :class:`FileNotFoundError` (Python's standard) if the
+        path does not exist -- callers that treat absence as "empty"
+        wrap the call in a try/except. Reading the whole file in one
+        go matches our use case (small JSON snapshots, ~100 KB
+        ceiling); a future ``open_read`` could stream.
+        """
+
+    async def listdir(self, path: PurePath) -> list[str]:
+        """Return the names of the entries in ``path``.
+
+        Directory-only -- names are leaf names, not full paths.
+        Returns ``[]`` if the directory is missing rather than
+        raising; "no sessions yet" is not an error for a fresh
+        workspace. Order is not guaranteed; callers that need a
+        stable order sort the result themselves.
+        """
+
     async def mkdir(self, path: PurePath, *, parents: bool = True) -> None:
         """Ensure the directory at ``path`` exists.
 

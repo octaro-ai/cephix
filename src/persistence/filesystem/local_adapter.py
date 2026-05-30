@@ -61,6 +61,24 @@ class LocalFSAdapter(RobotComponent):
         )
         return _LocalAppendWriter(handle, local)
 
+    async def write_bytes(self, path: PurePath, data: bytes) -> None:
+        local = Path(path)
+        # Ensure parent exists. Then write to a sibling temp file and
+        # ``os.replace`` it onto the target -- atomic on POSIX/NTFS.
+        # A reader that opens the file mid-write sees either the old
+        # content or the new one, never a half-written mix.
+        await asyncio.to_thread(local.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(_write_atomic, local, data)
+
+    async def read_bytes(self, path: PurePath) -> bytes:
+        return await asyncio.to_thread(Path(path).read_bytes)
+
+    async def listdir(self, path: PurePath) -> list[str]:
+        local = Path(path)
+        if not await asyncio.to_thread(local.exists):
+            return []
+        return await asyncio.to_thread(_listdir_names, local)
+
     async def mkdir(self, path: PurePath, *, parents: bool = True) -> None:
         local = Path(path)
         await asyncio.to_thread(local.mkdir, parents=parents, exist_ok=True)
@@ -119,3 +137,23 @@ class _LocalAppendWriter:
                     "error while closing _LocalAppendWriter at %s", self._path
                 )
             self._handle = None
+
+
+def _write_atomic(target: Path, data: bytes) -> None:
+    # Sibling temp file in the same directory so ``os.replace`` is a
+    # same-filesystem rename (cross-fs rename would not be atomic).
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, target)
+    except Exception:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def _listdir_names(directory: Path) -> list[str]:
+    return [entry.name for entry in directory.iterdir()]

@@ -38,11 +38,19 @@ from src.kernel.chat import ChatKernel
 from src.utility.firmware_store.ports import FirmwareStorePort
 from src.utility.model_catalog.ports import ModelCatalogPort
 from src.utility.model_catalog.types import ModelPricing, ModelSpec
+from src.persistence.filesystem.connection import FilesystemConnection
+from src.persistence.filesystem.local_adapter import LocalFSAdapter
 from src.utility.session_store import (
-    JsonlSessionStore,
+    FilesystemSessionStore,
     SessionMessage,
     new_message_id,
 )
+
+
+def _session_store(root: Path) -> FilesystemSessionStore:
+    """Build a :class:`FilesystemSessionStore` rooted at ``root``."""
+    connection = FilesystemConnection(adapter=LocalFSAdapter(), root=root)
+    return FilesystemSessionStore(connection=connection)
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +159,7 @@ class TestConstruction:
             ChatKernel(
                 actor=EchoActor(),
                 firmware=_StubFirmware(),
-                sessions=JsonlSessionStore(sessions_dir=tmp_path),
+                sessions=_session_store(tmp_path),
                 model_catalog=_StubCatalog(),
             )
 
@@ -159,7 +167,7 @@ class TestConstruction:
         kernel = ChatKernel(
             actor=_StubLLM(),
             firmware=_StubFirmware(),
-            sessions=JsonlSessionStore(sessions_dir=tmp_path),
+            sessions=_session_store(tmp_path),
             model_catalog=_StubCatalog(),
         )
         assert kernel.component_name == "chat"
@@ -168,7 +176,7 @@ class TestConstruction:
         kernel = ChatKernel(
             actor=_StubLLM(),
             firmware=_StubFirmware(),
-            sessions=JsonlSessionStore(sessions_dir=tmp_path),
+            sessions=_session_store(tmp_path),
             model_catalog=_StubCatalog(),
             actor_timeout=5.0,
         )
@@ -224,10 +232,12 @@ async def _build_running_kernel(
     firmware: _StubFirmware | None = None,
     catalog: _StubCatalog | None = None,
     actor: _StubLLM | None = None,
-) -> tuple[ChatKernel, _StubLLM, JsonlSessionStore, _StubFirmware, _StubCatalog]:
+) -> tuple[
+    ChatKernel, _StubLLM, FilesystemSessionStore, _StubFirmware, _StubCatalog
+]:
     actor = actor or _StubLLM()
     firmware = firmware or _StubFirmware()
-    sessions = JsonlSessionStore(sessions_dir=sessions_dir)
+    sessions = _session_store(sessions_dir)
     catalog = catalog or _StubCatalog()
     kernel = ChatKernel(
         actor=actor,
@@ -302,7 +312,7 @@ class TestPlan:
         self, tmp_path: Path
     ) -> None:
         # Seed an existing session.
-        seed_store = JsonlSessionStore(sessions_dir=tmp_path)
+        seed_store = _session_store(tmp_path)
         sid = "sess_resume"
         await seed_store.append(
             sid,
@@ -320,6 +330,9 @@ class TestPlan:
                 message=ChatMessage(role="assistant", content="hi"),
             ),
         )
+        # Close the cached writer so the kernel's own store opens
+        # the file fresh and the seeded lines are durable on disk.
+        await seed_store.stop()
 
         bus = AsyncioBus()
         await bus.start()
@@ -351,7 +364,7 @@ class TestPlan:
         self, tmp_path: Path
     ) -> None:
         firmware = _StubFirmware(system_prompt="## CONST\nbe nice")
-        seed_store = JsonlSessionStore(sessions_dir=tmp_path)
+        seed_store = _session_store(tmp_path)
         sid = "sess_with_history"
         await seed_store.append(
             sid,
@@ -371,6 +384,7 @@ class TestPlan:
                 ),
             ),
         )
+        await seed_store.stop()
 
         bus = AsyncioBus()
         await bus.start()
@@ -584,7 +598,7 @@ class TestFinalize:
         finally:
             await bus.stop()
 
-        history = sessions.messages(sid)
+        history = await sessions.messages(sid)
         assert len(history) == 2
         user, assistant = history
         assert user.message.role == "user"
@@ -634,7 +648,7 @@ class TestFinalize:
         finally:
             await bus.stop()
 
-        history = sessions.messages(sid)
+        history = await sessions.messages(sid)
         assistant = history[-1]
         usage = assistant.usage or {}
         assert usage["input"] == 10
@@ -677,7 +691,7 @@ class TestFinalize:
             await bus.stop()
 
         # Two round-trips => four persisted records.
-        history = sessions.messages(sid)
+        history = await sessions.messages(sid)
         assert [m.message.role for m in history] == [
             "user",
             "assistant",
@@ -767,7 +781,8 @@ class TestSessionCommands:
         assert resp.status == "ok"
         sid = resp.payload["session_id"]
         assert sid.startswith("sess_")
-        assert any(s.session_id == sid for s in sessions.list_sessions())
+        summaries = await sessions.list_sessions()
+        assert any(s.session_id == sid for s in summaries)
 
     async def test_session_list_returns_summaries(self, tmp_path: Path) -> None:
         bus = AsyncioBus()
@@ -877,7 +892,8 @@ class TestSessionCommands:
             await bus.stop()
 
         assert resp.status == "ok"
+        summaries = await sessions.list_sessions()
         (summary,) = [
-            s for s in sessions.list_sessions() if s.session_id == "sess_rename"
+            s for s in summaries if s.session_id == "sess_rename"
         ]
         assert summary.title == "My Chat"

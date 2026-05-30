@@ -198,7 +198,7 @@ def _register_builtins() -> None:
     from src.utility.capability_collector import CapabilityCollector
     from src.utility.firmware_store import MarkdownFirmwareStore
     from src.utility.model_catalog import ModelCatalog
-    from src.utility.session_store import JsonlSessionStore
+    from src.utility.session_store import FilesystemSessionStore
     from src.bus.asyncio_bus import AsyncioBus
     from src.channels.websocket import WebsocketChannel
     from src.credentials.provider import CredentialProvider
@@ -218,7 +218,7 @@ def _register_builtins() -> None:
     register(EchoActor)
     register(FilesystemConnection)
     register(FilesystemEventStreamProvider)
-    register(JsonlSessionStore)
+    register(FilesystemSessionStore)
     register(LLMActorOpenAI)
     register(LocalFSAdapter)
     register(MarkdownFirmwareStore)

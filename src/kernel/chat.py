@@ -171,23 +171,22 @@ class ChatKernel(BaseKernel):
 
     async def cmd_session_new(self, request: CommandRequest) -> dict:
         """Create a fresh session and return its id."""
-        session_id = self._sessions.new_session()
-        self._sessions.open(session_id)
+        session_id = await self._sessions.new_session()
+        await self._sessions.open(session_id)
         return {"session_id": session_id}
 
     async def cmd_session_list(self, request: CommandRequest) -> dict:
         """Return a summary per known session (most recent first)."""
-        return {
-            "sessions": [asdict(s) for s in self._sessions.list_sessions()]
-        }
+        sessions = await self._sessions.list_sessions()
+        return {"sessions": [asdict(s) for s in sessions]}
 
     async def cmd_session_open(self, request: CommandRequest) -> dict:
         """Open a session (lazy-create) and return its history."""
         session_id = str(request.payload.get("session_id") or "").strip()
         if not session_id:
             raise ValueError("chat.session.open requires a 'session_id'")
-        created = self._sessions.open(session_id)
-        history = self._sessions.messages(session_id, limit=None)
+        created = await self._sessions.open(session_id)
+        history = await self._sessions.messages(session_id, limit=None)
         return {
             "session_id": session_id,
             "created": created,
@@ -200,7 +199,7 @@ class ChatKernel(BaseKernel):
         if not session_id:
             raise ValueError("chat.session.rename requires a 'session_id'")
         title = str(request.payload.get("title") or "")
-        self._sessions.set_title(session_id, title)
+        await self._sessions.set_title(session_id, title)
         return {"session_id": session_id, "title": title}
 
     @staticmethod
@@ -237,10 +236,10 @@ class ChatKernel(BaseKernel):
           from the spec.
         """
         assert ctx.input is not None
-        session_id, created = self._resolve_session_id(ctx)
+        session_id, created = await self._resolve_session_id(ctx)
         actor = self._llm_actor()
         spec = self._model_catalog.lookup_spec(actor.model_id, actor.provider)
-        history = self._sessions.messages(session_id, limit=None)
+        history = await self._sessions.messages(session_id, limit=None)
         system_prompt = self._firmware.system_prompt()
 
         wire_messages: list[dict[str, str]] = [
@@ -415,7 +414,7 @@ class ChatKernel(BaseKernel):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _resolve_session_id(self, ctx: RunContext) -> tuple[str, bool]:
+    async def _resolve_session_id(self, ctx: RunContext) -> tuple[str, bool]:
         """Return ``(session_id, created)`` for the current run.
 
         Priority: ``ctx.input.payload["session_id"]`` (the channel
@@ -431,8 +430,8 @@ class ChatKernel(BaseKernel):
         raw = payload.get("session_id")
         sid = str(raw).strip() if isinstance(raw, str) and raw.strip() else ""
         if not sid:
-            sid = self._sessions.new_session()
-        created = self._sessions.open(sid)
+            sid = await self._sessions.new_session()
+        created = await self._sessions.open(sid)
         return sid, created
 
     def _llm_actor(self) -> LLMActorPort:

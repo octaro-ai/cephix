@@ -24,6 +24,12 @@ The port is intentionally minimal:
 - :meth:`list_sessions` enumerates every persisted session id (for
   future ``/sessions`` listing commands).
 
+All methods are ``async`` so concrete stores can route their IO
+through an async transport layer (``FilesystemConnection``,
+later S3, ...). Even the trivially-CPU ones (``new_session``)
+follow the contract so callers don't have to know which methods
+hit the transport and which don't.
+
 Concurrency: ``append`` may be called concurrently for the same
 session_id from one event loop; the store guarantees ordered
 writes. Cross-process safety is out of scope -- one robot owns
@@ -41,11 +47,11 @@ class SessionStorePort(ABC):
     """Read/write surface every session store implements."""
 
     @abstractmethod
-    def new_session(self) -> str:
+    async def new_session(self) -> str:
         """Mint a brand-new, store-unique session id."""
 
     @abstractmethod
-    def open(self, session_id: str) -> bool:
+    async def open(self, session_id: str) -> bool:
         """Make sure ``session_id`` exists in the store; lazy-create.
 
         Returns ``True`` if the session was just created (caller can
@@ -60,7 +66,7 @@ class SessionStorePort(ABC):
         """Append one record to ``session_id``'s history."""
 
     @abstractmethod
-    def messages(
+    async def messages(
         self, session_id: str, limit: int | None = None
     ) -> list[SessionMessage]:
         """Return the persisted records for ``session_id``.
@@ -71,7 +77,7 @@ class SessionStorePort(ABC):
         """
 
     @abstractmethod
-    def list_sessions(self) -> list[SessionSummary]:
+    async def list_sessions(self) -> list[SessionSummary]:
         """Return a :class:`SessionSummary` per known session.
 
         Ordered most-recently-active first so a UI can render a chat
@@ -80,7 +86,7 @@ class SessionStorePort(ABC):
         """
 
     @abstractmethod
-    def set_title(self, session_id: str, title: str) -> None:
+    async def set_title(self, session_id: str, title: str) -> None:
         """Assign (or replace) the human-friendly title of ``session_id``.
 
         The title is the one piece of session metadata not derivable

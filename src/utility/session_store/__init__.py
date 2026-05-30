@@ -7,8 +7,10 @@ Boot category: :attr:`~src.components.ComponentCategory.UTILITY`
 Public surface:
 
 - :class:`SessionStorePort` -- the ABC consumers implement against.
-- :class:`JsonlSessionStore` -- the default implementation, one
-  ``<session_id>.jsonl`` per session under ``<workspace>/sessions/``.
+- :class:`FilesystemSessionStore` -- the default implementation,
+  one ``<session_id>.jsonl`` per session plus an ``index.json``
+  title sidecar, both routed through a
+  :class:`~src.persistence.filesystem.connection.FilesystemConnection`.
 - :class:`SessionMessage` -- the OCF ``message_envelope``-shaped
   record persisted to disk. The inner ``message`` field is the
   existing :class:`~src.actor.llm.types.ChatMessage` (OpenAI Chat
@@ -23,7 +25,7 @@ the field shapes -- the structural alignment is already there.
 """
 
 from src.utility.session_store.ports import SessionStorePort
-from src.utility.session_store.store import JsonlSessionStore
+from src.utility.session_store.store import FilesystemSessionStore
 from src.utility.session_store.types import (
     SessionMessage,
     SessionSummary,
@@ -31,7 +33,7 @@ from src.utility.session_store.types import (
 )
 
 __all__ = [
-    "JsonlSessionStore",
+    "FilesystemSessionStore",
     "SessionMessage",
     "SessionStorePort",
     "SessionSummary",

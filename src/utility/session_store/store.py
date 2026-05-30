@@ -1,22 +1,35 @@
-"""``JsonlSessionStore`` -- append-only OCF-compatible JSONL store.
+"""``FilesystemSessionStore`` -- append-only OCF-compatible JSONL store.
 
-Persistence layout: one file per session at
-``<sessions_dir>/<session_id>.jsonl``. Each line is a complete
+Persistence layout (rooted at ``FilesystemConnection.root``):
+
+    sessions/<session_id>.jsonl   -- one JSONL stream per session
+    sessions/index.json           -- title sidecar (atomic snapshot)
+
+Each message line is a complete
 :class:`~src.utility.session_store.types.SessionMessage` rendered
 via :meth:`SessionMessage.to_jsonl_line` -- structurally identical
 to an OCF ``message_envelope``, so the export adapter (later) only
 has to wrap the lines into a single ``{ocf_version, conversation,
 messages}`` document.
 
+DI: the store takes a :class:`FilesystemConnection` (no path / no
+adapter; the connection holds the root and routes byte-level IO
+to the adapter). The same store class therefore runs unchanged on
+a local FS today and on S3/SMB tomorrow -- swap the adapter at
+boot level 0.
+
 Crash tolerance: a half-written tail line (a power cut between
 ``write`` and ``flush`` is rare but possible) is skipped during
 :meth:`messages`. We never reject the whole session for one bad
-record.
+record. The title index is written atomically (temp file + rename
+in the connection) so a partial snapshot is impossible.
 
 Concurrency: per-session :class:`asyncio.Lock` ensures appends
-from the same loop interleave cleanly. Cross-process safety is
-explicitly out of scope -- one robot owns its workspace; another
-process touching the same files is a misconfiguration.
+from the same loop interleave cleanly; the writer cache reuses
+a single :class:`AppendWriter` per session for the whole process
+lifetime. Cross-process safety is explicitly out of scope -- one
+robot owns its workspace, another process touching the same files
+is a misconfiguration.
 """
 
 from __future__ import annotations
@@ -24,11 +37,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import uuid
-from pathlib import Path
+from pathlib import PurePath
 
 from src.components import ComponentCategory, RobotComponent
+from src.persistence.filesystem.connection import FilesystemConnection
+from src.persistence.filesystem.port import AppendWriter
 from src.utility.session_store.ports import SessionStorePort
 from src.utility.session_store.types import SessionMessage, SessionSummary
 
@@ -36,57 +50,83 @@ logger = logging.getLogger(__name__)
 
 _SESSION_ID_PREFIX = "sess_"
 _SESSION_ID_HEX_LENGTH = 12
+_SESSIONS_SUBDIR = "sessions"
 _INDEX_FILENAME = "index.json"
 
 
-class JsonlSessionStore(RobotComponent, SessionStorePort):
-    """JSONL-backed session store rooted at ``sessions_dir``.
+class FilesystemSessionStore(RobotComponent, SessionStorePort):
+    """Filesystem-backed session store on top of a :class:`FilesystemConnection`.
 
-    Constructor:
+    Constructor wiring (DI):
 
-    - ``sessions_dir`` -- where session files live. The builder
-      typically passes ``<workspace>/sessions``. The directory is
-      created lazily on first write so a fresh workspace stays
-      clutter-free until the first conversation actually starts.
+    - ``connection`` -- a :class:`FilesystemConnection` from level
+      1. The store does not know or care which adapter sits behind
+      it; it only uses connection-level verbs (``append_path``,
+      ``write_bytes``, ``read_text``, ``listdir``).
 
-    Lifecycle hooks are near-no-ops: there is no client to bring
-    up, no file handle to keep open. The store opens, writes and
-    closes per ``append`` call (single line per call -- the OS
-    write is the unit of atomicity we rely on for ordered
-    appends).
+    Lifecycle: no client to start, no socket to open. ``stop``
+    closes every cached writer and drops the lock cache so a
+    fresh start can rebuild them cleanly.
     """
 
     component_name = "session-store"
     component_category = ComponentCategory.UTILITY
     component_description = (
         "Append-only chat session store. One JSONL file per session "
-        "with OCF message_envelope-shaped records. Off-bus utility "
-        "consumed by chat-style kernels."
+        "with OCF message_envelope-shaped records, plus an atomic "
+        "title index. Off-bus utility consumed by chat-style kernels. "
+        "Storage routed through an injected FilesystemConnection."
     )
 
-    def __init__(self, *, sessions_dir: str | Path) -> None:
-        self._sessions_dir = Path(sessions_dir)
+    def __init__(self, *, connection: FilesystemConnection) -> None:
+        if not isinstance(connection, FilesystemConnection):
+            raise TypeError(
+                "FilesystemSessionStore.connection must be a "
+                "FilesystemConnection, got "
+                f"{type(connection).__name__}"
+            )
+        self._fs = connection
+        self._writers: dict[str, AppendWriter] = {}
         # Per-session locks are created lazily so we don't pin
         # locks to a non-running loop at construction time.
         self._locks: dict[str, asyncio.Lock] = {}
+        # The title index is a small snapshot. Serialize updates
+        # so two ``set_title`` calls don't race on read-modify-write.
+        self._index_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """No-op: the sessions directory is created on first write."""
-        return None
+        """Surface the connection -> store wiring; no IO required."""
+        connection_id = getattr(self._fs, "instance_id", "")
+        logger.info(
+            "%s (%s) injected into %s (%s)",
+            type(self._fs).__name__,
+            connection_id,
+            type(self).__name__,
+            self.instance_id,
+        )
 
     async def stop(self) -> None:
-        """Drop the per-session lock cache so a restart is clean."""
+        """Close cached writers and drop lock/writer caches."""
+        for sid, writer in list(self._writers.items()):
+            try:
+                await writer.close()
+            except Exception:
+                logger.exception(
+                    "FilesystemSessionStore: failed to close writer for %s",
+                    sid,
+                )
+        self._writers.clear()
         self._locks.clear()
 
     # ------------------------------------------------------------------
     # SessionStorePort
     # ------------------------------------------------------------------
 
-    def new_session(self) -> str:
+    async def new_session(self) -> str:
         """Mint a fresh session id of the form ``sess_<12-hex>``.
 
         Collision avoidance: extremely small (48 random bits) but
@@ -97,25 +137,24 @@ class JsonlSessionStore(RobotComponent, SessionStorePort):
             candidate = (
                 f"{_SESSION_ID_PREFIX}{uuid.uuid4().hex[:_SESSION_ID_HEX_LENGTH]}"
             )
-            if not self._session_path(candidate).exists():
+            if not await self._fs.exists(self._session_rel(candidate)):
                 return candidate
         # 100 collisions in a row with 48 random bits means something
         # is fundamentally wrong with the entropy source.
         raise RuntimeError(
-            "JsonlSessionStore.new_session(): could not find a free "
+            "FilesystemSessionStore.new_session(): could not find a free "
             "session id after 100 attempts"
         )
 
-    def open(self, session_id: str) -> bool:
+    async def open(self, session_id: str) -> bool:
         """Lazy-create the session file. Returns ``True`` if just created."""
         self._validate_session_id(session_id)
-        path = self._session_path(session_id)
-        if path.exists():
+        if await self._fs.exists(self._session_rel(session_id)):
             return False
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # ``touch`` is atomic enough for our "exists or not" purposes;
-        # we never rely on the empty file being readable as JSONL.
-        path.touch()
+        # An empty JSONL is a valid empty session. ``write_bytes`` is
+        # atomic (temp + replace), so a parallel ``new_session`` can
+        # never see a half-created file.
+        await self._fs.write_bytes(self._session_rel(session_id), b"")
         return True
 
     async def append(
@@ -123,16 +162,18 @@ class JsonlSessionStore(RobotComponent, SessionStorePort):
     ) -> None:
         """Append one record to ``session_id``. Creates the file if missing."""
         self._validate_session_id(session_id)
-        line = message.to_jsonl_line()
+        line = message.to_jsonl_line().rstrip("\n")
         lock = self._locks.setdefault(session_id, asyncio.Lock())
         async with lock:
-            path = self._session_path(session_id)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(line)
-                fh.flush()
+            writer = self._writers.get(session_id)
+            if writer is None:
+                writer = await self._fs.append_path(
+                    self._session_rel(session_id)
+                )
+                self._writers[session_id] = writer
+            await writer.write_line(line)
 
-    def messages(
+    async def messages(
         self, session_id: str, limit: int | None = None
     ) -> list[SessionMessage]:
         """Read back the persisted records, oldest first.
@@ -144,26 +185,29 @@ class JsonlSessionStore(RobotComponent, SessionStorePort):
         self._validate_session_id(session_id)
         if limit is not None and limit < 0:
             raise ValueError("limit must be >= 0 or None")
-        path = self._session_path(session_id)
-        if not path.exists():
+        # Flush any in-process writer so a reader sees just-written
+        # records (the OS buffer is otherwise in front of pathlib).
+        writer = self._writers.get(session_id)
+        if writer is not None:
+            await writer.flush()
+        try:
+            text = await self._fs.read_text(self._session_rel(session_id))
+        except FileNotFoundError:
             return []
         out: list[SessionMessage] = []
-        with path.open("r", encoding="utf-8") as fh:
-            for line_no, raw in enumerate(fh, start=1):
-                stripped = raw.strip()
-                if not stripped:
-                    continue
-                try:
-                    out.append(SessionMessage.from_jsonl_line(stripped))
-                except Exception:
-                    # Crash-tolerant tail. Don't fail the kernel
-                    # because of one broken record.
-                    logger.warning(
-                        "JsonlSessionStore: skipping unparseable line "
-                        "%d in session %s",
-                        line_no,
-                        session_id,
-                    )
+        for line_no, raw in enumerate(text.splitlines(), start=1):
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            try:
+                out.append(SessionMessage.from_jsonl_line(stripped))
+            except Exception:
+                logger.warning(
+                    "FilesystemSessionStore: skipping unparseable line "
+                    "%d in session %s",
+                    line_no,
+                    session_id,
+                )
         if limit is not None:
             if limit == 0:
                 return []
@@ -171,47 +215,50 @@ class JsonlSessionStore(RobotComponent, SessionStorePort):
                 out = out[-limit:]
         return out
 
-    def list_sessions(self) -> list[SessionSummary]:
+    async def list_sessions(self) -> list[SessionSummary]:
         """Build a :class:`SessionSummary` for every persisted session.
 
         Every field except the title is derived from the session's own
-        JSONL so the listing can never drift from the conversation; the
-        title is pulled from the ``index.json`` sidecar. Ordered
+        JSONL so the listing can never drift from the conversation;
+        the title is pulled from the ``index.json`` sidecar. Ordered
         most-recently-active first (ties broken by session id) so the
         result drops straight into a chat sidebar.
         """
-        if not self._sessions_dir.exists():
-            return []
-        titles = self._read_index()
-        summaries = [
-            self._summarize(path.stem, path, titles.get(path.stem))
-            for path in self._sessions_dir.glob("*.jsonl")
-            if path.is_file()
-        ]
+        names = await self._fs.listdir(PurePath(_SESSIONS_SUBDIR))
+        titles = await self._read_index()
+        summaries: list[SessionSummary] = []
+        for name in names:
+            if not name.endswith(".jsonl"):
+                continue
+            session_id = name[: -len(".jsonl")]
+            summaries.append(
+                await self._summarize(session_id, titles.get(session_id))
+            )
         summaries.sort(
             key=lambda s: (s.last_activity_at, s.session_id), reverse=True
         )
         return summaries
 
-    def set_title(self, session_id: str, title: str) -> None:
+    async def set_title(self, session_id: str, title: str) -> None:
         """Persist (or clear) the title of ``session_id`` in the index."""
         self._validate_session_id(session_id)
-        index = self._read_index()
-        if title:
-            index[session_id] = title
-        else:
-            index.pop(session_id, None)
-        self._write_index(index)
+        async with self._index_lock:
+            index = await self._read_index()
+            if title:
+                index[session_id] = title
+            else:
+                index.pop(session_id, None)
+            await self._write_index(index)
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
-    def _summarize(
-        self, session_id: str, path: Path, title: str | None
+    async def _summarize(
+        self, session_id: str, title: str | None
     ) -> SessionSummary:
         """Derive a :class:`SessionSummary` from one session file."""
-        messages = self.messages(session_id)
+        messages = await self.messages(session_id)
         if not messages:
             return SessionSummary(session_id=session_id, title=title)
         model_id: str | None = None
@@ -228,25 +275,30 @@ class JsonlSessionStore(RobotComponent, SessionStorePort):
             model_id=model_id,
         )
 
-    def _index_path(self) -> Path:
-        return self._sessions_dir / _INDEX_FILENAME
+    @staticmethod
+    def _session_rel(session_id: str) -> PurePath:
+        return PurePath(_SESSIONS_SUBDIR) / f"{session_id}.jsonl"
 
-    def _read_index(self) -> dict[str, str]:
+    @staticmethod
+    def _index_rel() -> PurePath:
+        return PurePath(_SESSIONS_SUBDIR) / _INDEX_FILENAME
+
+    async def _read_index(self) -> dict[str, str]:
         """Load the ``session_id -> title`` map; tolerate missing/corrupt.
 
         A missing or unreadable index is treated as empty rather than
         fatal: the index only holds titles, and a session without a
         title is perfectly valid.
         """
-        path = self._index_path()
-        if not path.exists():
+        try:
+            text = await self._fs.read_text(self._index_rel())
+        except FileNotFoundError:
             return {}
         try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
+            data = json.loads(text)
+        except ValueError:
             logger.warning(
-                "JsonlSessionStore: ignoring unreadable session index %s", path
+                "FilesystemSessionStore: ignoring unreadable session index"
             )
             return {}
         if not isinstance(data, dict):
@@ -255,18 +307,10 @@ class JsonlSessionStore(RobotComponent, SessionStorePort):
             str(k): str(v) for k, v in data.items() if isinstance(v, str)
         }
 
-    def _write_index(self, index: dict[str, str]) -> None:
-        """Write the title index atomically (temp file + replace)."""
-        self._sessions_dir.mkdir(parents=True, exist_ok=True)
-        path = self._index_path()
-        tmp = path.with_suffix(".json.tmp")
-        with tmp.open("w", encoding="utf-8") as fh:
-            json.dump(index, fh, ensure_ascii=False, indent=2)
-            fh.flush()
-        os.replace(tmp, path)
-
-    def _session_path(self, session_id: str) -> Path:
-        return self._sessions_dir / f"{session_id}.jsonl"
+    async def _write_index(self, index: dict[str, str]) -> None:
+        """Write the title index atomically via the connection."""
+        payload = json.dumps(index, ensure_ascii=False, indent=2).encode("utf-8")
+        await self._fs.write_bytes(self._index_rel(), payload)
 
     @staticmethod
     def _validate_session_id(session_id: str) -> None:

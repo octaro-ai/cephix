@@ -191,12 +191,27 @@ def build_robot_from_config(
     # Phase 4: assemble components.
     bus = _build_bus(cfg.get("bus"), library=library)
 
+    # Persistence is built FIRST so utilities that need a
+    # ``FilesystemConnection`` (the session store today) can be
+    # wired against the same connection observers use. The boot
+    # order is still BACKEND -> CONNECTION -> PROVIDER -> UTILITY,
+    # set by ``BOOT_PRIORITY`` -- construction order in the builder
+    # only governs DI wiring.
+    (
+        persistence_components,
+        persistence_index,
+        connection_index,
+    ) = _build_persistence_components(
+        cfg.get("persistence"), workspace, library=library
+    )
+
     utilities = _build_components_list(
         cfg.get("utility"),
         section_name="utility",
         expected_category=ComponentCategory.UTILITY,
         library=library,
         workspace=workspace,
+        connections=connection_index,
     )
     bus_utilities = _build_components_list(
         cfg.get("bus_utility"),
@@ -204,6 +219,7 @@ def build_robot_from_config(
         expected_category=ComponentCategory.BUS_UTILITY,
         library=library,
         workspace=workspace,
+        connections=connection_index,
     )
 
     # Index utilities by ``component_name`` so the kernel builder can
@@ -233,10 +249,6 @@ def build_robot_from_config(
         cfg, singular="channel", plural="channels"
     )
     channels = _build_channels(channel_specs, library=library)
-
-    persistence_components, persistence_index = _build_persistence_components(
-        cfg.get("persistence"), workspace, library=library
-    )
     telemetry_components = _build_observer_components(
         cfg.get("telemetry"),
         slot="telemetry",
@@ -773,6 +785,7 @@ def _build_components_list(
     expected_category: ComponentCategory,
     library: ComponentLibrary,
     workspace: str | Path | None = None,
+    connections: dict[str, FilesystemConnection] | None = None,
 ) -> list[RobotComponent]:
     """Build a list of components from a category-keyed YAML section.
 
@@ -782,12 +795,15 @@ def _build_components_list(
     category matches the section so a misconfigured channel can't
     sneak into the utility list and vice versa.
 
-    Convention-DI: stores that need workspace-derived paths
-    (``firmware-store`` -> ``firmware_dir``, ``session-store`` ->
-    ``sessions_dir``) get them injected by convention when a
-    ``workspace`` is available. The ``firmware-store`` additionally
-    triggers a copy-if-missing seed of the packaged template files
-    so a fresh robot has something to read on the first boot.
+    Convention-DI:
+
+    - ``firmware-store`` -> ``firmware_dir`` (workspace-derived),
+      plus a copy-if-missing seed of the packaged template files
+      so a fresh robot has something to read on the first boot.
+    - ``session-store`` -> ``connection`` (a
+      :class:`FilesystemConnection` from the persistence stack).
+      The store routes all its IO through that connection so it
+      shares the adapter chain with telemetry and audit.
     """
     if spec is None:
         return []
@@ -804,14 +820,27 @@ def _build_components_list(
         item = dict(item)
         extras: dict[str, Any] = {}
         name = item.get("name")
-        if workspace is not None and isinstance(name, str):
-            workspace_path = Path(workspace)
-            if name == "firmware-store" and "firmware_dir" not in item:
-                firmware_dir = workspace_path / "firmware"
+        if isinstance(name, str):
+            if (
+                workspace is not None
+                and name == "firmware-store"
+                and "firmware_dir" not in item
+            ):
+                firmware_dir = Path(workspace) / "firmware"
                 _seed_firmware(firmware_dir)
                 extras["firmware_dir"] = str(firmware_dir)
-            elif name == "session-store" and "sessions_dir" not in item:
-                extras["sessions_dir"] = str(workspace_path / "sessions")
+            elif name == "session-store" and "connection" not in item:
+                connection = _resolve_session_store_connection(
+                    item, connections
+                )
+                if connection is None:
+                    raise ConfigError(
+                        "session-store needs a FilesystemConnection but "
+                        "no persistence stack is configured; declare a "
+                        "persistence entry (e.g. 'filesystem-events') "
+                        "or pass an explicit connection: <id>."
+                    )
+                extras["connection"] = connection
         component = _build_with_library(
             item, category=section_name, library=library, **extras
         )
@@ -829,6 +858,49 @@ def _build_components_list(
             )
         out.append(component)
     return out
+
+
+def _resolve_session_store_connection(
+    spec: dict[str, Any],
+    connections: dict[str, FilesystemConnection] | None,
+) -> FilesystemConnection | None:
+    """Pick the :class:`FilesystemConnection` the session store binds to.
+
+    Selection (mirrors observer ``persistence:`` semantics):
+
+    - explicit ``persistence: <id>`` on the spec -> exact lookup;
+    - no field set and exactly one persistence stack -> that one;
+    - no field set, multiple stacks, ``"default"`` present -> that;
+    - everything else -> ``None`` (caller surfaces the ConfigError).
+
+    Reusing the ``persistence: <id>`` key (and not inventing a
+    parallel ``connection: <id>``) keeps the YAML grammar uniform
+    with telemetry/audit entries -- one knob, one meaning.
+    """
+    if not connections:
+        return None
+    requested = spec.get("persistence")
+    if requested is not None:
+        requested_id = str(requested)
+        connection = connections.get(requested_id)
+        if connection is None:
+            available = sorted(connections.keys()) or ["<none>"]
+            raise ConfigError(
+                f"session-store references persistence id "
+                f"{requested_id!r} but no such stack is configured; "
+                f"available: {available}"
+            )
+        return connection
+    if len(connections) == 1:
+        return next(iter(connections.values()))
+    if _DEFAULT_PERSISTENCE_ID in connections:
+        return connections[_DEFAULT_PERSISTENCE_ID]
+    available = sorted(connections.keys())
+    raise ConfigError(
+        f"session-store needs a persistence id (multiple stacks "
+        f"available: {available}); add 'persistence: <id>' to the "
+        "session-store entry."
+    )
 
 
 def _index_components_by_name(
@@ -1020,7 +1092,11 @@ def _build_persistence_components(
     workspace: str | Path | None,
     *,
     library: ComponentLibrary,
-) -> tuple[list[RobotComponent], dict[str, EventStreamProviderPort]]:
+) -> tuple[
+    list[RobotComponent],
+    dict[str, EventStreamProviderPort],
+    dict[str, FilesystemConnection],
+]:
     """Build the persistence stack from ``robot.yaml#persistence``.
 
     Each persistence entry is synthesized into the three-level DAO
@@ -1029,7 +1105,7 @@ def _build_persistence_components(
     and the robot's boot order surfaces them as separate ``Boot
     Level X`` markers with their own ``injected into`` log lines.
 
-    Returns ``(components, provider_index)``:
+    Returns ``(components, provider_index, connection_index)``:
 
     - ``components`` -- the full list of synthesized
       :class:`RobotComponent`s across all configured persistence
@@ -1038,6 +1114,11 @@ def _build_persistence_components(
     - ``provider_index`` -- mapping ``id -> provider`` so observers
       (telemetry, audit) can reference a specific stack via
       ``persistence: <id>``.
+    - ``connection_index`` -- mapping ``id -> connection`` so
+      utilities that need raw filesystem IO (e.g. the
+      :class:`~src.utility.session_store.store.FilesystemSessionStore`)
+      can be wired against the same connection the observers above
+      use.
 
     Shapes accepted: singular mapping or list. A singular spec
     implicitly gets ``id: "default"``. A list may later mix backends
@@ -1051,6 +1132,7 @@ def _build_persistence_components(
     entries = _normalize_observer_specs(spec, slot="persistence")
     all_components: list[RobotComponent] = []
     provider_index: dict[str, EventStreamProviderPort] = {}
+    connection_index: dict[str, FilesystemConnection] = {}
     used_ids: set[str] = set()
     for index, entry in enumerate(entries):
         enriched = _apply_library_defaults(
@@ -1119,7 +1201,8 @@ def _build_persistence_components(
 
         all_components.extend((adapter, connection, provider))
         provider_index[persistence_id] = provider
-    return all_components, provider_index
+        connection_index[persistence_id] = connection
+    return all_components, provider_index, connection_index
 
 
 def _resolve_codec(name: str) -> RecordCodec:

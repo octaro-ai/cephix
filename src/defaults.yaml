@@ -138,7 +138,8 @@ defaults:
       # Off-bus helpers consumed by reference by other components.
       # The model catalog ships its bundled `llmprice` snapshot;
       # the markdown firmware store reads <workspace>/firmware/;
-      # the JSONL session store writes <workspace>/sessions/.
+      # the session store routes through the default persistence
+      # connection -> <persistence-root>/sessions/.
       - {name: model-catalog}
       - {name: firmware-store}
       - {name: session-store}

@@ -766,7 +766,7 @@ class TestBuilderChatKernel:
         from src.kernel.chat import ChatKernel
         from src.utility.firmware_store import MarkdownFirmwareStore
         from src.utility.model_catalog import ModelCatalog
-        from src.utility.session_store import JsonlSessionStore
+        from src.utility.session_store import FilesystemSessionStore
 
         robot = build_robot_from_config(
             self._chat_cfg(),
@@ -774,22 +774,33 @@ class TestBuilderChatKernel:
         )
         kernel = next(c for c in robot.components if isinstance(c, ChatKernel))
         assert isinstance(kernel._firmware, MarkdownFirmwareStore)
-        assert isinstance(kernel._sessions, JsonlSessionStore)
+        assert isinstance(kernel._sessions, FilesystemSessionStore)
         assert isinstance(kernel._model_catalog, ModelCatalog)
 
-    def test_session_store_dir_defaults_to_workspace_sessions(
+    def test_session_store_binds_to_default_persistence_connection(
         self, tmp_path: Path
     ) -> None:
-        from src.utility.session_store import JsonlSessionStore
+        from src.persistence.filesystem.connection import FilesystemConnection
+        from src.utility.session_store import FilesystemSessionStore
 
         robot = build_robot_from_config(
             self._chat_cfg(),
             workspace=tmp_path,
         )
         store = next(
-            c for c in robot.components if isinstance(c, JsonlSessionStore)
+            c
+            for c in robot.components
+            if isinstance(c, FilesystemSessionStore)
         )
-        assert store._sessions_dir == tmp_path / "sessions"
+        # The store shares the FilesystemConnection used by the
+        # default persistence stack (telemetry / audit). One adapter
+        # chain, one root, one set of permissions.
+        assert isinstance(store._fs, FilesystemConnection)
+        connections = [
+            c for c in robot.components
+            if isinstance(c, FilesystemConnection)
+        ]
+        assert store._fs in connections
 
     def test_firmware_store_dir_defaults_to_workspace_firmware(
         self, tmp_path: Path

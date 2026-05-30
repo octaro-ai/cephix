@@ -28,7 +28,9 @@ from src.utility.capability_collector import CapabilityCollector
 from src.utility.firmware_store.ports import FirmwareStorePort
 from src.utility.model_catalog.ports import ModelCatalogPort
 from src.utility.model_catalog.types import ModelPricing, ModelSpec
-from src.utility.session_store import JsonlSessionStore
+from src.persistence.filesystem.connection import FilesystemConnection
+from src.persistence.filesystem.local_adapter import LocalFSAdapter
+from src.utility.session_store import FilesystemSessionStore
 
 
 class _StubFirmware(FirmwareStorePort):
@@ -64,10 +66,11 @@ async def _build_robot(tmp_path: Path) -> tuple[Robot, WebsocketChannel]:
     bus = AsyncioBus()
     collector = CapabilityCollector()
     actor = MockLLMActor()
+    connection = FilesystemConnection(adapter=LocalFSAdapter(), root=tmp_path)
     kernel = ChatKernel(
         actor=actor,
         firmware=_StubFirmware(),
-        sessions=JsonlSessionStore(sessions_dir=tmp_path / "sessions"),
+        sessions=FilesystemSessionStore(connection=connection),
         model_catalog=_StubCatalog(),
     )
     channel = WebsocketChannel(host="127.0.0.1", port=0)
