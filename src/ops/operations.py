@@ -50,7 +50,7 @@ async def status(robot: Robot) -> dict[str, Any]:
             "name": robot.identity.name,
             "label": robot.identity.label,
         },
-        "boot_id": robot.boot_id,
+        "robot_run_id": robot.robot_run_id,
         "phase": robot.phase.value,
         "started_at": started_at.isoformat() if started_at else None,
         "uptime_s": uptime_s,

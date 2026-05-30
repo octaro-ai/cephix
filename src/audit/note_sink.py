@@ -7,7 +7,13 @@ import dataclasses
 import logging
 from typing import Any
 
-from src.bus.messages import AUDIT_TOPIC, RobotAuditNote, RobotEvent
+from src.bus.messages import (
+    AUDIT_TOPIC,
+    LIFECYCLE_TOPIC,
+    RobotAuditNote,
+    RobotEvent,
+    RobotLifecycle,
+)
 from src.bus.ports import BusPort, Subscription
 from src.components import BusComponent, ComponentCategory, RobotComponent
 from src.persistence import EventStreamProviderPort
@@ -49,6 +55,13 @@ class AuditNoteSink(BusComponent):
             raise ValueError("AuditNoteSink.channel must be non-empty")
         self._provider = provider
         self._channel = channel
+        # Prefixed by ``<robot_run_id>/`` at ``start`` time so this
+        # run's audit notes land in ``logs/<run_id>/audit.jsonl``
+        # rather than appending to a shared file across boots. The
+        # id is read off the retained ``RobotLifecycle.boot`` event
+        # the robot publishes before any AUDIT-level component
+        # boots.
+        self._scoped_channel = channel
         self._bus: BusPort | None = None
         self._subscription: Subscription | None = None
 
@@ -77,6 +90,14 @@ class AuditNoteSink(BusComponent):
             self.instance_id,
             self._channel,
         )
+        # Latch the current run id from the retained lifecycle event
+        # so every record we write goes under ``<run_id>/audit``.
+        # The boot event is in the retained slot before AUDIT-level
+        # components start (phase 2 publishes it after the bus is up,
+        # AUDIT is level 7).
+        boot = bus.retained(LIFECYCLE_TOPIC)
+        if isinstance(boot, RobotLifecycle) and boot.robot_run_id:
+            self._scoped_channel = f"{boot.robot_run_id}/{self._channel}"
         if isinstance(self._provider, RobotComponent):
             await self.publish_mount(
                 bus,
@@ -89,11 +110,11 @@ class AuditNoteSink(BusComponent):
 
     async def _drain(self) -> None:
         try:
-            await self._provider.flush(self._channel)
+            await self._provider.flush(self._scoped_channel)
         except Exception:
             logger.exception(
                 "AuditNoteSink: failed to flush channel %r during drain",
-                self._channel,
+                self._scoped_channel,
             )
 
     async def _stop(self) -> None:
@@ -130,13 +151,13 @@ class AuditNoteSink(BusComponent):
             )
             return
         try:
-            await self._provider.append(self._channel, record)
+            await self._provider.append(self._scoped_channel, record)
         except Exception:
             logger.exception(
                 "AuditNoteSink failed to persist note from component %r "
                 "(channel %r)",
                 event.component,
-                self._channel,
+                self._scoped_channel,
             )
 
     @staticmethod

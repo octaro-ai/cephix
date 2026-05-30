@@ -12,6 +12,17 @@ path (``append``) is one dict lookup + one ``write_line``. The
 cache is invisible to the consumer; from outside this object is
 just a DAO with ``append`` / ``flush``.
 
+The provider knows nothing about the robot's run-id. Per-run
+path scoping is a **sink-side** concern: an on-bus sink
+(:class:`~src.telemetry.bus_recorder.BusRecorder`,
+:class:`~src.audit.note_sink.AuditNoteSink`) learns the current
+``robot_run_id`` by reading the retained ``RobotLifecycle.boot``
+event off the bus and passes a pre-scoped channel string
+(``"<run_id>/telemetry"``, ``"<run_id>/audit"``) into
+:meth:`append`. The provider just resolves whatever it gets to
+``<root>/<directory>/<channel>.jsonl``; ``"/"`` segments inside
+the channel name become subdirs (see :meth:`FilesystemConnection.path_for`).
+
 Boot log:
 
     LocalFSAdapter (...) injected into FilesystemConnection (...)
@@ -87,6 +98,11 @@ class FilesystemEventStreamProvider(RobotComponent):
         self._connection = connection
         self._directory = directory.strip("/").strip("\\")
         # channel -> writer; lazily opened on first append, closed on stop().
+        # The cache key is the verbatim channel string the consumer
+        # hands in -- ``"telemetry"`` and ``"run-abc/telemetry"``
+        # are two distinct entries, so a sink that switches its
+        # scope mid-stream gets a fresh writer on the new path
+        # rather than appending across paths.
         self._writers: dict[str, AppendWriter] = {}
         self._writer_lock = asyncio.Lock()
 

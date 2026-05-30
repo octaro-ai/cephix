@@ -408,12 +408,29 @@ class RobotEvent:
       tests, cooked up by the robot itself) still validate; a
       regular component publishing on its own behalf should fill
       it.
+    - :attr:`run_id` -- **per-activity correlation chain**. Tags
+      every event that belongs to one logical activity flow with
+      the same string so an operator can trace it end to end:
+
+    - A channel mints a fresh id when an activity originates from
+      outside (``RobotInput``, scheduled heartbeat tick, ...).
+    - Kernels, tool layers, command-wiring and the bus's own
+      request/response machinery propagate the same id onto any
+      derived event (``RobotOutput``, ``ComponentRequest``/
+      ``ComponentResponse``, ``RobotAuditNote``, ...).
+
+    Empty string when the event is *not* part of an activity:
+    ``ComponentLifecycle`` / ``MountEvent`` / ``RobotLifecycle``
+    publish themselves on their own behalf. Use
+    :attr:`RobotLifecycle.robot_run_id` (the lifetime id of the
+    robot process) instead -- ``run_id`` is purely about activity
+    tracing, not process identity.
     """
 
     topic: str
     principal: str
     source: str
-    run_id: str
+    run_id: str = ""
     source_id: str = ""
     event_id: str = field(default_factory=_new_event_id)
     correlation_id: str | None = None
@@ -604,7 +621,7 @@ class RobotLifecycle(LifecycleAware, RobotEvent):
 
     robot_id: str | None = None
     robot_name: str | None = None
-    boot_id: str = ""
+    robot_run_id: str = ""
     components: tuple[ComponentInfo, ...] = ()
 
     def __post_init__(self) -> None:

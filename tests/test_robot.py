@@ -400,8 +400,11 @@ async def test_robot_publishes_lifecycle_boot_then_ready_with_manifest() -> None
         assert retained.phase == "ready"
         assert retained.robot_id == "alpha"
         assert retained.robot_name == "Alpha"
-        assert retained.boot_id.startswith("boot-")
-        assert retained.run_id == retained.boot_id
+        assert retained.robot_run_id.startswith("run-")
+        # Lifecycle events are not part of an activity flow, so run_id
+        # stays empty. The lifetime id of this robot run travels on
+        # robot_run_id (see RobotEvent.run_id docstring).
+        assert retained.run_id == ""
         categories = [info.category for info in retained.components]
         assert categories == ["bus", "kernel", "channel"]
 

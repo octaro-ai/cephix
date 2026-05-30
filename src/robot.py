@@ -212,7 +212,7 @@ class Robot:
 
         self._control_plane: ControlPlane | None = None
         self._bus: BusPort | None = None
-        self._boot_id: str = ""
+        self._robot_run_id: str = ""
         self._started_at: datetime | None = None
         self._phase: RobotPhase = RobotPhase.OFFLINE
         self._started: list[RobotComponent] = []
@@ -225,8 +225,18 @@ class Robot:
         return self._identity
 
     @property
-    def boot_id(self) -> str:
-        return self._boot_id
+    def robot_run_id(self) -> str:
+        """Unique id of this robot run (boot -> shutdown).
+
+        Generated once on :meth:`start` as ``run-<8 hex>``. Stays
+        constant for the lifetime of this Robot instance; a restart
+        produces a new one. Used as the correlation root for every
+        bus event the robot publishes about itself, and as the
+        scoping segment in stream paths so a single run's telemetry
+        and audit logs land in ``logs/<robot_run_id>/`` instead of
+        appending to a shared, ever-growing file.
+        """
+        return self._robot_run_id
 
     @property
     def started_at(self) -> datetime | None:
@@ -324,16 +334,20 @@ class Robot:
     async def _phase1_control_plane(self) -> None:
         """Phase 1: bring up the out-of-band control plane.
 
-        Generates a fresh ``boot_id`` and records ``started_at`` so
-        every later phase can stamp its events with the same boot
+        Generates a fresh ``robot_run_id`` and records ``started_at``
+        so every later phase can stamp its events with the same run
         identity. The control plane is optional: if disabled or no
         token is configured, this phase only sets the ids and skips
         binding the WebSocket.
         """
         self._phase = RobotPhase.BOOTING
-        self._boot_id = f"boot-{secrets.token_hex(4)}"
+        self._robot_run_id = f"run-{secrets.token_hex(4)}"
         self._started_at = datetime.now(UTC)
-        logger.info("%s boot (boot_id=%s)", self._label, self._boot_id)
+        logger.info(
+            "%s run started (robot_run_id=%s)",
+            self._label,
+            self._robot_run_id,
+        )
 
         if self._control_plane_config.enabled:
             if not self._control_plane_token:
@@ -426,11 +440,13 @@ class Robot:
             topic=LIFECYCLE_TOPIC,
             principal=self._system_principal(),
             source="robot",
-            run_id=self._boot_id,
+            # run_id stays empty -- lifecycle events are not part
+            # of an activity flow. The lifetime id of this robot
+            # process travels on ``robot_run_id`` below.
             phase="boot",
             robot_id=self._identity.id,
             robot_name=self._identity.name,
-            boot_id=self._boot_id,
+            robot_run_id=self._robot_run_id,
             components=self.component_manifest,
         )
         await self._bus.publish_broadcast(boot, retain=True)
@@ -453,11 +469,11 @@ class Robot:
             topic=LIFECYCLE_TOPIC,
             principal=self._system_principal(),
             source="robot",
-            run_id=self._boot_id,
+            # See _announce_boot for why run_id stays empty.
             phase="ready",
             robot_id=self._identity.id,
             robot_name=self._identity.name,
-            boot_id=self._boot_id,
+            robot_run_id=self._robot_run_id,
             components=self.component_manifest,
         )
         await self._bus.publish_broadcast(ready, retain=True)
@@ -588,11 +604,11 @@ class Robot:
             topic=LIFECYCLE_TOPIC,
             principal=self._system_principal(),
             source="robot",
-            run_id=self._boot_id,
+            # See _announce_boot for why run_id stays empty.
             phase="shutdown",
             robot_id=self._identity.id,
             robot_name=self._identity.name,
-            boot_id=self._boot_id,
+            robot_run_id=self._robot_run_id,
             message=message,
         )
         try:

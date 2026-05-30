@@ -163,6 +163,65 @@ async def test_sink_stop_flushes_configured_channel() -> None:
     assert provider.flushes.get("audit", 0) >= 1
 
 
+async def test_sink_scopes_channel_with_robot_run_id_from_retained_lifecycle() -> None:
+    """A retained ``RobotLifecycle.boot`` makes the sink prefix its
+    channel with ``<robot_run_id>/`` so this run's audit notes
+    land in ``audit/<run_id>/audit`` (or whatever the provider's
+    layout resolves that to)."""
+    from src.bus import LIFECYCLE_TOPIC, RobotLifecycle
+
+    bus = AsyncioBus()
+    provider = _MemoryProvider()
+    component = AuditNoteSink(provider=provider)
+
+    await bus.start()
+    try:
+        boot = RobotLifecycle(
+            topic=LIFECYCLE_TOPIC,
+            principal="robot:test",
+            source="robot",
+            run_id="run-feedface",
+            phase="boot",
+            robot_id="alpha",
+            robot_run_id="run-feedface",
+        )
+        await bus.publish_broadcast(boot, retain=True)
+
+        await component.start(bus)
+        await bus.publish(_note("tool.invoke", tool="grep"))
+        await asyncio.sleep(0.02)
+    finally:
+        await component.stop()
+        await bus.stop()
+
+    assert "audit" not in provider.records
+    scoped = "run-feedface/audit"
+    assert scoped in provider.records
+    actions = [r["action"] for r in provider.records[scoped]]
+    assert actions == ["tool.invoke"]
+
+
+async def test_sink_without_retained_lifecycle_keeps_bare_channel() -> None:
+    """No retained boot event -> sink stays on the bare ``audit``
+    channel, matching the pre-scoping behaviour for tests and
+    standalone runs."""
+    bus = AsyncioBus()
+    provider = _MemoryProvider()
+    component = AuditNoteSink(provider=provider)
+
+    await bus.start()
+    try:
+        await component.start(bus)
+        await bus.publish(_note("standalone"))
+        await asyncio.sleep(0.02)
+    finally:
+        await component.stop()
+        await bus.stop()
+
+    assert "audit" in provider.records
+    assert not any(c.startswith("run-") for c in provider.records)
+
+
 async def test_sink_stop_unsubscribes() -> None:
     bus = AsyncioBus()
     provider = _MemoryProvider()

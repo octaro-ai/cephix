@@ -218,7 +218,7 @@ Erwartungshaltung aus:
   `shutdown` durchsetzt:
   - `phase="boot"`: *frueh* in der Bootsequenz, sobald Identitaet
     und Komponenten-Inventar bekannt sind, aber bevor Kernel und
-    Channels attachen. Traegt `robot_id`, `robot_name`, `boot_id`
+    Channels attachen. Traegt `robot_id`, `robot_name`, `robot_run_id`
     und einen Snapshot der gestarteten Komponenten. Wird retained
     gepublished, damit spaeter angeklemmte Komponenten den Stand
     kennen. Analogon: Kernel-dmesg.

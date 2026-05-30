@@ -175,6 +175,73 @@ async def test_recorder_stop_flushes_configured_channel() -> None:
     assert provider.flushes.get("telemetry", 0) >= 1
 
 
+async def test_recorder_scopes_channel_with_robot_run_id_from_retained_lifecycle() -> None:
+    """When a retained ``RobotLifecycle.boot`` is present, the
+    recorder prefixes its channel with ``<robot_run_id>/`` and all
+    subsequent appends land on that scoped channel. The retained
+    boot anchor itself is also written under the scoped channel."""
+    from src.bus import LIFECYCLE_TOPIC, RobotLifecycle
+
+    bus = AsyncioBus()
+    provider = _MemoryProvider()
+    recorder = BusRecorder(provider=provider)
+
+    await bus.start()
+    try:
+        # Pre-populate the retained slot the way the robot would.
+        boot = RobotLifecycle(
+            topic=LIFECYCLE_TOPIC,
+            principal="robot:test",
+            source="robot",
+            run_id="run-deadbeef",
+            phase="boot",
+            robot_id="alpha",
+            robot_run_id="run-deadbeef",
+        )
+        await bus.publish_broadcast(boot, retain=True)
+
+        await recorder.start(bus)
+        await bus.publish(_input("hello"))
+        await asyncio.sleep(0.02)
+    finally:
+        await recorder.stop()
+        await bus.stop()
+
+    # Nothing landed on the bare "telemetry" channel...
+    assert "telemetry" not in provider.records
+    # ...but on the run-scoped one.
+    scoped = "run-deadbeef/telemetry"
+    assert scoped in provider.records
+    types = [r["event_type"] for r in provider.records[scoped]]
+    # Recorder writes: retained boot anchor + recorder's own
+    # lifecycle "ready" + the live RobotInput. Order matters --
+    # boot first, then ready, then input.
+    assert types[0] == "RobotLifecycle"
+    assert "RobotInput" in types
+
+
+async def test_recorder_without_retained_lifecycle_keeps_bare_channel() -> None:
+    """No retained boot event (e.g. a bare integration test that
+    starts the recorder before any robot publishes) leaves the
+    channel name unscoped -- backward-compatible with existing tests."""
+    bus = AsyncioBus()
+    provider = _MemoryProvider()
+    recorder = BusRecorder(provider=provider)
+
+    await bus.start()
+    try:
+        await recorder.start(bus)
+        await bus.publish(_input("hello"))
+        await asyncio.sleep(0.02)
+    finally:
+        await recorder.stop()
+        await bus.stop()
+
+    assert "telemetry" in provider.records
+    # No run-scoped sibling.
+    assert not any(c.startswith("run-") for c in provider.records)
+
+
 async def test_recorder_stop_unsubscribes() -> None:
     bus = AsyncioBus()
     provider = _MemoryProvider()

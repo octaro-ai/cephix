@@ -121,3 +121,25 @@ async def test_writes_jsonl_extension(tmp_path: Path) -> None:
     finally:
         await provider.stop()
     assert (tmp_path / "telemetry.jsonl").exists()
+
+
+# ---- subdir channels (cross-cutting, used by sink-side run scoping) --------
+
+
+@pytest.mark.asyncio
+async def test_channel_with_slash_creates_subdir(tmp_path: Path) -> None:
+    """A channel string containing ``/`` resolves to a subdir under
+    the provider's directory; the slash becomes a real path
+    separator via :meth:`FilesystemConnection.path_for`. This is
+    what sinks rely on for per-run scoping (e.g. ``"run-abc/audit"``).
+    """
+    provider = _build_provider(tmp_path)
+    await provider.start()
+    try:
+        await provider.append("run-abc/telemetry", {"a": 1})
+        await provider.append("run-abc/audit", {"b": 2})
+        await provider.flush()
+    finally:
+        await provider.stop()
+    assert (tmp_path / "run-abc" / "telemetry.jsonl").exists()
+    assert (tmp_path / "run-abc" / "audit.jsonl").exists()

@@ -55,6 +55,13 @@ class BusRecorder(BusComponent):
             raise ValueError("BusRecorder.channel must be non-empty")
         self._provider = provider
         self._channel = channel
+        # ``_scoped_channel`` is what we hand to the provider on
+        # every append. It defaults to the configured channel but
+        # gets prefixed with the current ``robot_run_id`` after
+        # ``start`` reads the retained boot event off the bus, so
+        # this run's records land in ``logs/<run_id>/<channel>.jsonl``
+        # instead of appending to a shared file across boots.
+        self._scoped_channel = channel
         self._bus: BusPort | None = None
         self._subscription: Subscription | None = None
 
@@ -92,8 +99,15 @@ class BusRecorder(BusComponent):
         # so the anchor is pulled explicitly here. The phase 2
         # ordering guarantees ``boot`` is already in the retained
         # slot at this point.
+        #
+        # The same event carries the current ``robot_run_id``; we
+        # latch it into the scoped channel before writing the
+        # anchor so even the anchor itself lands under the
+        # per-run subdir.
         boot = bus.retained(LIFECYCLE_TOPIC)
         if isinstance(boot, RobotLifecycle):
+            if boot.robot_run_id:
+                self._scoped_channel = f"{boot.robot_run_id}/{self._channel}"
             try:
                 await self._record(boot)
             except Exception:
@@ -117,11 +131,11 @@ class BusRecorder(BusComponent):
 
     async def _drain(self) -> None:
         try:
-            await self._provider.flush(self._channel)
+            await self._provider.flush(self._scoped_channel)
         except Exception:
             logger.exception(
                 "BusRecorder: failed to flush channel %r during drain",
-                self._channel,
+                self._scoped_channel,
             )
 
     async def _stop(self) -> None:
@@ -150,7 +164,7 @@ class BusRecorder(BusComponent):
             )
             return
         try:
-            await self._provider.append(self._channel, record)
+            await self._provider.append(self._scoped_channel, record)
         except Exception:
             logger.exception(
                 "BusRecorder failed to persist event on topic %r (channel %r)",
