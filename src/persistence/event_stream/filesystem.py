@@ -141,11 +141,11 @@ class FilesystemEventStreamProvider(RobotComponent):
         )
         # All record-write work is lazy per channel; nothing else to do.
 
-    async def drain(self) -> None:
+    async def _drain(self) -> None:
         # Best-effort flush before the consumer components stop.
         await self.flush()
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         async with self._writer_lock:
             writers = list(self._writers.items())
             self._writers.clear()

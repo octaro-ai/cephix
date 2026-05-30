@@ -152,6 +152,34 @@ class RobotPhase(str, Enum):
     FINALIZED = "finalized"        # done
 
 
+class StopReason(str, Enum):
+    """Why the robot was asked to stop.
+
+    Bears on logging and the ``RobotLifecycle.message`` field only --
+    the teardown mechanics are identical for every reason. A
+    component's ``stop()`` always drains then stops; the robot's
+    grace window is unchanged; the bus event still uses
+    ``phase="shutdown"`` (the robot is going down either way).
+
+    Reasons:
+
+    - :attr:`SHUTDOWN` -- explicit, expected stop. CLI quit,
+      control-plane request, an integration test calling
+      ``robot.stop()`` directly. The default.
+    - :attr:`FAILURE` -- a component raised in ``start()``. The
+      robot tears down whatever managed to come up underneath it,
+      then re-raises the original exception so the caller can
+      handle it.
+    - :attr:`TIMEOUT` -- a component took longer than its allotted
+      window to come up. Not enforced today; reserved so the
+      reason vocabulary is ready when a start-timeout policy lands.
+    """
+
+    SHUTDOWN = "shutdown"
+    FAILURE = "failure"
+    TIMEOUT = "timeout"
+
+
 # ---------------------------------------------------------------------------
 # The Robot
 # ---------------------------------------------------------------------------
@@ -282,9 +310,15 @@ class Robot:
             await self._phase2_skeleton()
             await self._phase3_userspace()
             logger.info("%s online (Ctrl-C to stop)", self._label)
-        except BaseException:
-            logger.warning("startup failed, rolling back")
-            await self._teardown()
+        except BaseException as exc:
+            logger.warning(
+                "failure occurred, rolling back: %s",
+                type(exc).__name__,
+            )
+            await self.stop(
+                reason=StopReason.FAILURE,
+                message=f"Boot failed: {type(exc).__name__}: {exc}",
+            )
             raise
 
     async def _phase1_control_plane(self) -> None:
@@ -436,52 +470,68 @@ class Robot:
         *,
         grace_override: float | None = None,
         message: str | None = None,
+        reason: StopReason = StopReason.SHUTDOWN,
     ) -> None:
-        """Graceful shutdown, mirroring the boot sequence component by
-        component.
+        """Tear the robot down, regardless of why.
 
-        Phase 3 down: announce :class:`RobotLifecycle` (``phase="shutdown"``)
-        retained, then drain+stop every userspace component in
-        reverse-boot order. Phase 2 down: drain+stop every skeleton
-        component (the bus comes last; its ``drain()`` is the queue
-        flush). Phase 1 down: tear down the control plane.
+        Same path is used for graceful shutdown and for rolling back a
+        failed boot. The only difference is :class:`StopReason`,
+        which:
 
-        Each component's drain hook is bounded by ``shutdown_grace``
-        (or ``grace_override``) -- coroutines that don't return are
-        cancelled before the matching ``stop()`` is called. The
-        grace window is robot-internal policy and does not travel on
-        the bus; ``message`` is the broadcast announcement and
-        defaults to ``"Robot shutting down"`` if not supplied.
+        - picks the log labels (``Shutdown initiated`` vs
+          ``Rollback initiated (reason: ...)``);
+        - lands in the ``RobotLifecycle.message`` field so an audit
+          reader can tell *why* the robot went down;
+        - controls the final log line (``offline`` vs
+          ``rolled back``).
+
+        Mechanics are identical: phase 3 down (userspace) -> phase 2
+        down (skeleton) -> phase 1 down (control plane), each
+        component's :meth:`stop` (which drains then stops) bounded by
+        ``shutdown_grace``. ``stop`` is idempotent and tolerates being
+        called twice (the second call is a no-op).
         """
         if self._phase in (RobotPhase.OFFLINE, RobotPhase.FINALIZED):
             self._stop_event.set()
             return
 
         grace = grace_override if grace_override is not None else self._shutdown_grace
-        announce = message or "Robot shutting down"
+        announce = message or self._default_stop_message(reason)
 
-        # Mirror the boot-level marker style on the shutdown side: a
-        # single visual fence between "something triggered a stop"
-        # (signal received, control-plane request, direct stop call)
-        # and the first teardown action, plus a per-phase label so
-        # the log mirrors phase 1/2/3 just like the boot side does
-        # boot levels 0..11.
-        logger.info("=== Shutdown initiated ===")
+        if reason is StopReason.SHUTDOWN:
+            initiated_label = "Shutdown initiated"
+        else:
+            initiated_label = f"Rollback initiated (reason: {reason.value})"
+        logger.info("=== %s ===", initiated_label)
 
         try:
             logger.info("=== Phase 3 down (userspace) ===")
-            await self._phase3_down(grace, announce)
+            await self._phase3_down(grace, announce, reason)
             logger.info("=== Phase 2 down (skeleton) ===")
             await self._phase2_down(grace)
             logger.info("=== Phase 1 down (control plane) ===")
             await self._phase1_down()
-            logger.info("%s offline", self._label)
+            end_label = "offline" if reason is StopReason.SHUTDOWN else "rolled back"
+            logger.info("%s %s", self._label, end_label)
         finally:
             self._phase = RobotPhase.FINALIZED
             self._stop_event.set()
 
-    async def _phase3_down(self, grace: float, message: str) -> None:
-        """Phase 3 down: announce shutdown, drain+stop userspace."""
+    @staticmethod
+    def _default_stop_message(reason: StopReason) -> str:
+        if reason is StopReason.SHUTDOWN:
+            return "Robot shutting down"
+        return f"Robot shutting down (reason: {reason.value})"
+
+    async def _phase3_down(
+        self, grace: float, message: str, reason: StopReason
+    ) -> None:
+        """Phase 3 down: announce shutdown, drain+stop userspace.
+
+        The ``reason`` only changes the announcement's ``message``
+        payload; the bus event still uses ``phase="shutdown"`` because
+        the robot's lifecycle is going down either way.
+        """
         self._phase = RobotPhase.DRAINING
         await self._announce_shutdown(message)
 
@@ -496,7 +546,7 @@ class Robot:
             # self._log_phase_marker(prio, category, "shutdown_enter")  # shutdown markers silenced -- only Entering kept on boot side
             for component in reversed(group):
                 if component in self._started:
-                    await self._drain_then_stop(component, grace)
+                    await self._stop_component(component, grace)
             # self._log_phase_marker(prio, category, "shutdown_complete")  # shutdown markers silenced -- only Entering kept on boot side
 
     async def _phase2_down(self, grace: float) -> None:
@@ -508,7 +558,7 @@ class Robot:
             # self._log_phase_marker(prio, category, "shutdown_enter")  # shutdown markers silenced -- only Entering kept on boot side
             for component in reversed(group):
                 if component in self._started:
-                    await self._drain_then_stop(component, grace)
+                    await self._stop_component(component, grace)
             # self._log_phase_marker(prio, category, "shutdown_complete")  # shutdown markers silenced -- only Entering kept on boot side
 
         # The bus is gone now; clear the pointer for status reporters.
@@ -574,41 +624,36 @@ class Robot:
             logger.info("%s started", label)
         self._started.append(component)
 
-    async def _drain_then_stop(
+    async def _stop_component(
         self, component: RobotComponent, grace: float
     ) -> None:
-        """Drain a single component (bounded), then stop it.
+        """Stop one component, bounded by ``grace`` when set.
 
-        Per-component grace: the timeout starts fresh for each
-        component. A coroutine that doesn't return within the cap is
-        cancelled with a warning, then ``stop()`` is called either
-        way -- skipping ``stop()`` would leak resources.
-
-        ``grace == 0`` is the cephix equivalent of "no SIGTERM, just
-        SIGKILL": the drain is invoked but cancelled at the first
-        await; trivial drains (default ``return None``) still complete.
+        Calls :meth:`RobotComponent.stop` -- the template method
+        that runs :meth:`_drain` then :meth:`_stop`. With
+        ``grace > 0`` the call is wrapped in
+        ``asyncio.wait_for(..., grace)`` and cancellation is logged;
+        with ``grace == 0`` the stop runs to completion (the cephix
+        equivalent of "no SIGTERM, just complete the close path
+        without idling on a drain"). Components are expected to make
+        ``_stop`` fast and idempotent; a hang there is a component
+        bug, not a robot policy.
         """
         label = self._component_label(component)
-        timeout = grace if grace > 0 else 0.001
         try:
-            await asyncio.wait_for(component.drain(), timeout=timeout)
-        except asyncio.TimeoutError:
             if grace > 0:
-                logger.warning(
-                    "%s drain grace %.1fs elapsed for %s; forcing stop",
-                    self._label,
-                    grace,
-                    label,
-                )
+                await asyncio.wait_for(component.stop(), timeout=grace)
+            else:
+                await component.stop()
+        except asyncio.TimeoutError:
+            logger.warning(
+                "%s stop grace %.1fs elapsed for %s; cancelled",
+                self._label,
+                grace,
+                label,
+            )
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception(
-                "%s drain hook for %s raised; forcing stop", self._label, label
-            )
-
-        try:
-            await component.stop()
         except Exception:
             logger.exception("error while stopping %s; continuing", label)
             return
@@ -831,39 +876,6 @@ class Robot:
                 raise
         finally:
             await self.stop()
-
-    # ---- emergency teardown (used during failed boot) ---------------------
-
-    async def _teardown(self) -> None:
-        """Stop whatever managed to start, in reverse order. No drain.
-
-        Used only on failed boot, where ``drain()`` would be premature
-        (components may not even be in a state where draining is
-        meaningful).
-        """
-        while self._started:
-            component = self._started.pop()
-            label = self._component_label(component)
-            try:
-                await component.stop()
-            except Exception:
-                logger.exception("error while stopping %s; continuing", label)
-                continue
-            if isinstance(component, BusComponent):
-                logger.info("%s detached", label)
-            else:
-                logger.info("%s stopped", label)
-
-        self._bus = None
-
-        if self._control_plane is not None:
-            try:
-                await self._control_plane.stop()
-            except Exception:
-                logger.exception("error stopping control plane; continuing")
-            self._control_plane = None
-
-        self._phase = RobotPhase.FINALIZED
 
     # ---- async-with sugar -------------------------------------------------
 

@@ -146,7 +146,9 @@ async def test_sink_writes_to_custom_channel() -> None:
     assert "audit" not in provider.records
 
 
-async def test_sink_drain_flushes_configured_channel() -> None:
+async def test_sink_stop_flushes_configured_channel() -> None:
+    """``stop()`` template-method drives ``_drain`` (which flushes the
+    provider's channel) before ``_stop``."""
     bus = AsyncioBus()
     provider = _MemoryProvider()
     component = AuditNoteSink(provider=provider, channel="audit")
@@ -154,7 +156,6 @@ async def test_sink_drain_flushes_configured_channel() -> None:
     await bus.start()
     try:
         await component.start(bus)
-        await component.drain()
     finally:
         await component.stop()
         await bus.stop()

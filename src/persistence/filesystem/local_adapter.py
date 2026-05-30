@@ -46,7 +46,7 @@ class LocalFSAdapter(RobotComponent):
         # which delegates to ``is_writable``.
         return None
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         return None
 
     # ---- FilesystemPort -----------------------------------------------------

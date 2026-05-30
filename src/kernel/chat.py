@@ -156,14 +156,14 @@ class ChatKernel(BaseKernel):
         await super().start(bus)
         self._command_subs = wire_commands(self, bus)
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         for sub in self._command_subs:
             try:
                 await sub.unsubscribe()
             except Exception:
                 logger.exception("ChatKernel: failed to unsubscribe a command")
         self._command_subs = []
-        await super().stop()
+        await super()._stop()
 
     # ------------------------------------------------------------------
     # Command handlers (deterministic, no actor/LLM involvement)

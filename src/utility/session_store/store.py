@@ -126,7 +126,7 @@ class FilesystemSessionStore(RobotComponent, SessionStorePort):
             self.instance_id,
         )
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         """Close cached writers and drop lock/writer caches."""
         for sid, writer in list(self._writers.items()):
             try:

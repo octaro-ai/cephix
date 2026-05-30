@@ -43,7 +43,7 @@ class _RecordingComponent(BusComponent):
         self.injected_bus = bus
         self.started = True
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         if self.fail_on_stop:
             self._log.append(f"stop-fail:{self.name}")
             raise RuntimeError(f"stop failed: {self.name}")
@@ -285,7 +285,7 @@ async def test_robot_uses_symmetric_boot_and_shutdown_verbs(
         async def start(self) -> None:
             return None
 
-        async def stop(self) -> None:
+        async def _stop(self) -> None:
             return None
 
     bus = AsyncioBus()
@@ -491,10 +491,10 @@ async def test_robot_caps_shutdown_at_grace_when_drain_hangs(
         async def start(self, bus: object) -> None:
             self.started = True
 
-        async def stop(self) -> None:
+        async def _stop(self) -> None:
             self.started = False
 
-        async def drain(self) -> None:
+        async def _drain(self) -> None:
             await asyncio.sleep(60.0)  # never returns within the grace window
 
     silent = _SilentDrainer()
@@ -508,9 +508,9 @@ async def test_robot_caps_shutdown_at_grace_when_drain_hangs(
         rec.message for rec in caplog.records if rec.levelno >= logging.WARNING
     ]
     assert any(
-        "_SilentDrainer" in m and "elapsed" in m and "forcing stop" in m
+        "_SilentDrainer" in m and "elapsed" in m and "cancelled" in m
         for m in warnings
-    ), f"expected drain timeout warning, got: {warnings}"
+    ), f"expected stop grace timeout warning, got: {warnings}"
 
 
 async def test_robot_returns_immediately_when_drain_returns_fast() -> None:
@@ -529,10 +529,10 @@ async def test_robot_returns_immediately_when_drain_returns_fast() -> None:
         async def start(self, bus: object) -> None:
             self.started = True
 
-        async def stop(self) -> None:
+        async def _stop(self) -> None:
             self.started = False
 
-        async def drain(self) -> None:
+        async def _drain(self) -> None:
             await asyncio.sleep(0)
             self.drained = True
 
@@ -564,10 +564,10 @@ async def test_robot_logs_drain_exception_without_aborting_shutdown(
         async def start(self, bus: object) -> None:
             pass
 
-        async def stop(self) -> None:
+        async def _stop(self) -> None:
             self.stopped = True
 
-        async def drain(self) -> None:
+        async def _drain(self) -> None:
             raise RuntimeError("drain went sideways")
 
     drainer = _RaisingDrainer()
@@ -581,9 +581,9 @@ async def test_robot_logs_drain_exception_without_aborting_shutdown(
     errors = [
         r.message
         for r in caplog.records
-        if r.levelno >= logging.WARNING and "drain hook" in r.message
+        if r.levelno >= logging.WARNING and "_drain raised" in r.message
     ]
-    assert errors, "expected a drain-failure log entry"
+    assert errors, "expected a _drain-failure log entry"
 
 
 async def test_robot_label_with_only_id(caplog: pytest.LogCaptureFixture) -> None:
@@ -613,7 +613,18 @@ async def test_robot_logs_rollback_on_failed_startup(
             await robot.start()
 
     messages = [rec.message for rec in caplog.records if rec.name == "src.robot"]
-    assert "startup failed, rolling back" in messages
+    # Rollback narrative: trigger line, the unified ``=== Rollback
+    # initiated (reason: failure) ===`` fence, the per-phase markers,
+    # and ``rolled back`` as the closing line. ``online`` must never
+    # have been reached.
+    assert any("rolling back" in m for m in messages)
+    assert any(
+        "=== Rollback initiated (reason: failure) ===" in m for m in messages
+    )
+    assert any("=== Phase 3 down (userspace) ===" in m for m in messages)
+    assert any("=== Phase 2 down (skeleton) ===" in m for m in messages)
+    assert any("=== Phase 1 down (control plane) ===" in m for m in messages)
+    assert any(m.endswith("rolled back") for m in messages)
     assert "robot online (Ctrl-C to stop)" not in messages
 
 

@@ -344,7 +344,7 @@ class WebsocketChannel(ChannelPort):
             return int(server.sockets[0].getsockname()[1])
         return fallback
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         if self._bus is not None:
             await self.announce_lifecycle(self._bus, "shutdown")
         self._shutting_down = True
@@ -411,14 +411,14 @@ class WebsocketChannel(ChannelPort):
             self._robot_id = event.robot_id
             self._robot_name = event.robot_name
 
-    async def drain(self) -> None:
+    async def _drain(self) -> None:
         """Notify connected clients and close their sessions.
 
-        Called by the robot during the shutdown grace window. We
-        send a ``shutdown`` JSON frame to every open session, then
-        close the WebSocket. ``stop()`` (called afterwards by the
-        robot) only takes care of the listening socket and the bus
-        subscriptions.
+        First step of :meth:`stop` (the template method on
+        :class:`RobotComponent`). We send a ``shutdown`` JSON frame
+        to every open session, then close the WebSocket. The
+        ``_stop`` hook that runs right after only takes care of the
+        listening socket and the bus subscriptions.
 
         Pulls the lifecycle ``shutdown`` event from the bus retained
         slot to forward ``message`` to clients -- useful for UI

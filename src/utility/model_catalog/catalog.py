@@ -75,7 +75,7 @@ class ModelCatalog(RobotComponent, ModelCatalogPort):
         """No-op: the data source is initialised eagerly."""
         return None
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         """No-op: nothing to release."""
         return None
 

@@ -82,7 +82,7 @@ class ProcessEnvCredentialStore(RobotComponent, CredentialStorePort):
             held,
         )
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         if self._values is not None:
             self._values = {}
 

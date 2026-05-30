@@ -110,7 +110,7 @@ class EnvCredentialStore(RobotComponent, CredentialStorePort):
             self._path,
         )
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         self._values = {}
 
     # ---- CredentialStorePort ------------------------------------------------

@@ -216,7 +216,7 @@ class BaseKernel(KernelPort):
         # so no command can arrive ahead of its handler.
         await self.announce_lifecycle(bus, "ready")
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         # Tear down in reverse of ``start``: ``start`` mounted the
         # actor before announcing ``ready``, so ``stop`` unmounts the
         # actor before announcing ``shutdown``. The mount/unmount

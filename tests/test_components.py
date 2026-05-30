@@ -29,8 +29,10 @@ def test_component_category_is_string_enum() -> None:
 
 def test_robot_component_has_generic_lifecycle_hooks() -> None:
     assert hasattr(RobotComponent, "start")
+    # ``stop`` is a template method that drives _drain then _stop.
     assert hasattr(RobotComponent, "stop")
-    assert hasattr(RobotComponent, "drain")
+    assert hasattr(RobotComponent, "_drain")
+    assert hasattr(RobotComponent, "_stop")
 
 
 def test_bus_component_is_robot_component_specialization() -> None:

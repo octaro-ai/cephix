@@ -364,22 +364,60 @@ class RobotComponent:
         raise NotImplementedError(f"{type(self).__name__}.start() not implemented")
 
     async def stop(self) -> None:
-        """Release every resource acquired in :meth:`start`."""
-        raise NotImplementedError(f"{type(self).__name__}.stop() not implemented")
+        """Public teardown entry. Do not override.
 
-    async def drain(self) -> None:
-        """Pre-stop drain hook. Default: nothing to do, return immediately.
+        Template method: runs :meth:`_drain` (chance to flush
+        buffers / close sessions / wait for queues), then
+        :meth:`_stop` (release the main resource). The robot only
+        ever calls ``stop()`` and bounds the whole call by its
+        ``shutdown_grace`` window -- a component that needs more
+        time than that will be cancelled.
 
-        Override in components that need to do bounded cleanup work
-        before they are stopped. The robot calls ``drain()`` on every
-        component sequentially in reverse-boot order, with the
-        configured ``shutdown_grace`` as a hard cap per component.
+        Subclasses override :meth:`_drain` (optional, default no-op)
+        and :meth:`_stop` (required). Drain is *part of the stop
+        contract* -- a caller cannot opt out, and a component cannot
+        be stopped without its drain hook running first.
 
-        Analog: ROS 2's ``on_shutdown(state)`` lifecycle callback,
+        Drain exceptions are caught and logged so :meth:`_stop`
+        always runs. A drain that raises is a diagnostic, not a
+        fatal teardown event -- resources still get released.
+        ``_stop`` exceptions propagate so the owner (robot) sees
+        them and can decide what to do.
+        """
+        try:
+            await self._drain()
+        except Exception:
+            logger.exception(
+                "%s._drain raised; continuing to _stop",
+                type(self).__name__,
+            )
+        await self._stop()
+
+    async def _drain(self) -> None:
+        """Override to flush buffers / close sessions / wait for queues.
+
+        Called as the first step of :meth:`stop` within the robot's
+        grace window. Default: nothing to drain. Implementations
+        should be best-effort and never raise; a drain failure is a
+        diagnostic, not a fatal teardown event.
+
+        Analog: ROS 2's ``on_shutdown(state)`` callback,
         Erlang/OTP's ``gen_server:terminate/2``, Windows SCM's
-        ``OnStop()``.
+        ``OnStop()`` pre-cleanup phase.
         """
         return None
+
+    async def _stop(self) -> None:
+        """Override to release the resources acquired in :meth:`start`.
+
+        Called by :meth:`stop` after :meth:`_drain`. Required:
+        subclasses that don't implement this hit
+        :class:`NotImplementedError`. The robot's grace window
+        covers ``_drain`` + ``_stop`` together.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__}._stop() not implemented"
+        )
 
     async def health_check(self) -> ComponentHealth:
         """Report current health and component-specific telemetry.

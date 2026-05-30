@@ -131,7 +131,7 @@ class LLMActorBase(LLMActorPort):
         """Default: nothing to bring online. Override for SDK clients."""
         return None
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         """Default: nothing to release. Override for SDK clients."""
         return None
 

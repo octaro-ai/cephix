@@ -55,7 +55,7 @@ class _AsyncSubscription:
             await self.bus._remove_subscription(self)
 
 
-class AsyncioBus(BusPort, RobotComponent):
+class AsyncioBus(RobotComponent, BusPort):
     """In-memory bus on top of asyncio primitives."""
 
     component_name = "asyncio"
@@ -89,7 +89,7 @@ class AsyncioBus(BusPort, RobotComponent):
             for sub in self._all_subscriptions:
                 self._ensure_consumer(sub)
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         async with self._lock:
             if not self._running:
                 return

@@ -87,7 +87,7 @@ class AuditNoteSink(BusComponent):
         self._subscription = bus.subscribe(AUDIT_TOPIC, self._record)
         await self.announce_lifecycle(bus, "ready")
 
-    async def drain(self) -> None:
+    async def _drain(self) -> None:
         try:
             await self._provider.flush(self._channel)
         except Exception:
@@ -96,7 +96,7 @@ class AuditNoteSink(BusComponent):
                 self._channel,
             )
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         if self._bus is not None:
             if isinstance(self._provider, RobotComponent):
                 await self.publish_mount(

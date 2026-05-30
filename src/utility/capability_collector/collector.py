@@ -82,7 +82,7 @@ class CapabilityCollector(BusComponent):
         self._subscription = bus.subscribe_all(self._on_event)
         await self.announce_lifecycle(bus, "ready")
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         if self._bus is not None:
             await self.announce_lifecycle(self._bus, "shutdown")
         if self._subscription is not None:

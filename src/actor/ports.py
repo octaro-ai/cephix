@@ -46,17 +46,18 @@ class ActorPort(RobotComponent):
     """Base class for actors. Plain :class:`RobotComponent`, no bus.
 
     Subclasses implement :meth:`run`. They inherit ``start`` /
-    ``stop`` / ``drain`` from :class:`RobotComponent`; trivial
-    actors like :class:`EchoActor` use no-op implementations,
-    while resource-holding actors (subprocess, HTTP client, ...) own
-    real setup and teardown there.
+    ``stop`` (template method) / ``_drain`` / ``_stop`` from
+    :class:`RobotComponent`; trivial actors like
+    :class:`~src.actor.echo.EchoActor` use no-op implementations,
+    while resource-holding actors (subprocess, HTTP client, ...)
+    override :meth:`_stop` for real teardown.
     """
 
     async def start(self) -> None:
         """Default: nothing to bring online. Override for resources."""
         return None
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         """Default: nothing to release. Override for resources."""
         return None
 

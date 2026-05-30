@@ -158,7 +158,9 @@ async def test_recorder_writes_to_custom_channel() -> None:
     assert "telemetry" not in provider.records
 
 
-async def test_recorder_drain_flushes_configured_channel() -> None:
+async def test_recorder_stop_flushes_configured_channel() -> None:
+    """``stop()`` template-method drives ``_drain`` (which flushes the
+    provider's channel) before ``_stop``."""
     bus = AsyncioBus()
     provider = _MemoryProvider()
     recorder = BusRecorder(provider=provider, channel="telemetry")
@@ -166,7 +168,6 @@ async def test_recorder_drain_flushes_configured_channel() -> None:
     await bus.start()
     try:
         await recorder.start(bus)
-        await recorder.drain()
     finally:
         await recorder.stop()
         await bus.stop()

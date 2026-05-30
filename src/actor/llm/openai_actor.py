@@ -165,7 +165,7 @@ class LLMActorOpenAI(LLMActorBase):
             max_retries=self._max_retries,
         )
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         """Close the SDK client and release the underlying HTTP pool."""
         if self._client is None:
             return

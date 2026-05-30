@@ -112,7 +112,7 @@ class FilesystemFirmwareStore(RobotComponent, FirmwareStorePort):
         )
         await self.refresh()
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         """Drop the in-memory document cache."""
         self._documents = {}
 

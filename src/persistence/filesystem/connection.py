@@ -206,7 +206,7 @@ class FilesystemConnection(RobotComponent):
         )
         await self._adapter.mkdir(PurePath(self._root), parents=True)
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         # The connection holds no handles itself -- providers above
         # own their writers and close them. Adapter is also stateless
         # (its writers are independent objects). Nothing to release.

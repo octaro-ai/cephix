@@ -151,7 +151,7 @@ class CredentialProvider(BusComponent, CredentialProviderPort):
             )
         await self.announce_lifecycle(bus, "ready")
 
-    async def stop(self) -> None:
+    async def _stop(self) -> None:
         """Detach the bus. Stores stay loaded; audits go silent."""
         if self._bus is not None:
             for index, store in enumerate(self._stores):
