@@ -172,6 +172,7 @@ dependencies = [
     { name = "croniter" },
     { name = "llmprice-kit" },
     { name = "mcs-driver-core" },
+    { name = "mcs-driver-filesystem" },
     { name = "mcs-driver-mailbox" },
     { name = "openai" },
     { name = "python-dotenv" },
@@ -192,6 +193,7 @@ requires-dist = [
     { name = "croniter", specifier = ">=2.0" },
     { name = "llmprice-kit", specifier = ">=2026.4" },
     { name = "mcs-driver-core", editable = "../../modelcontextstandard/python-sdk/packages/core" },
+    { name = "mcs-driver-filesystem", editable = "../../modelcontextstandard/python-sdk/packages/drivers/mcs-driver-filesystem" },
     { name = "mcs-driver-mailbox", editable = "packages/mcs-driver-mailbox" },
     { name = "openai", specifier = ">=1.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
@@ -526,6 +528,17 @@ requires-dist = [
     { name = "twine", marker = "extra == 'dev'", specifier = ">=5.1" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "mcs-driver-filesystem"
+version = "0.2.2"
+source = { editable = "../../modelcontextstandard/python-sdk/packages/drivers/mcs-driver-filesystem" }
+dependencies = [
+    { name = "mcs-driver-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "mcs-driver-core", editable = "../../modelcontextstandard/python-sdk/packages/core" }]
 
 [[package]]
 name = "mcs-driver-mailbox"

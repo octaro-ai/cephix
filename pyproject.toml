@@ -14,6 +14,7 @@ dependencies = [
     "croniter>=2.0",
     "mcs-driver-core",
     "mcs-driver-mailbox",
+    "mcs-driver-filesystem",
 ]
 
 [project.optional-dependencies]
@@ -28,9 +29,12 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 members = ["packages/*"]
 
 [tool.uv.sources]
-# Sibling MCS python-sdk -- editable path dependency until the SDK
-# hits a stable PyPI version we can pin.
+# Sibling MCS python-sdk -- editable path dependencies until the SDK
+# hits stable PyPI versions we can pin. Same shape for every upstream
+# MCS package we consume: the import path (`mcs.driver.<capability>`,
+# `mcs.adapter.<protocol>`) is identical to the eventual PyPI install.
 mcs-driver-core = { path = "../../modelcontextstandard/python-sdk/packages/core", editable = true }
+mcs-driver-filesystem = { path = "../../modelcontextstandard/python-sdk/packages/drivers/mcs-driver-filesystem", editable = true }
 # Cephix-local MCS tool drivers resolved through the uv workspace.
 # Swapping any of these for a PyPI release later means dropping the
 # entry here; the import path (`mcs.driver.<capability>`) stays the

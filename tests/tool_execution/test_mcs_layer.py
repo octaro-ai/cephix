@@ -15,6 +15,7 @@ Two angles:
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -34,6 +35,8 @@ from src.bus.messages import ComponentRequest, ComponentResponse, RobotEvent
 from src.components import ComponentCategory
 from mcs.driver.mailbox import MailboxToolDriver
 
+from src.persistence.filesystem.connection import FilesystemConnection
+from src.persistence.filesystem.local_adapter import LocalFSAdapter
 from src.tool_execution.mcs_layer import MCSToolExecutionLayer
 from src.tool_execution.ports import ToolDescriptor
 
@@ -245,3 +248,100 @@ def test_default_driver_list_includes_mailbox_tooldriver() -> None:
     """The default constructor wires exactly the MailboxToolDriver."""
     layer = MCSToolExecutionLayer()
     assert any(isinstance(d, MailboxToolDriver) for d in layer._drivers)
+
+
+# ---- capability surfacing (provides_commands) -------------------------------
+
+
+def test_component_info_emits_one_command_per_tool() -> None:
+    layer = MCSToolExecutionLayer(tool_drivers=[_FakeDriver("fake.ping")])
+    info = layer.component_info()
+    commands = info.metadata["provides_commands"]
+    assert len(commands) == 1
+    cmd = commands[0]
+    assert cmd["action"] == "fake.ping"
+    assert cmd["owner_component"] == "tool-execution"
+    assert cmd["owner_instance_id"] == layer.instance_id
+    assert cmd["risk_class"] == "read_only"
+    assert "echo" in cmd["args_schema"]
+
+
+def test_component_info_without_tools_omits_provides_commands() -> None:
+    layer = MCSToolExecutionLayer(tool_drivers=[])
+    info = layer.component_info()
+    assert "provides_commands" not in info.metadata
+
+
+def test_risk_class_marks_write_verbs_as_low_risk_mutation() -> None:
+    """Built-in heuristic: any leaf verb prefixed write_/set_/delete_
+    /remove_/update_/create_ counts as a low-risk mutation."""
+
+    class _MutDriver(_FakeDriver):
+        def list_tools(self) -> list[Tool]:
+            return [
+                Tool(name="write_file", title="w", description="d",
+                     parameters=[ToolParameter(name="p", description="p")]),
+                Tool(name="read_file", title="r", description="d",
+                     parameters=[ToolParameter(name="p", description="p")]),
+            ]
+
+    layer = MCSToolExecutionLayer(tool_drivers=[_MutDriver()])
+    by_action = {
+        c["action"]: c["risk_class"]
+        for c in layer.component_info().metadata["provides_commands"]
+    }
+    assert by_action == {
+        "write_file": "low_risk_mutation",
+        "read_file": "read_only",
+    }
+
+
+# ---- filesystem_connection wiring -------------------------------------------
+
+
+def _connection(root: Path) -> FilesystemConnection:
+    return FilesystemConnection(adapter=LocalFSAdapter(), root=root)
+
+
+def test_filesystem_connection_adds_filesystem_driver(tmp_path: Path) -> None:
+    layer = MCSToolExecutionLayer(filesystem_connection=_connection(tmp_path))
+    names = sorted(t.name for t in layer.list_tools())
+    assert {"list_directory", "read_file", "write_file"}.issubset(set(names))
+    # Mailbox driver still there too (default + filesystem stack together).
+    assert "mailbox.fetch_unread" in names
+
+
+async def test_filesystem_connection_end_to_end_write_then_read(tmp_path: Path) -> None:
+    """Full bus round trip: ``write_file`` lands a file under the
+    connection root, ``read_file`` returns its content."""
+    bus = AsyncioBus()
+    await bus.start()
+    layer = MCSToolExecutionLayer(filesystem_connection=_connection(tmp_path))
+    await layer.start(bus)
+    try:
+        write_req = ComponentRequest(
+            topic="tool.invoke", principal="test", source="test",
+            run_id="w-1", correlation_id="w-corr-1",
+            action="write_file",
+            payload={"path": "workspace/hello.txt", "content": "hi"},
+        )
+        write_resp = await bus.request(write_req, timeout=2.0)
+        assert write_resp.status == "ok"
+        assert (tmp_path / "workspace" / "hello.txt").read_text() == "hi"
+
+        read_req = ComponentRequest(
+            topic="tool.invoke", principal="test", source="test",
+            run_id="r-1", correlation_id="r-corr-1",
+            action="read_file",
+            payload={"path": "workspace/hello.txt"},
+        )
+        read_resp = await bus.request(read_req, timeout=2.0)
+        assert read_resp.status == "ok"
+        # The MCS filesystem driver returns the body as a JSON string; the
+        # layer wraps non-dict scalars as ``{"result": <value>}``.
+        import json as _json
+        decoded = _json.loads(read_resp.payload["result"])
+        assert decoded["content"] == "hi"
+    finally:
+        await layer.stop()
+        await bus.stop()

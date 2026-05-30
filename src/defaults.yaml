@@ -105,6 +105,12 @@ defaults:
         - {name: firmware-store}
         - {name: session-store}
         - {name: config-store}
+      # Bus-attached MCS tool execution layer. Hosts ToolDrivers and
+      # routes ``tool.invoke`` requests. The default persistence
+      # FilesystemConnection is auto-injected so the upstream
+      # ``mcs-driver-filesystem`` driver lights up automatically.
+      bus_provider:
+        - {name: tool-execution}
       kernel:
         name: chat
         actor: {name: llm.openai}

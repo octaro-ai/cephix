@@ -860,6 +860,18 @@ def _build_channels(
     return out
 
 
+_CONNECTION_AUTO_DI: dict[str, tuple[str, bool]] = {
+    # name -> (constructor kwarg, required)
+    "session-store": ("connection", True),
+    "firmware-store": ("connection", True),
+    "config-store": ("connection", True),
+    # tool-execution layer takes the default persistence connection
+    # to back its MCS filesystem adapter; without a persistence stack
+    # the layer simply boots without the filesystem tools.
+    "tool-execution": ("filesystem_connection", False),
+}
+
+
 def _build_components_list(
     spec: Any,
     *,
@@ -877,19 +889,18 @@ def _build_components_list(
     category matches the section so a misconfigured channel can't
     sneak into the utility list and vice versa.
 
-    Convention-DI:
+    Convention-DI for components that take a
+    :class:`FilesystemConnection` is driven by
+    :data:`_CONNECTION_AUTO_DI` (name -> (kwarg, required)). The
+    persistence-stack connection is auto-injected when the spec
+    leaves the kwarg blank. ``required=True`` (stores) makes a
+    missing persistence stack a build error; ``required=False``
+    (the tool-execution layer) leaves the kwarg unset so the
+    constructor's optional path is taken.
 
-    - ``firmware-store`` -> ``firmware_dir`` (workspace-derived),
-      plus a copy-if-missing seed of the packaged template files
-      so a fresh robot has something to read on the first boot.
-    - ``session-store`` -> ``connection`` (a
-      :class:`FilesystemConnection` from the persistence stack).
-      The store routes all its IO through that connection so it
-      shares the adapter chain with telemetry and audit.
-    - ``config-store`` -> ``connection`` (a
-      :class:`FilesystemConnection` from the persistence stack).
-      Same auto-injection as the session store; reads user-editable
-      YAML configs from a directory under the connection root.
+    Special case: ``firmware-store`` also gets its starter
+    templates seeded into the resolved directory on first build
+    (copy-if-missing).
     """
     if spec is None:
         return []
@@ -906,23 +917,24 @@ def _build_components_list(
         item = dict(item)
         extras: dict[str, Any] = {}
         name = item.get("name")
-        if isinstance(name, str) and name in {
-            "session-store", "firmware-store", "config-store"
-        }:
-            if "connection" not in item:
+        if isinstance(name, str) and name in _CONNECTION_AUTO_DI:
+            kwarg, required = _CONNECTION_AUTO_DI[name]
+            if kwarg in item:
+                connection = item[kwarg]
+            else:
                 connection = _resolve_persistence_connection(
                     name, item, connections
                 )
                 if connection is None:
-                    raise ConfigError(
-                        f"{name} needs a FilesystemConnection but no "
-                        "persistence stack is configured; declare a "
-                        "persistence entry (e.g. 'filesystem-events') "
-                        "or pass an explicit connection: <id>."
-                    )
-                extras["connection"] = connection
-            else:
-                connection = item["connection"]
+                    if required:
+                        raise ConfigError(
+                            f"{name} needs a FilesystemConnection but no "
+                            "persistence stack is configured; declare a "
+                            "persistence entry (e.g. 'filesystem-events') "
+                            "or pass an explicit connection: <id>."
+                        )
+                else:
+                    extras[kwarg] = connection
             # ``persistence:`` is a routing hint for the builder,
             # not a kwarg the store understands -- drop it before
             # the spec walks into ``build()``.
@@ -932,7 +944,7 @@ def _build_components_list(
             # missing). Anchor the seed at the connection root + the
             # store's ``directory`` field so the layout matches what
             # the store will read at startup.
-            if name == "firmware-store":
+            if name == "firmware-store" and connection is not None:
                 directory = str(item.get("directory", "firmware"))
                 seed_dir = Path(connection.root) / directory if directory else Path(connection.root)
                 _seed_firmware(seed_dir)
