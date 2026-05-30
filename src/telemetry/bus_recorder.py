@@ -22,7 +22,7 @@ from typing import Any
 
 from src.bus.messages import LIFECYCLE_TOPIC, RobotEvent, RobotLifecycle
 from src.bus.ports import BusPort, Subscription
-from src.components import BusComponent, ComponentCategory
+from src.components import BusComponent, ComponentCategory, RobotComponent
 from src.persistence import EventStreamProviderPort
 
 logger = logging.getLogger(__name__)
@@ -101,6 +101,18 @@ class BusRecorder(BusComponent):
                     "BusRecorder: failed to write retained boot anchor"
                 )
         self._subscription = bus.subscribe_all(self._record)
+        # Mount and lifecycle announcement go out AFTER subscribe_all
+        # so the recorder catches its own events in the stream. (If we
+        # mounted before subscribing, the recorder would miss its own
+        # ``mounted`` event because live publishes only reach the
+        # current ``_all_subscriptions``.)
+        if isinstance(self._provider, RobotComponent):
+            await self.publish_mount(
+                bus,
+                slot="provider",
+                mounted=self._provider,
+                extra_metadata={"channel": self._channel},
+            )
         await self.announce_lifecycle(bus, "ready")
 
     async def drain(self) -> None:
@@ -114,6 +126,13 @@ class BusRecorder(BusComponent):
 
     async def stop(self) -> None:
         if self._bus is not None:
+            if isinstance(self._provider, RobotComponent):
+                await self.publish_mount(
+                    self._bus,
+                    slot="provider",
+                    mounted=None,
+                    phase="unmounted",
+                )
             await self.announce_lifecycle(self._bus, "shutdown")
         if self._subscription is not None:
             try:

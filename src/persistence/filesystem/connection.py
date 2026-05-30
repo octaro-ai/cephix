@@ -184,21 +184,24 @@ class FilesystemConnection(RobotComponent):
     # ---- RobotComponent lifecycle ------------------------------------------
 
     async def start(self) -> None:
-        """Log the adapter -> connection wiring, then ensure root exists."""
-        # Symmetric to ``BaseKernel.start`` ("Actor (id) injected into
-        # Kernel (id)"): surface the wiring fact at the lifecycle
-        # boundary that owns it. The robot logs ``started`` right
-        # after this returns, so the log reads:
-        #
-        #   === Boot Level 1 (CONNECTION) ===
-        #   LocalFSAdapter (xxx) injected into FilesystemConnection (yyy)
-        #   FilesystemConnection (yyy) started
+        """Log the adapter -> connection wiring, then ensure root exists.
+
+        Includes the resolved ``root`` in the log line so two
+        connections in the same robot (e.g. a workspace-rooted one
+        plus a ``~/.cephix``-rooted one) are distinguishable at a
+        glance:
+
+            === Boot Level 1 (CONNECTION) ===
+            LocalFSAdapter (xxx) injected into FilesystemConnection [root='<path>'] (yyy)
+            FilesystemConnection (yyy) started
+        """
         adapter_id = getattr(self._adapter, "instance_id", "")
         logger.info(
-            "%s (%s) injected into %s (%s)",
+            "%s (%s) injected into %s [root=%r] (%s)",
             type(self._adapter).__name__,
             adapter_id,
             type(self).__name__,
+            str(self._root),
             self.instance_id,
         )
         await self._adapter.mkdir(PurePath(self._root), parents=True)

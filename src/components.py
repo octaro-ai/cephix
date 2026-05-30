@@ -36,15 +36,17 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from src.bus.messages import (
     ComponentInfo,
     ComponentLifecycle,
     ErrorInfo,
     LifecyclePhase,
+    MountEvent,
     ResultStatus,
     component_lifecycle_topic,
+    component_mount_topic,
 )
 
 if TYPE_CHECKING:
@@ -535,5 +537,79 @@ class BusComponent(RobotComponent):
             logger.exception(
                 "%s: failed to announce lifecycle (phase=%s)",
                 type(self).__name__,
+                phase,
+            )
+
+    async def publish_mount(
+        self,
+        bus: "BusPort",
+        *,
+        slot: str,
+        mounted: "RobotComponent | None",
+        phase: Literal["mounted", "unmounted"] = "mounted",
+        extra_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Emit a :class:`MountEvent` for an internal slot of this component.
+
+        The mount-event pattern is for **composite components** that
+        hold references to other components (a kernel mounting an
+        actor, a recorder mounting a provider, a credential broker
+        mounting its store chain). It surfaces the wiring on the bus
+        so subscribers see what is currently plugged in -- distinct
+        from this component's own ``ComponentLifecycle`` which only
+        reports the host's own state.
+
+        Pass ``phase="mounted"`` on attach with the slot's occupant in
+        ``mounted``. Pass ``phase="unmounted"`` on detach with
+        ``mounted=None``. The owner is derived from
+        ``component_name`` (``"<component_name>"``); the topic from
+        :func:`component_mount_topic`.
+
+        Best-effort: a publish failure is logged but never aborts the
+        lifecycle. Mount events are observation traffic, not part of
+        the contract that makes the host functional.
+        """
+        if mounted is None and phase == "mounted":
+            raise ValueError(
+                "publish_mount with phase='mounted' requires a 'mounted' "
+                "component"
+            )
+        owner_id = self.instance_id
+        owner_label = self.component_name
+        principal = f"component:{owner_label}"
+        if mounted is not None:
+            metadata: dict[str, Any] = {"owner_instance_id": owner_id}
+            mounted_id = getattr(mounted, "instance_id", "")
+            if mounted_id:
+                metadata["instance_id"] = mounted_id
+            if extra_metadata:
+                metadata.update(extra_metadata)
+            mounted_info: ComponentInfo | None = ComponentInfo(
+                category=mounted.component_category.value,
+                name=mounted.component_name,
+                description=getattr(mounted, "component_description", ""),
+                metadata=metadata,
+            )
+        else:
+            mounted_info = None
+        try:
+            await bus.publish(
+                MountEvent(
+                    topic=component_mount_topic(owner_label),
+                    principal=principal,
+                    source=owner_label,
+                    source_id=owner_id,
+                    run_id="",
+                    phase=phase,
+                    owner=owner_label,
+                    slot=slot,
+                    mounted=mounted_info,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "%s: failed to emit mount event (slot=%s, phase=%s)",
+                type(self).__name__,
+                slot,
                 phase,
             )

@@ -99,9 +99,14 @@ def _observer_path(observer: BusRecorder | AuditNoteSink) -> Path:
 
 
 def _bus_of(robot: Robot) -> AsyncioBus:
-    bus = robot.components[0]
-    assert isinstance(bus, AsyncioBus)
-    return bus
+    # Components are sorted by BOOT_PRIORITY; the bus is at
+    # BUS=4, but UTILITY-level stores (e.g. credential stores)
+    # boot before it. Find the bus by type instead of relying on
+    # position.
+    for c in robot.components:
+        if isinstance(c, AsyncioBus):
+            return c
+    raise AssertionError("no AsyncioBus in robot.components")
 
 
 def _kernel_of(robot: Robot) -> BaseKernel:

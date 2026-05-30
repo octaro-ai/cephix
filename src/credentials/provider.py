@@ -62,7 +62,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from src.bus.ports import BusPort
-from src.components import BusComponent, ComponentCategory
+from src.components import BusComponent, ComponentCategory, RobotComponent
 from src.credentials.exceptions import CredentialNotFound
 from src.credentials.ports import CredentialProviderPort, CredentialStorePort
 
@@ -118,13 +118,51 @@ class CredentialProvider(BusComponent, CredentialProviderPort):
     # ---- Lifecycle --------------------------------------------------------
 
     async def start(self, bus: BusPort) -> None:  # type: ignore[override]
-        """Attach the bus so later resolves can emit audit notes."""
+        """Attach the bus so later resolves can emit audit notes.
+
+        Surfaces the store chain twice over for observers:
+
+        - One ``injected into`` log line per store, listing the
+          resolution order, so the boot log mirrors the recorder /
+          sink pattern (``X injected into Y``) and answers "which
+          stores does this provider walk?" at a glance.
+        - One :class:`MountEvent` per store on the bus, so runtime
+          observers can react to the wiring without parsing logs.
+        """
         self._bus = bus
+        for index, store in enumerate(self._stores):
+            store_id = getattr(store, "instance_id", "")
+            logger.info(
+                "%s (%s) injected into %s (%s) at resolution_order %d",
+                type(store).__name__,
+                store_id,
+                type(self).__name__,
+                self.instance_id,
+                index,
+            )
+        for index, store in enumerate(self._stores):
+            if not isinstance(store, RobotComponent):
+                continue
+            await self.publish_mount(
+                bus,
+                slot=f"store[{index}]",
+                mounted=store,
+                extra_metadata={"resolution_order": index, "store_name": store.name},
+            )
         await self.announce_lifecycle(bus, "ready")
 
     async def stop(self) -> None:
         """Detach the bus. Stores stay loaded; audits go silent."""
         if self._bus is not None:
+            for index, store in enumerate(self._stores):
+                if not isinstance(store, RobotComponent):
+                    continue
+                await self.publish_mount(
+                    self._bus,
+                    slot=f"store[{index}]",
+                    mounted=None,
+                    phase="unmounted",
+                )
             await self.announce_lifecycle(self._bus, "shutdown")
         self._bus = None
 

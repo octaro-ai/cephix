@@ -124,6 +124,11 @@ class ControlPlane:
         )
 
     async def stop(self) -> None:
+        # Symmetric to the ``listening on ...`` line in start: a single
+        # "closing" log so the operator sees the transition rather than
+        # the socket disappearing without a marker.
+        if self._site is not None or self._runner is not None:
+            logger.info("ControlPlane closing %s", self.endpoint)
         for ws in list(self._sessions):
             try:
                 await ws.close()

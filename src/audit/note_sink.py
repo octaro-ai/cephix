@@ -9,7 +9,7 @@ from typing import Any
 
 from src.bus.messages import AUDIT_TOPIC, RobotAuditNote, RobotEvent
 from src.bus.ports import BusPort, Subscription
-from src.components import BusComponent, ComponentCategory
+from src.components import BusComponent, ComponentCategory, RobotComponent
 from src.persistence import EventStreamProviderPort
 
 logger = logging.getLogger(__name__)
@@ -77,6 +77,13 @@ class AuditNoteSink(BusComponent):
             self.instance_id,
             self._channel,
         )
+        if isinstance(self._provider, RobotComponent):
+            await self.publish_mount(
+                bus,
+                slot="provider",
+                mounted=self._provider,
+                extra_metadata={"channel": self._channel},
+            )
         self._subscription = bus.subscribe(AUDIT_TOPIC, self._record)
         await self.announce_lifecycle(bus, "ready")
 
@@ -91,6 +98,13 @@ class AuditNoteSink(BusComponent):
 
     async def stop(self) -> None:
         if self._bus is not None:
+            if isinstance(self._provider, RobotComponent):
+                await self.publish_mount(
+                    self._bus,
+                    slot="provider",
+                    mounted=None,
+                    phase="unmounted",
+                )
             await self.announce_lifecycle(self._bus, "shutdown")
         if self._subscription is not None:
             try:

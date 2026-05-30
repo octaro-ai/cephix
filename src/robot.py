@@ -460,9 +460,20 @@ class Robot:
         grace = grace_override if grace_override is not None else self._shutdown_grace
         announce = message or "Robot shutting down"
 
+        # Mirror the boot-level marker style on the shutdown side: a
+        # single visual fence between "something triggered a stop"
+        # (signal received, control-plane request, direct stop call)
+        # and the first teardown action, plus a per-phase label so
+        # the log mirrors phase 1/2/3 just like the boot side does
+        # boot levels 0..11.
+        logger.info("=== Shutdown initiated ===")
+
         try:
+            logger.info("=== Phase 3 down (userspace) ===")
             await self._phase3_down(grace, announce)
+            logger.info("=== Phase 2 down (skeleton) ===")
             await self._phase2_down(grace)
+            logger.info("=== Phase 1 down (control plane) ===")
             await self._phase1_down()
             logger.info("%s offline", self._label)
         finally:

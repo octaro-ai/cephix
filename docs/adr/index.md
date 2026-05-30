@@ -29,3 +29,4 @@ What becomes easier? What becomes harder? What do we accept as trade-off?
 - [0001 — Use MkDocs Material for documentation](0001-use-mkdocs-material.md)
 - [0002 — Diagrams: Mermaid + C4 via Structurizr](0002-diagrams-mermaid-and-c4.md)
 - [0003 — Wire-format codec is not abstracted (for now)](0003-no-codec-abstraction-yet.md)
+- [0004 — Credential layers: build-time, preboot, runtime](0004-credential-layers.md)

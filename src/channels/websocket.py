@@ -348,6 +348,16 @@ class WebsocketChannel(ChannelPort):
         if self._bus is not None:
             await self.announce_lifecycle(self._bus, "shutdown")
         self._shutting_down = True
+        # Symmetric to the ``listening on ws://...`` line in start:
+        # one ``closing`` marker so the operator sees the transition
+        # before the sockets are torn down.
+        if self._actual_port is not None:
+            logger.info(
+                "WebsocketChannel closing ws://%s:%s%s",
+                self._host,
+                self._actual_port,
+                self._path,
+            )
         for ws in list(self._sessions.values()):
             try:
                 await ws.close()

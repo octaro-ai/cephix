@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,7 @@ from src.credentials import (
     ProcessEnvCredentialStore,
     resolve_secrets,
 )
+from src.credentials.exceptions import CredentialNotFound
 from src.credentials.ports import CredentialStorePort
 from src.kernel.ports import KernelPort
 from src.persistence import (
@@ -171,20 +173,50 @@ def build_robot_from_config(
             "      name: echo"
         )
 
-    # Phase 2: credentials. Constructed before the substitution pass so
-    # ${KEY} references in the rest of the config can resolve.
+    # Phase 2: builder-side credentials. The same ``credentials:``
+    # spec is materialised twice with intentionally separate
+    # lifetimes:
+    #
+    # - The *builder* set lives only here, in this function, as
+    #   plain value objects. It feeds the ${KEY} substitution pass
+    #   below and is then garbage-collected. No lifecycle, no audit.
+    # - The *robot* set is built further down, ends up in
+    #   ``robot.components`` as :class:`RobotComponent` instances at
+    #   boot level 3 (UTILITY), and is injected into the runtime
+    #   :class:`CredentialProvider`. That set is what answers
+    #   ``resolve()`` from bus components during operation.
+    #
+    # Sharing one instance across both phases would conflate two
+    # lifetimes (build-time substitution vs robot runtime) into one
+    # object, which is exactly the mix we want to dissolve.
     credentials_spec = cfg.pop("credentials", None)
-    credentials = _build_credential_provider(
-        credentials_spec,
-        workspace=workspace,
+    builder_credentials = _build_credential_stores(
+        credentials_spec, workspace=workspace
     )
 
     # Phase 3: substitution. Walks every remaining section and
-    # replaces ``${KEY}`` references with their resolved values.
+    # replaces ``${KEY}`` references with their resolved values
+    # against the builder-side store chain.
     cfg = resolve_secrets(
         cfg,
-        lambda key: credentials.resolve_sync(key, requester="builder"),
+        lambda key: _resolve_via_stores(builder_credentials, key),
     )
+
+    # The builder-side stores are no longer needed; the substitution
+    # pass is complete. Robot-side stores are built fresh below so
+    # the runtime resolve path is independent from the build path.
+    del builder_credentials
+
+    # Phase 4: robot-side credentials. Same ``credentials:`` spec
+    # materialised again -- but this time as :class:`RobotComponent`
+    # instances at UTILITY level. They appear in the boot log,
+    # ``start()`` logs the key count, and ``stop()`` clears the cache.
+    # The :class:`CredentialProvider` is built next and holds them as
+    # the runtime resolve chain.
+    robot_credential_stores = _build_credential_stores(
+        credentials_spec, workspace=workspace
+    )
+    credentials = CredentialProvider(stores=robot_credential_stores)
 
     # Phase 4: assemble components.
     bus = _build_bus(cfg.get("bus"), library=library)
@@ -283,8 +315,13 @@ def build_robot_from_config(
         env = load_robot_env(workspace)
         control_plane_token = env.get(CONTROL_PLANE_TOKEN_ENV) or None
 
+    # Robot-side credential stores live in the components list so
+    # their lifecycle (UTILITY level, boot 3) is visible in the boot
+    # log and they get attached to the bus exactly like every other
+    # utility. The provider follows at BUS_UTILITY level.
     components: list[RobotComponent] = [
         bus,
+        *robot_credential_stores,
         credentials,
         *persistence_components,
         *actors,
@@ -953,54 +990,83 @@ def _seed_firmware(workspace_firmware_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_credential_provider(
+def _build_credential_stores(
     spec: Any,
     *,
     workspace: str | Path | None,
-) -> CredentialProvider:
-    """Build the :class:`CredentialProvider` and its store chain.
+) -> list[CredentialStorePort]:
+    """Build the credential store chain from a ``credentials:`` section.
 
     Two cases:
 
     - **No ``credentials:`` section** -- the default chain is
       ``robot-workspace/.env`` (if a workspace is provided),
-      ``~/.cephix/.env`` (if it exists) and ``process-env``. This
-      preserves the pre-credentials behaviour of cephix where a
-      bot-local ``.env`` was implicitly read.
+      ``~/.cephix/.env`` (if it exists) and ``process-env``.
     - **An explicit ``credentials:`` section** -- the user lists
       stores in resolution order. Each entry is a mapping with at
       least ``type:``; supported types today are ``env`` (with a
       ``path:``) and ``process-env``.
 
-    The provider is registered as a :class:`RobotComponent` and will
-    be started by the robot during the ``BUS_UTILITY`` boot phase.
-    The builder uses it synchronously *now*, before the robot
-    lifecycle even runs, so substitution can fail loud and early.
+    Returns a *fresh* list of stores. The builder calls this twice
+    intentionally:
+
+    - Once for its own ${KEY}-substitution pass (ephemeral plain
+      use; the instances never see ``start()``).
+    - Once for the robot, where the stores live in the components
+      list, boot at UTILITY level, and get injected into the
+      :class:`CredentialProvider`.
+
+    The two sets are independent instances of the same classes
+    pointing at the same .env paths -- the builder discards its
+    set after substitution, the robot owns its set for the run's
+    lifetime.
     """
     stores: list[CredentialStorePort] = []
     if spec is None:
         stores.extend(_default_credential_stores(workspace))
-    else:
-        if not isinstance(spec, dict):
-            raise ConfigError(
-                "robot.yaml#credentials must be a mapping with a "
-                "'stores' list"
+        return stores
+    if not isinstance(spec, dict):
+        raise ConfigError(
+            "robot.yaml#credentials must be a mapping with a "
+            "'stores' list"
+        )
+    store_specs = spec.get("stores")
+    if store_specs is None:
+        stores.extend(_default_credential_stores(workspace))
+        return stores
+    if not isinstance(store_specs, list):
+        raise ConfigError(
+            "robot.yaml#credentials.stores must be a list"
+        )
+    for index, store_spec in enumerate(store_specs):
+        stores.append(
+            _build_credential_store(
+                store_spec, index=index, workspace=workspace
             )
-        store_specs = spec.get("stores")
-        if store_specs is None:
-            stores.extend(_default_credential_stores(workspace))
-        else:
-            if not isinstance(store_specs, list):
-                raise ConfigError(
-                    "robot.yaml#credentials.stores must be a list"
-                )
-            for index, store_spec in enumerate(store_specs):
-                stores.append(
-                    _build_credential_store(
-                        store_spec, index=index, workspace=workspace
-                    )
-                )
-    return CredentialProvider(stores=stores)
+        )
+    return stores
+
+
+def _resolve_via_stores(
+    stores: Sequence[CredentialStorePort], key: str
+) -> str:
+    """Walk a store chain and return the first hit; raise otherwise.
+
+    Used by the builder's substitution pass against a *plain*
+    store chain. We don't go through :class:`CredentialProvider`
+    here because the provider is for runtime audit emission --
+    builder substitution is pre-lifecycle and has no bus to audit
+    against.
+    """
+    for store in stores:
+        value = store.lookup(key)
+        if value is not None:
+            return value
+    raise CredentialNotFound(
+        key,
+        stores_tried=tuple(s.name for s in stores),
+        requester="builder",
+    )
 
 
 def _default_credential_stores(
