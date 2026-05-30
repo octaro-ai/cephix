@@ -253,25 +253,51 @@ class BaseKernel(KernelPort):
         if bus is None:
             return
         owner = f"kernel.{self.component_name}"
-        actor_name = getattr(self._actor, "component_name", type(self._actor).__name__)
-        actor_metadata: dict[str, Any] = {
-            "kernel_instance_id": self.instance_id,
-        }
-        # ``ActorPort`` extends ``RobotComponent``, so a real actor
-        # always exposes ``instance_id``. ``getattr`` keeps the
-        # publish-side defensive against test doubles that fake an
-        # ``ActorPort`` interface without the full
-        # ``RobotComponent`` contract.
-        actor_instance_id = getattr(self._actor, "instance_id", "")
-        if actor_instance_id:
-            actor_metadata["instance_id"] = actor_instance_id
         mounted_info: ComponentInfo | None
         if phase == "mounted":
+            # Pull the snapshot straight from the actor. An actor
+            # has no bus presence of its own (off-bus
+            # :class:`RobotComponent`), so the kernel-emitted
+            # ``MountEvent`` is the only place actor metadata
+            # reaches subscribers. ``component_info`` lets each
+            # actor expose its own capabilities (model_id,
+            # provider, supports_* flags, ...) without the kernel
+            # having to know any actor-specific field names.
+            #
+            # ``getattr`` keeps this defensive against test doubles
+            # that fake :class:`ActorPort` without the full
+            # :class:`RobotComponent` contract -- they fall back to
+            # the minimal "category + name" snapshot the kernel
+            # used to build by hand.
+            info_getter = getattr(self._actor, "component_info", None)
+            if callable(info_getter):
+                actor_info = info_getter()
+            else:
+                actor_name_fallback = getattr(
+                    self._actor, "component_name", type(self._actor).__name__
+                )
+                actor_info = ComponentInfo(
+                    category=ComponentCategory.ACTOR.value,
+                    name=actor_name_fallback,
+                    description=getattr(
+                        self._actor, "component_description", ""
+                    ),
+                    metadata={},
+                )
+            # Stitch the kernel-side instance identity into the
+            # actor's metadata so a subscriber can correlate this
+            # mount with later kernel events without keeping a side
+            # index.
+            metadata = dict(actor_info.metadata)
+            metadata.setdefault("kernel_instance_id", self.instance_id)
+            actor_instance_id = getattr(self._actor, "instance_id", "")
+            if actor_instance_id:
+                metadata.setdefault("instance_id", actor_instance_id)
             mounted_info = ComponentInfo(
-                category=ComponentCategory.ACTOR.value,
-                name=actor_name,
-                description=getattr(self._actor, "component_description", ""),
-                metadata=actor_metadata,
+                category=actor_info.category,
+                name=actor_info.name,
+                description=actor_info.description,
+                metadata=metadata,
             )
         else:
             mounted_info = None

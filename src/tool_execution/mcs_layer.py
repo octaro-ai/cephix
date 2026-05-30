@@ -77,6 +77,8 @@ from mcs.driver.filesystem import FilesystemDriver
 from mcs.driver.filesystem.tooldriver import FilesystemToolDriver
 
 from src.bus.messages import (
+    CommandRequest,
+    CommandResponse,
     ComponentInfo,
     ComponentRequest,
     ComponentResponse,
@@ -84,6 +86,8 @@ from src.bus.messages import (
     RobotEvent,
     _new_event_id,
     _now_iso,
+    command_request_topic,
+    command_response_topic,
 )
 from src.bus.ports import BusPort, Subscription
 from src.components import BusComponent, ComponentCategory
@@ -213,19 +217,31 @@ class MCSToolExecutionLayer(BusComponent, ToolExecutionLayerPort):
         self._rebuild_index()
         self._bus: BusPort | None = None
         self._invoke_subscription: Subscription | None = None
+        # Per-tool ``command.request.<name>`` subscriptions, so a UI
+        # (the CLI client, a future web panel) can fire a tool the
+        # same way it fires a chat command. Built lazily in
+        # :meth:`start` because subscription needs a live bus.
+        self._command_subscriptions: list[Subscription] = []
 
-    # ---- Capability surface (provides_commands) ----------------------------
+    # ---- Capability surface (provides_tools) -------------------------------
 
     def component_info(self) -> ComponentInfo:
-        """Surface registered MCS tools as ``provides_commands`` entries.
+        """Surface registered MCS tools under ``metadata.provides_tools``.
 
-        Overrides :meth:`BusComponent.component_info` to inject one
-        manifest dict per tool currently in :attr:`_tool_index`. The
-        shape matches what :class:`CommandSpec.manifest_entry`
-        produces for static commands, so the
-        :class:`CapabilityCollector` does not need to know whether a
-        capability came from a class-level ``provides_commands`` or
-        a dynamic tool catalogue.
+        Overrides :meth:`BusComponent.component_info` so the layer's
+        ``ComponentLifecycle`` snapshots carry one manifest entry per
+        registered Tool. The :class:`CapabilityCollector` reads them
+        into the :attr:`HarnessCapabilities.tools` slot (next to the
+        existing ``commands`` aggregate from class-level
+        ``provides_commands``), keeping LLM-callable tools separate
+        from UI slash-commands in the wire vocabulary.
+
+        UI-side slash aliases for tools (``/time`` for
+        ``current_time``, ``/calc`` for ``calculate``) live in the
+        CLI catalog -- the tool layer subscribes a
+        ``command.request.<tool_name>`` topic for each tool so any
+        UI that builds a request frame from the manifest reaches
+        the same execute path the LLM hits via ``tool.invoke``.
 
         Driver-supplied catalogues change at construction time
         (different driver mix per robot), so they cannot live on the
@@ -233,15 +249,15 @@ class MCSToolExecutionLayer(BusComponent, ToolExecutionLayerPort):
         computed per instance.
         """
         info = super().component_info()
-        commands = [
-            self._tool_to_command_entry(tool)
+        tools = [
+            self._tool_to_manifest_entry(tool)
             for _, tool in sorted(
                 self._tool_index.values(), key=lambda pair: pair[1].name
             )
         ]
-        if commands:
+        if tools:
             metadata = dict(info.metadata)
-            metadata["provides_commands"] = commands
+            metadata["provides_tools"] = tools
             return ComponentInfo(
                 category=info.category,
                 name=info.name,
@@ -250,7 +266,7 @@ class MCSToolExecutionLayer(BusComponent, ToolExecutionLayerPort):
             )
         return info
 
-    def _tool_to_command_entry(self, tool: Tool) -> dict[str, Any]:
+    def _tool_to_manifest_entry(self, tool: Tool) -> dict[str, Any]:
         """Translate an MCS :class:`Tool` to a capability manifest dict.
 
         Field map mirrors :meth:`CommandSpec.manifest_entry`:
@@ -315,9 +331,21 @@ class MCSToolExecutionLayer(BusComponent, ToolExecutionLayerPort):
         self._invoke_subscription = bus.subscribe(
             _TOOL_INVOKE_TOPIC, self._handle_invoke
         )
+        # Also expose each tool as a UI-callable command: a request
+        # frame on ``command.request.<tool_name>`` arrives via
+        # ``_handle_command_request`` and travels the same execute
+        # path the bus-internal ``tool.invoke`` flow uses. The CLI
+        # / UI sees the tool in the capability manifest's ``tools``
+        # slot and can build a request frame straight from it.
+        for name in sorted(self._tool_index):
+            sub = bus.subscribe(
+                command_request_topic(name), self._handle_command_request
+            )
+            self._command_subscriptions.append(sub)
         names = sorted(self._tool_index)
         logger.info(
-            "%s (%s) ready with %d driver(s), %d tool(s) on %s: %s",
+            "%s (%s) ready with %d driver(s), %d tool(s) on %s "
+            "(also on command.request.<name>): %s",
             type(self).__name__,
             self.instance_id,
             len(self._drivers),
@@ -335,6 +363,15 @@ class MCSToolExecutionLayer(BusComponent, ToolExecutionLayerPort):
                 await self._invoke_subscription.unsubscribe()
             finally:
                 self._invoke_subscription = None
+        for sub in self._command_subscriptions:
+            try:
+                await sub.unsubscribe()
+            except Exception:
+                logger.exception(
+                    "%s: failed to unsubscribe a command-request topic",
+                    type(self).__name__,
+                )
+        self._command_subscriptions = []
         self._bus = None
 
     # ---- Direct ToolExecutionLayerPort surface (off-bus) -------------------
@@ -455,6 +492,117 @@ class MCSToolExecutionLayer(BusComponent, ToolExecutionLayerPort):
                 correlation_id=request.correlation_id,
                 timestamp=_now_iso(),
                 status="error",
+                error=ErrorInfo(
+                    code=code,
+                    message=message,
+                    details=dict(details or {}),
+                ),
+            )
+        )
+
+    # ---- Command-request bridge (UI / CLI path) ----------------------------
+
+    async def _handle_command_request(self, event: RobotEvent) -> None:
+        """Subscriber for ``command.request.<tool_name>`` topics.
+
+        The CLI / UI builds a :class:`CommandRequest` straight from a
+        tool entry in the manifest. We accept it, route it through
+        the same ``_run`` path the bus-internal ``tool.invoke`` flow
+        uses, and reply with a :class:`CommandResponse` on the
+        matching ``command.response.<action>`` topic -- which is
+        exactly what the WebSocket channel forwards back to the CLI
+        as a ``command_response`` frame.
+        """
+        if not isinstance(event, CommandRequest):
+            return
+        if self._bus is None:
+            return
+
+        tool_name = event.action
+        arguments = dict(event.payload or {})
+
+        if tool_name not in self._tool_index:
+            await self._reply_command_error(
+                event,
+                code="tool.unknown",
+                message=f"unknown tool {tool_name!r}",
+                details={"registered": sorted(self._tool_index)},
+            )
+            return
+
+        try:
+            result = await self._run(tool_name, arguments)
+        except Exception as exc:
+            logger.exception(
+                "%s: command dispatch for tool %r raised",
+                type(self).__name__,
+                tool_name,
+            )
+            await self._reply_command_error(
+                event,
+                code="tool.dispatch_failed",
+                message=f"{type(exc).__name__}: {exc}",
+                details={"tool": tool_name},
+            )
+            return
+
+        if result.success:
+            payload: dict[str, Any] = (
+                dict(result.result) if isinstance(result.result, dict) else
+                {"result": result.result}
+            )
+            await self._reply_command_ok(event, payload=payload)
+        else:
+            await self._reply_command_error(
+                event,
+                code="tool.execution_failed",
+                message=result.error or "tool reported failure",
+                details={"tool": tool_name},
+            )
+
+    async def _reply_command_ok(
+        self, request: CommandRequest, *, payload: dict[str, Any]
+    ) -> None:
+        assert self._bus is not None
+        await self._bus.publish(
+            CommandResponse(
+                event_id=_new_event_id(),
+                topic=command_response_topic(request.action, request.target),
+                principal=request.principal,
+                source=self.component_name,
+                source_id=self.instance_id,
+                run_id=request.run_id,
+                correlation_id=request.correlation_id,
+                timestamp=_now_iso(),
+                status="ok",
+                action=request.action,
+                target=request.target,
+                payload=payload,
+            )
+        )
+
+    async def _reply_command_error(
+        self,
+        request: CommandRequest,
+        *,
+        code: str,
+        message: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        assert self._bus is not None
+        await self._bus.publish(
+            CommandResponse(
+                event_id=_new_event_id(),
+                topic=command_response_topic(request.action, request.target),
+                principal=request.principal,
+                source=self.component_name,
+                source_id=self.instance_id,
+                run_id=request.run_id,
+                correlation_id=request.correlation_id,
+                timestamp=_now_iso(),
+                status="error",
+                action=request.action,
+                target=request.target,
                 error=ErrorInfo(
                     code=code,
                     message=message,

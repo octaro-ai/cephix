@@ -253,26 +253,33 @@ def test_default_driver_list_includes_clock_and_calculator() -> None:
     assert any(isinstance(d, CalculatorToolDriver) for d in layer._drivers)
 
 
-# ---- capability surfacing (provides_commands) -------------------------------
+# ---- capability surfacing (provides_tools) ----------------------------------
 
 
-def test_component_info_emits_one_command_per_tool() -> None:
+def test_component_info_emits_one_tool_per_registered_tool() -> None:
+    """The layer surfaces tools under ``metadata.provides_tools`` so
+    the CapabilityCollector can route them into the dedicated
+    ``tools`` slot on :class:`HarnessCapabilities` -- not the
+    ``commands`` slot, which is reserved for UI slash-callable
+    operations."""
     layer = MCSToolExecutionLayer(tool_drivers=[_FakeDriver("fake.ping")])
     info = layer.component_info()
-    commands = info.metadata["provides_commands"]
-    assert len(commands) == 1
-    cmd = commands[0]
-    assert cmd["action"] == "fake.ping"
-    assert cmd["owner_component"] == "tool-execution"
-    assert cmd["owner_instance_id"] == layer.instance_id
-    assert cmd["risk_class"] == "read_only"
-    assert "echo" in cmd["args_schema"]
+    tools = info.metadata["provides_tools"]
+    assert len(tools) == 1
+    tool = tools[0]
+    assert tool["action"] == "fake.ping"
+    assert tool["owner_component"] == "tool-execution"
+    assert tool["owner_instance_id"] == layer.instance_id
+    assert tool["risk_class"] == "read_only"
+    assert "echo" in tool["args_schema"]
+    # The layer does not double-emit tools as commands.
+    assert "provides_commands" not in info.metadata
 
 
-def test_component_info_without_tools_omits_provides_commands() -> None:
+def test_component_info_without_tools_omits_provides_tools() -> None:
     layer = MCSToolExecutionLayer(tool_drivers=[])
     info = layer.component_info()
-    assert "provides_commands" not in info.metadata
+    assert "provides_tools" not in info.metadata
 
 
 def test_risk_class_marks_write_verbs_as_low_risk_mutation() -> None:
@@ -290,8 +297,8 @@ def test_risk_class_marks_write_verbs_as_low_risk_mutation() -> None:
 
     layer = MCSToolExecutionLayer(tool_drivers=[_MutDriver()])
     by_action = {
-        c["action"]: c["risk_class"]
-        for c in layer.component_info().metadata["provides_commands"]
+        t["action"]: t["risk_class"]
+        for t in layer.component_info().metadata["provides_tools"]
     }
     assert by_action == {
         "write_file": "low_risk_mutation",

@@ -39,7 +39,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.actor.types import ActorResponse
-from src.components import RobotComponent
+from src.components import ComponentCategory, RobotComponent
 
 
 class ActorPort(RobotComponent):
@@ -51,7 +51,17 @@ class ActorPort(RobotComponent):
     :class:`~src.actor.echo.EchoActor` use no-op implementations,
     while resource-holding actors (subprocess, HTTP client, ...)
     override :meth:`_stop` for real teardown.
+
+    Every actor is :attr:`ComponentCategory.ACTOR` by definition,
+    so the default lives here -- subclasses (Echo, LLM drivers,
+    test doubles) inherit it and never need to repeat it. The
+    kernel's :class:`MountEvent` carries the actor's
+    :meth:`component_info` snapshot, and that snapshot dereferences
+    :attr:`component_category` -- a missing class-level attribute
+    would crash the mount publish.
     """
+
+    component_category = ComponentCategory.ACTOR
 
     async def start(self) -> None:
         """Default: nothing to bring online. Override for resources."""

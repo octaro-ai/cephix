@@ -59,13 +59,16 @@ DEFAULT_URL = "ws://127.0.0.1:8765/ws"
 class ParsedInput:
     """Result of interpreting one line of user input.
 
-    ``kind`` discriminates the five cases:
+    ``kind`` discriminates the six cases:
 
     - ``"empty"``   -- blank line; the caller re-prompts.
     - ``"message"`` -- a normal chat turn; ``message`` carries the text.
     - ``"command"`` -- a slash command resolved to an ``action`` plus
       ``args``; ``shortcut`` is the typed alias (for messages).
     - ``"help"``    -- the local ``/help`` request.
+    - ``"exit"``    -- the local ``/exit`` / ``/quit`` request; the
+      input loop tears down the connection cleanly (Ctrl-D
+      equivalent in keystroke form).
     - ``"error"``   -- a malformed / unknown slash command; ``error``
       carries the user-facing reason.
     """
@@ -78,13 +81,28 @@ class ParsedInput:
     error: str = ""
 
 
-# Static catalog: typed alias -> (action, usage hint). Kept here so both
-# the parser and the ``/help`` renderer agree on the surface.
-_SLASH_CATALOG: tuple[tuple[str, str, str], ...] = (
-    ("/new", "chat.session.new", "start a new chat"),
-    ("/sessions", "chat.session.list", "list sessions"),
-    ("/open <id>", "chat.session.open", "open a session and load its history"),
-    ("/rename <id> <title>", "chat.session.rename", "set a session's title"),
+# Static catalog: typed alias -> (action, manifest slot, usage hint).
+# Kept here so the parser, the ``/help`` renderer, and the
+# capabilities-line renderer all agree on the surface.
+#
+# The ``slot`` field tells the gate which side of the manifest to
+# check before offering the alias:
+#
+# - ``"commands"`` -- the action must appear in
+#   ``HarnessCapabilities.commands`` (slash-callable UI ops the
+#   chat kernel announces).
+# - ``"tools"`` -- the action must appear in
+#   ``HarnessCapabilities.tools`` (MCS tools the tool-execution
+#   layer exposes; the layer subscribes
+#   ``command.request.<action>`` for each so the same wire frame
+#   the CLI sends for any other command reaches them).
+_SLASH_CATALOG: tuple[tuple[str, str, str, str], ...] = (
+    ("/new", "chat.session.new", "commands", "start a new chat"),
+    ("/sessions", "chat.session.list", "commands", "list sessions"),
+    ("/open <id>", "chat.session.open", "commands", "open a session and load its history"),
+    ("/rename <id> <title>", "chat.session.rename", "commands", "set a session's title"),
+    ("/time", "current_time", "tools", "current wall-clock time (UTC + optional zone)"),
+    ("/calc <expr>", "calculate", "tools", "evaluate a math expression"),
 )
 
 
@@ -107,6 +125,8 @@ def _parse_input(line: str) -> ParsedInput:
 
     if shortcut in ("/help", "/?"):
         return ParsedInput(kind="help", shortcut="/help")
+    if shortcut in ("/exit", "/quit"):
+        return ParsedInput(kind="exit", shortcut="/exit")
     if shortcut == "/new":
         return ParsedInput(
             kind="command", action="chat.session.new", shortcut=shortcut
@@ -137,6 +157,23 @@ def _parse_input(line: str) -> ParsedInput:
             kind="command",
             action="chat.session.rename",
             args={"session_id": rest[0], "title": " ".join(rest[1:])},
+            shortcut=shortcut,
+        )
+    if shortcut == "/time":
+        return ParsedInput(
+            kind="command", action="current_time", shortcut=shortcut
+        )
+    if shortcut == "/calc":
+        if not rest:
+            return ParsedInput(
+                kind="error",
+                shortcut=shortcut,
+                error="usage: /calc <expression>  e.g. /calc sqrt(9)+3*(5+6)/4",
+            )
+        return ParsedInput(
+            kind="command",
+            action="calculate",
+            args={"expression": " ".join(rest)},
             shortcut=shortcut,
         )
     return ParsedInput(
@@ -175,8 +212,17 @@ class _ClientState:
         # The chat session the next message belongs to. ``None`` means
         # "let the server use its per-connection default".
         self.active_session_id: str | None = None
-        # Actions the robot advertises -> failsafe gate for slash commands.
-        self.available_actions: set[str] = set()
+        # Slash-command gate: two sets, one per manifest slot. A slash
+        # alias is only offered when its target action appears in the
+        # matching slot.
+        self.command_actions: set[str] = set()
+        self.tool_actions: set[str] = set()
+        # Component-name -> active model id (e.g. ``"chat" -> "gpt-5.5"``)
+        # for rendering ``kernel.chat (gpt-5.5)`` panel subtitles.
+        self.models_by_component: dict[str, str] = {}
+        # Memoized last-rendered capability line so the print loop only
+        # re-renders when something actually changed.
+        self.last_capability_signature: tuple = ()
         # correlation_id -> action, so a command_response is rendered
         # against the command that produced it.
         self.pending: dict[str, str] = {}
@@ -255,16 +301,203 @@ def _render_history(
 def _render_help(console: Console, state: _ClientState) -> None:
     available = [
         (alias, hint)
-        for alias, action, hint in _SLASH_CATALOG
-        if action in state.available_actions
+        for alias, action, slot, hint in _SLASH_CATALOG
+        if action in _actions_for_slot(state, slot)
     ]
-    if not available:
-        console.print("[dim]this robot offers no commands[/]")
-        return
     console.print("[bold]commands:[/]")
-    for alias, hint in available:
-        console.print(f"  [bold]{alias}[/] [dim]· {hint}[/]")
+    if available:
+        for alias, hint in available:
+            console.print(f"  [bold]{alias}[/] [dim]· {hint}[/]")
+    else:
+        console.print("  [dim]this robot offers no remote commands[/]")
+    # Local meta commands - always available, never gated by manifest.
     console.print("  [bold]/help[/] [dim]· this list[/]")
+    console.print("  [bold]/exit[/] [dim]· close the connection and quit (also: /quit)[/]")
+
+
+def _actions_for_slot(state: _ClientState, slot: str) -> set[str]:
+    """Return the live action set for a manifest slot."""
+    if slot == "commands":
+        return state.command_actions
+    if slot == "tools":
+        return state.tool_actions
+    return set()
+
+
+def _styled_alias(alias: str, color: str, *, available: bool = True) -> str:
+    """Render an alias with the command head in ``color`` and any
+    argument tail dimmed in the same colour.
+
+    ``"/rename <id> <title>"`` -> ``"/rename"`` rendered in full
+    ``color`` plus ``"<id> <title>"`` in ``[dim <color>]``. The
+    eye lands on the verb first; the placeholder text stays
+    legible-but-recessed so it reads as a usage hint, not as
+    something to focus on.
+
+    Aliases without arguments (``"/new"``, ``"/help"``) just get
+    the single-colour span; the split is a no-op for them.
+
+    When ``available`` is ``False`` (catalog entry the current
+    robot does not advertise) the whole alias renders with
+    ``strike dim <color>``. Strikethrough is the universal "not
+    available" cue; keeping the slot colour preserves the visual
+    grouping so an operator can tell at a glance which subsystem
+    is currently offline (e.g. ``/time`` and ``/calc`` struck
+    through in blue means the tool-execution layer is not up).
+    """
+    parts = alias.split(maxsplit=1)
+    if not available:
+        style = f"strike dim {color}"
+        return f"[{style}]{alias}[/{style}]"
+    if len(parts) == 1:
+        return f"[{color}]{alias}[/{color}]"
+    head, tail = parts
+    return f"[{color}]{head}[/{color}] [dim {color}]{tail}[/dim {color}]"
+
+
+def _action_supported(action: str, state: _ClientState) -> bool:
+    """Check whether ``action`` is currently offered by the robot.
+
+    Walks the catalog to learn which manifest slot the action belongs
+    to, then asks the matching live set. Returns ``False`` for an
+    action the catalog does not know (a future client tried to send
+    a command we have no entry for).
+    """
+    for _alias, catalog_action, slot, _hint in _SLASH_CATALOG:
+        if catalog_action == action:
+            return action in _actions_for_slot(state, slot)
+    return False
+
+
+def _absorb_capabilities(
+    data: dict[str, Any], state: _ClientState
+) -> None:
+    """Latch the relevant slots of a ``capabilities`` frame into state.
+
+    Mutates the state in place; does not render anything. The
+    print loop calls :func:`_render_capability_lines` separately,
+    which uses :attr:`_ClientState.last_capability_signature` to
+    skip work when nothing actually changed (the server republishes
+    on every ComponentLifecycle, even those that left the manifest
+    untouched).
+    """
+    commands = data.get("commands") or []
+    tools = data.get("tools") or []
+    models = data.get("models") or []
+    state.command_actions = {
+        c.get("action")
+        for c in commands
+        if isinstance(c, dict) and c.get("action")
+    }
+    state.tool_actions = {
+        t.get("action")
+        for t in tools
+        if isinstance(t, dict) and t.get("action")
+    }
+    state.models_by_component = {
+        m.get("owner_component", ""): m.get("model_id", "")
+        for m in models
+        if isinstance(m, dict) and m.get("model_id")
+    }
+
+
+def _render_capability_lines(
+    console: Console, state: _ClientState
+) -> None:
+    """Render the ``commands:`` and ``tools:`` lines if changed.
+
+    Two-line layout (user-requested):
+
+        commands: /new, /sessions, /open, /rename · /time, /calc · /help /exit
+        tools:    current_time, calculate, list_directory, ...
+
+    The ``commands`` line groups slash aliases by origin, each
+    group in its own colour so the eye can spot "what kind of
+    command is this":
+
+    - **Chat ops** (``slot=commands`` in the catalog, advertised
+      by the kernel) -- rendered ``dim`` because they're the
+      default workflow surface.
+    - **Tools** (``slot=tools``, advertised by the tool-execution
+      layer) -- ``bright_cyan`` so they stand out as "this calls
+      something remote that does real work".
+    - **Local meta** (``/help``, ``/exit``) -- ``bright_magenta``
+      because they're always-on, never gated by the manifest, and
+      visually distinct from anything the robot offers.
+
+    The three groups are separated by `` · `` so the structure
+    "chat · tools · meta" is unambiguous regardless of which
+    groups happen to be empty.
+
+    The ``tools`` line below lists the raw tool action names the
+    robot has mounted -- informational. The slash aliases above
+    are how the user actually invokes them.
+
+    Always renders the meta group even when the robot offers no
+    remote commands, so the user always has a reminder of the
+    local exit path.
+    """
+    # Walk the full catalog this time, not just available actions:
+    # missing entries are rendered struck-through so the user sees
+    # what the CLI knows about but the robot is not currently
+    # offering. Empty groups (no catalog entries at all for that
+    # slot) still get suppressed.
+    chat_entries = [
+        (alias, action in state.command_actions)
+        for alias, action, slot, _ in _SLASH_CATALOG
+        if slot == "commands"
+    ]
+    tool_entries = [
+        (alias, action in state.tool_actions)
+        for alias, action, slot, _ in _SLASH_CATALOG
+        if slot == "tools"
+    ]
+    tools = sorted(state.tool_actions)
+    # The signature carries both the alias AND its current
+    # availability so a toggle (layer drops, layer re-mounts)
+    # re-renders even though the alias set itself is constant.
+    signature = (tuple(chat_entries), tuple(tool_entries), tuple(tools))
+    if signature == state.last_capability_signature:
+        return
+    state.last_capability_signature = signature
+
+    groups: list[str] = []
+    if chat_entries:
+        # Bright cyan for chat ops -- the primary interaction
+        # surface. Sits front-and-centre against the cooler blue
+        # tool colour.
+        groups.append(
+            ", ".join(
+                _styled_alias(a, "bright_cyan", available=avail)
+                for a, avail in chat_entries
+            )
+        )
+    if tool_entries:
+        # Catppuccin Mocha "Blue" (#89B4FA) for tools. Picked over
+        # plain ANSI bright_blue (too dark on most dark terminals)
+        # and over Rich's cornflower_blue because the Catppuccin
+        # palette is explicitly tuned to coexist with its Sky
+        # (cyan) and Mauve (magenta) -- exactly the chat / tools
+        # / meta triad this CLI renders.
+        groups.append(
+            ", ".join(
+                _styled_alias(a, "#89B4FA", available=avail)
+                for a, avail in tool_entries
+            )
+        )
+    # Local meta commands always shown -- they're never gated by
+    # the manifest. Rendered in a distinct colour so they read as
+    # "client-side, not robot-side". No arguments on these, so a
+    # single colour span is enough.
+    groups.append("[bright_magenta]/help /exit[/bright_magenta]")
+
+    # The dots and the ``commands:`` label stay dim so the eye
+    # tracks the coloured groups, not the connective tissue.
+    console.print(
+        "[dim]commands:[/dim] " + "[dim] · [/dim]".join(groups)
+    )
+    if tools:
+        console.print("[dim]tools:    " + ", ".join(tools) + "[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -307,24 +540,8 @@ async def _print_loop(
                         )
                     response_done.set()
                 elif kind == "capabilities":
-                    commands = data.get("commands") or []
-                    state.available_actions = {
-                        c.get("action")
-                        for c in commands
-                        if isinstance(c, dict) and c.get("action")
-                    }
-                    if state.available_actions:
-                        aliases = [
-                            alias
-                            for alias, action, _ in _SLASH_CATALOG
-                            if action in state.available_actions
-                        ]
-                        if aliases:
-                            console.print(
-                                "[dim]commands: "
-                                + ", ".join(aliases)
-                                + " · /help[/]"
-                            )
+                    _absorb_capabilities(data, state)
+                    _render_capability_lines(console, state)
                 elif kind == "command_response":
                     corr = data.get("correlation_id") or ""
                     state.pending.pop(corr, None)
@@ -345,7 +562,17 @@ async def _print_loop(
                     title = f"[{title_color}]{identity.label}[/{title_color}]"
                     subtitle_parts: list[str] = []
                     if source:
-                        subtitle_parts.append(source)
+                        # Enrich e.g. ``kernel.chat`` with the active
+                        # model when known. ``source`` carries the
+                        # component prefix (``kernel.<name>``); the
+                        # state model map is keyed by component name
+                        # (``"chat"``), so strip the ``kernel.``
+                        # prefix to look it up.
+                        component_name = source.split(".", 1)[1] if source.startswith("kernel.") else source
+                        model = state.models_by_component.get(component_name)
+                        subtitle_parts.append(
+                            f"{source} ({model})" if model else source
+                        )
                     if error_block:
                         code = error_block.get("code")
                         if isinstance(code, str) and code:
@@ -407,6 +634,11 @@ async def _input_loop(
         if parsed.kind == "help":
             _render_help(console, state)
             continue
+        if parsed.kind == "exit":
+            # Symmetric with the EOF (Ctrl-D / Ctrl-Z) exit path:
+            # leave the input loop cleanly so the outer ``_run``
+            # closes the websocket and prints the goodbye banner.
+            break
         if parsed.kind == "error":
             console.print(f"[red]{parsed.error}[/]")
             continue
@@ -416,7 +648,7 @@ async def _input_loop(
             break
 
         if parsed.kind == "command":
-            if parsed.action not in state.available_actions:
+            if not _action_supported(parsed.action, state):
                 console.print(
                     f"[red]{parsed.shortcut}[/] is not supported by this robot"
                 )

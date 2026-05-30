@@ -48,7 +48,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from src.actor.types import ActorResponse
-from src.bus.messages import ErrorInfo
+from src.bus.messages import ComponentInfo, ErrorInfo
 from src.components import ComponentCategory
 from src.actor.llm.ports import LLMActorPort
 from src.actor.llm.types import (
@@ -124,6 +124,36 @@ class LLMActorBase(LLMActorPort):
         if not text:
             return 0
         return max(1, len(text) // 4)
+
+    # ---- Capability surface (carried via MountEvent) ----------------------
+
+    def component_info(self) -> ComponentInfo:
+        """Include ``model_id`` / ``provider`` in the actor snapshot.
+
+        An off-bus actor cannot announce itself with a
+        :class:`ComponentLifecycle`. The kernel surfaces it instead
+        by publishing a :class:`MountEvent` whose ``mounted`` field
+        carries exactly the :class:`ComponentInfo` this method
+        returns. By attaching the LLM identity here, the actor stays
+        the single source of truth for what model is running -- and
+        the :class:`~src.utility.capability_collector.CapabilityCollector`
+        can read it off the mount stream into
+        :attr:`HarnessCapabilities.models` without the kernel having
+        to know any LLM-specific field names. Future capability
+        flags (``supports_function_calling``, ``supports_vision``,
+        ``context_window_tokens``, ...) join the same metadata dict
+        as drivers learn them.
+        """
+        info = super().component_info()
+        metadata = dict(info.metadata)
+        metadata["model_id"] = self._model_id
+        metadata["provider"] = self._provider
+        return ComponentInfo(
+            category=info.category,
+            name=info.name,
+            description=info.description,
+            metadata=metadata,
+        )
 
     # ---- Lifecycle (default no-op) ----------------------------------------
 
