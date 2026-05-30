@@ -13,8 +13,9 @@ dependencies = [
     "openai>=1.0",
     "croniter>=2.0",
     "mcs-driver-core",
-    "mcs-driver-mailbox",
     "mcs-driver-filesystem",
+    "mcs-driver-clock",
+    "mcs-driver-calculator",
 ]
 
 [project.optional-dependencies]
@@ -22,9 +23,8 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
 # In-tree MCS sub-packages. Each lives under packages/<name>/ with
 # its own pyproject.toml so it can later ship to PyPI as a standalone
-# distribution -- see ``packages/mcs-driver-mailbox/README.md``. The
-# workspace is uv-only; setuptools (Cephix's own build backend) is
-# not aware of it.
+# distribution -- see each package's README.md. The workspace is
+# uv-only; setuptools (Cephix's own build backend) is not aware of it.
 [tool.uv.workspace]
 members = ["packages/*"]
 
@@ -39,7 +39,8 @@ mcs-driver-filesystem = { path = "../../modelcontextstandard/python-sdk/packages
 # Swapping any of these for a PyPI release later means dropping the
 # entry here; the import path (`mcs.driver.<capability>`) stays the
 # same.
-mcs-driver-mailbox = { workspace = true }
+mcs-driver-clock = { workspace = true }
+mcs-driver-calculator = { workspace = true }
 
 [project.scripts]
 cephix = "src.cli:main"
@@ -57,5 +58,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "packages/mcs-driver-mailbox/tests"]
+testpaths = [
+    "tests",
+    "packages/mcs-driver-clock/tests",
+    "packages/mcs-driver-calculator/tests",
+]
 asyncio_mode = "auto"

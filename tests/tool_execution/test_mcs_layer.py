@@ -33,7 +33,8 @@ from mcs.driver.core import (
 from src.bus.asyncio_bus import AsyncioBus
 from src.bus.messages import ComponentRequest, ComponentResponse, RobotEvent
 from src.components import ComponentCategory
-from mcs.driver.mailbox import MailboxToolDriver
+from mcs.driver.calculator import CalculatorToolDriver
+from mcs.driver.clock import ClockToolDriver
 
 from src.persistence.filesystem.connection import FilesystemConnection
 from src.persistence.filesystem.local_adapter import LocalFSAdapter
@@ -98,10 +99,10 @@ def test_metadata() -> None:
     )
 
 
-def test_default_drivers_register_mailbox_fetch_unread() -> None:
+def test_default_drivers_register_clock_and_calculator() -> None:
     layer = MCSToolExecutionLayer()
-    names = [t.name for t in layer.list_tools()]
-    assert "mailbox.fetch_unread" in names
+    names = set(t.name for t in layer.list_tools())
+    assert {"current_time", "calculate"} <= names
 
 
 def test_list_tools_emits_tool_descriptors() -> None:
@@ -217,9 +218,9 @@ async def test_bus_request_unknown_tool_replies_error() -> None:
     assert response.error.code == "tool.unknown"
 
 
-async def test_bus_dispatch_uses_mailbox_default_driver() -> None:
-    """Smoke: a request for ``mailbox.fetch_unread`` lands a dict
-    with ``messages`` from the default ``MailboxToolDriver``."""
+async def test_bus_dispatch_uses_calculator_default_driver() -> None:
+    """Smoke: a request for ``calculate`` lands the result payload
+    from the default :class:`CalculatorToolDriver`."""
     bus = AsyncioBus()
     await bus.start()
     layer = MCSToolExecutionLayer()  # default drivers
@@ -231,8 +232,8 @@ async def test_bus_dispatch_uses_mailbox_default_driver() -> None:
             source="test",
             run_id="r-3",
             correlation_id="corr-3",
-            action="mailbox.fetch_unread",
-            payload={"limit": 2},
+            action="calculate",
+            payload={"expression": "sqrt(9) + 4"},
         )
         response = await bus.request(request, timeout=2.0)
     finally:
@@ -240,14 +241,16 @@ async def test_bus_dispatch_uses_mailbox_default_driver() -> None:
         await bus.stop()
 
     assert response.status == "ok"
-    assert response.payload["mailbox_id"] == "stub-mailbox"
-    assert len(response.payload["messages"]) == 2
+    assert response.payload["expression"] == "sqrt(9) + 4"
+    assert response.payload["result"] == pytest.approx(7.0)
+    assert response.payload["formatted"] == "7.0"
 
 
-def test_default_driver_list_includes_mailbox_tooldriver() -> None:
-    """The default constructor wires exactly the MailboxToolDriver."""
+def test_default_driver_list_includes_clock_and_calculator() -> None:
+    """The default constructor wires the two in-process drivers."""
     layer = MCSToolExecutionLayer()
-    assert any(isinstance(d, MailboxToolDriver) for d in layer._drivers)
+    assert any(isinstance(d, ClockToolDriver) for d in layer._drivers)
+    assert any(isinstance(d, CalculatorToolDriver) for d in layer._drivers)
 
 
 # ---- capability surfacing (provides_commands) -------------------------------
@@ -307,8 +310,9 @@ def test_filesystem_connection_adds_filesystem_driver(tmp_path: Path) -> None:
     layer = MCSToolExecutionLayer(filesystem_connection=_connection(tmp_path))
     names = sorted(t.name for t in layer.list_tools())
     assert {"list_directory", "read_file", "write_file"}.issubset(set(names))
-    # Mailbox driver still there too (default + filesystem stack together).
-    assert "mailbox.fetch_unread" in names
+    # Default drivers still there alongside the filesystem stack.
+    assert "current_time" in names
+    assert "calculate" in names
 
 
 async def test_filesystem_connection_end_to_end_write_then_read(tmp_path: Path) -> None:

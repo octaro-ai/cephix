@@ -46,10 +46,13 @@ Two entry points on the bus, mirroring MCS's two call paths:
 
 Today's drivers, wired by the layer's default constructor:
 
-- :class:`MailboxToolDriver` -- in-process, exposes
-  ``mailbox.fetch_unread`` and returns a constant batch of dummy
-  messages. No adapter or port layer until a real backend is
-  introduced.
+- :class:`ClockToolDriver` (from ``mcs-driver-clock``) -- exposes
+  ``current_time``. UTC by default; optional IANA timezone for the
+  local representation.
+- :class:`CalculatorToolDriver` (from ``mcs-driver-calculator``) --
+  exposes ``calculate``. Scientific-calculator-grade math
+  expression evaluator sandboxed via an AST whitelist (no
+  ``eval()``, no imports, no attribute access).
 - :class:`FilesystemDriver` (from ``mcs-driver-filesystem``) wired
   over :class:`MCSFilesystemAdapter`, opt-in: only when the layer
   is constructed with ``filesystem_connection``. Exposes
@@ -67,10 +70,11 @@ import logging
 from collections.abc import Sequence
 from typing import Any
 
+from mcs.driver.calculator import CalculatorToolDriver
+from mcs.driver.clock import ClockToolDriver
 from mcs.driver.core import MCSToolDriver, Tool
 from mcs.driver.filesystem import FilesystemDriver
 from mcs.driver.filesystem.tooldriver import FilesystemToolDriver
-from mcs.driver.mailbox import MailboxToolDriver
 
 from src.bus.messages import (
     ComponentInfo,
@@ -122,15 +126,21 @@ def _risk_class_for(tool_name: str) -> str:
 def _default_tool_drivers() -> list[MCSToolDriver]:
     """Driver set the layer wires by default at boot.
 
-    Today: a single :class:`MailboxToolDriver` whose
-    ``execute_tool`` runs entirely in-process, so a fresh robot
-    can exercise the full bus -> tool -> response path end-to-end
-    without configuring a backend. When real backends arrive
-    (IMAP, JMAP, ...) they ship as ``mcs-adapter-*`` packages
-    behind a then-introduced ``MailboxAdapterPort`` and the
-    ToolDriver delegates to them.
+    Both ship as standalone packages under ``packages/`` and run
+    entirely in-process -- no transport layer, no backend service
+    -- so a fresh robot exposes useful tools immediately.
+
+    - :class:`ClockToolDriver` -- ``current_time`` (UTC + optional
+      IANA timezone).
+    - :class:`CalculatorToolDriver` -- ``calculate`` (sandboxed
+      scientific math expression evaluator).
+
+    The filesystem driver is wired separately when a
+    ``FilesystemConnection`` is injected; transport-bound drivers
+    in general (future IMAP, REST, ...) join the list through
+    constructor injection of their adapters, not here.
     """
-    return [MailboxToolDriver()]
+    return [ClockToolDriver(), CalculatorToolDriver()]
 
 
 def _build_filesystem_driver(
