@@ -7,7 +7,7 @@ via reference injection.
 
 What "firmware" means here: a small set of text/Markdown files at
 ``<connection-root>/<directory>/`` (typically
-``<workspace>/firmware/`` -- ``CONSTITUTION.md``, ``POLICY.md``,
+``<robot_home>/firmware/`` -- ``CONSTITUTION.md``, ``POLICY.md``,
 ``AGENTS.md``, ...). The store reads every file matching its
 configured glob patterns from that directory and concatenates them
 into a single system prompt the kernel hands to the LLM at

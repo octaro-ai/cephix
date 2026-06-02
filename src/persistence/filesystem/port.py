@@ -64,7 +64,7 @@ class FilesystemPort(Protocol):
         Directory-only -- names are leaf names, not full paths.
         Returns ``[]`` if the directory is missing rather than
         raising; "no sessions yet" is not an error for a fresh
-        workspace. Order is not guaranteed; callers that need a
+        robot home. Order is not guaranteed; callers that need a
         stable order sort the result themselves.
         """
 

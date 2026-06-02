@@ -89,8 +89,8 @@ class LocalFSAdapter(RobotComponent):
     async def is_writable(self, path: PurePath) -> bool:
         local = Path(path)
         # ``os.access`` returns False for non-existent paths; check
-        # the closest existing ancestor instead so a fresh workspace
-        # directory doesn't read as "not writable" before its first
+        # the closest existing ancestor instead so a fresh directory
+        # doesn't read as "not writable" before its first
         # ``mkdir``.
         probe = local
         while not probe.exists() and probe.parent != probe:

@@ -17,7 +17,7 @@ cephix <command>
 | Command | Purpose |
 |---|---|
 | `demo` | Run the local demo flow (`cephix-drp.py` uses the same demo wiring). |
-| `init <robot_id>` | Create a robot workspace and register it in the host config. |
+| `init <robot_id>` | Create a robot home and register it in the host config. |
 | `list` | List robot instances registered in `~/.cephix/cephix.yaml`. |
 | `start [robot_id]` | Start a robot as a long-lived WebSocket service. Defaults to `main`. |
 | `chat [robot_id]` | Connect to a running robot over WebSocket. |
@@ -45,8 +45,9 @@ Useful flags:
 | `--admin-token` | Initial admin token. If omitted, one is generated. |
 
 `init` creates `~/.cephix/cephix.yaml` if needed, registers the robot, writes
-`~/.cephix/robots/<robot_id>/robot.yaml`, creates the workspace directories,
-and runs an interactive LLM provider picker.
+`~/.cephix/robots/<robot_id>/robot.yaml`, creates the robot home directories
+(including the `workspace/` file sandbox), and runs an interactive LLM
+provider picker.
 
 ## `start [robot_id]`
 
@@ -66,7 +67,7 @@ Useful flags:
 | `--admin-token` | Override the resolved admin token for this process. |
 | `--no-loopback-auto-approve` | Require token/pairing even for loopback chat clients. |
 
-When the server binds, `start` writes `runtime.json` into the robot workspace
+When the server binds, `start` writes `runtime.json` into the robot home
 with the actual bind/port and process ID. This is removed again on shutdown.
 
 ## `chat [robot_id]`

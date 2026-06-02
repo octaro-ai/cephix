@@ -25,7 +25,7 @@
 | `src/gateways/hub.py` | Impl | `ChannelHub` — aggregates ingress/egress/control for all channels |
 | `src/gateways/websocket.py` | Impl | `WebSocketChannel` — WebSocket channel |
 | `src/gateways/telegram.py` | Impl | `TelegramChannel` — Telegram channel |
-| `src/configuration.py` | Impl | Host config, robot config, workspace layout, layered secret resolution |
+| `src/configuration.py` | Impl | Host config, robot config, robot-home layout, layered secret resolution |
 
 ## 2. Context
 

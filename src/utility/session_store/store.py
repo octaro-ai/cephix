@@ -28,7 +28,7 @@ Concurrency: per-session :class:`asyncio.Lock` ensures appends
 from the same loop interleave cleanly; the writer cache reuses
 a single :class:`AppendWriter` per session for the whole process
 lifetime. Cross-process safety is explicitly out of scope -- one
-robot owns its workspace, another process touching the same files
+robot owns its home, another process touching the same files
 is a misconfiguration.
 """
 
@@ -99,7 +99,7 @@ class FilesystemSessionStore(RobotComponent, SessionStorePort):
         self._fs = connection
         # The bucket inside the shared connection root where this
         # store lives. Empty string means "sit directly under root",
-        # which keeps tests and small workspaces simple. The default
+        # which keeps tests and small robot homes simple. The default
         # ``sessions/`` keeps the store next to the event provider's
         # ``logs/`` without collisions.
         self._directory = directory.strip("/").strip("\\")

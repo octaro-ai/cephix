@@ -331,23 +331,23 @@ def test_builder_handles_missing_identity() -> None:
     assert robot.identity.name is None
 
 
-def test_builder_loads_control_plane_token_from_workspace_env(
+def test_builder_loads_control_plane_token_from_robot_home_env(
     tmp_path: Path,
 ) -> None:
-    """If a workspace is given, the builder reads the .env for the token."""
+    """If a robot home is given, the builder reads the .env for the token."""
     (tmp_path / ".env").write_text(
         "CEPHIX_CONTROL_PLANE_TOKEN=secret-token-xyz\n",
         encoding="utf-8",
     )
     robot = build_robot_from_config(
         _cfg({"id": "x", "kernel": {"name": "base"}}),
-        workspace=tmp_path,
+        robot_home=tmp_path,
     )
     assert robot._control_plane_token == "secret-token-xyz"  # type: ignore[attr-defined]
 
 
-def test_builder_skips_observers_without_workspace() -> None:
-    """Without a workspace the JSONL provider has nowhere to anchor;
+def test_builder_skips_observers_without_robot_home() -> None:
+    """Without a robot home the JSONL provider has nowhere to anchor;
     telemetry and audit are silently skipped."""
     robot = build_robot_from_config(_cfg({"kernel": {"name": "base"}}))
     assert not any(isinstance(c, BusRecorder) for c in robot.components)
@@ -357,13 +357,13 @@ def test_builder_skips_observers_without_workspace() -> None:
 def test_builder_wires_telemetry_and_audit_via_persistence(
     tmp_path: Path,
 ) -> None:
-    """With a workspace, the central persistence layer is built and
+    """With a robot home, the central persistence layer is built and
     used to wire telemetry+audit. The default channels resolve to
-    ``<workspace>/logs/telemetry.jsonl`` and
-    ``<workspace>/logs/audit.jsonl``."""
+    ``<robot_home>/logs/telemetry.jsonl`` and
+    ``<robot_home>/logs/audit.jsonl``."""
     robot = build_robot_from_config(
         _cfg({"kernel": {"name": "base"}}),
-        workspace=tmp_path,
+        robot_home=tmp_path,
     )
     recorders = [c for c in robot.components if isinstance(c, BusRecorder)]
     sinks = [c for c in robot.components if isinstance(c, AuditNoteSink)]
@@ -385,7 +385,7 @@ def test_builder_persistence_null_skips_all_observers(
                 "persistence": None,
             }
         ),
-        workspace=tmp_path,
+        robot_home=tmp_path,
     )
     assert not any(isinstance(c, BusRecorder) for c in robot.components)
     assert not any(isinstance(c, AuditNoteSink) for c in robot.components)
@@ -402,7 +402,7 @@ def test_builder_observer_null_keeps_other_observer(
                 "telemetry": None,
             }
         ),
-        workspace=tmp_path,
+        robot_home=tmp_path,
     )
     assert not any(isinstance(c, BusRecorder) for c in robot.components)
     assert any(isinstance(c, AuditNoteSink) for c in robot.components)
@@ -422,7 +422,7 @@ def test_builder_persistence_stack_is_three_components(tmp_path: Path) -> None:
 
     robot = build_robot_from_config(
         _cfg({"kernel": {"name": "base"}}),
-        workspace=tmp_path,
+        robot_home=tmp_path,
     )
     adapters = [c for c in robot.components if isinstance(c, LocalFSAdapter)]
     connections = [
@@ -471,7 +471,7 @@ def test_builder_persistence_list_form_with_ids(tmp_path: Path) -> None:
                 ],
             }
         ),
-        workspace=tmp_path,
+        robot_home=tmp_path,
     )
     recorder = next(c for c in robot.components if isinstance(c, BusRecorder))
     audit = next(c for c in robot.components if isinstance(c, AuditNoteSink))
@@ -501,7 +501,7 @@ def test_builder_rejects_unknown_persistence_reference(tmp_path: Path) -> None:
                     ],
                 }
             ),
-            workspace=tmp_path,
+            robot_home=tmp_path,
         )
 
 
@@ -516,7 +516,7 @@ def test_builder_audit_accepts_list_form(tmp_path: Path) -> None:
                 "audit": [{"channel": "narrative"}],
             }
         ),
-        workspace=tmp_path,
+        robot_home=tmp_path,
     )
     audit = next(c for c in robot.components if isinstance(c, AuditNoteSink))
     assert _observer_path(audit) == tmp_path / "logs" / "narrative.jsonl"
@@ -532,7 +532,7 @@ def test_builder_uses_explicit_channel_names(tmp_path: Path) -> None:
                 "audit": {"channel": "narrative"},
             }
         ),
-        workspace=tmp_path,
+        robot_home=tmp_path,
     )
     recorder = next(c for c in robot.components if isinstance(c, BusRecorder))
     audit = next(c for c in robot.components if isinstance(c, AuditNoteSink))
@@ -541,7 +541,7 @@ def test_builder_uses_explicit_channel_names(tmp_path: Path) -> None:
 
 
 def test_builder_persistence_absolute_path_wins(tmp_path: Path) -> None:
-    """An absolute persistence path is used as-is, regardless of workspace."""
+    """An absolute persistence path is used as-is, regardless of robot home."""
     abs_root = tmp_path / "elsewhere"
     robot = build_robot_from_config(
         _cfg(
@@ -550,12 +550,69 @@ def test_builder_persistence_absolute_path_wins(tmp_path: Path) -> None:
                 "persistence": {"path": str(abs_root)},
             }
         ),
-        workspace=tmp_path / "ws",
+        robot_home=tmp_path / "ws",
     )
     recorder = next(c for c in robot.components if isinstance(c, BusRecorder))
     # Connection root is the absolute path; the provider still adds
     # its default ``directory: logs`` bucket below it.
     assert _observer_path(recorder) == abs_root / "logs" / "telemetry.jsonl"
+
+
+def test_builder_roots_tool_execution_at_workspace_sandbox(
+    tmp_path: Path,
+) -> None:
+    """The tool-execution layer's filesystem connection is rooted at
+    ``<robot_home>/workspace/`` -- the sandbox, NOT the persistence
+    root (which holds logs/sessions/firmware). This keeps the LLM's
+    file tools away from the bot's machinery."""
+    from src.tool_execution import MCSToolExecutionLayer
+
+    robot = build_robot_from_config(
+        _cfg(
+            {
+                "kernel": {"name": "base"},
+                "bus_provider": [{"name": "tool-execution"}],
+            }
+        ),
+        robot_home=tmp_path,
+    )
+    layer = next(
+        c for c in robot.components if isinstance(c, MCSToolExecutionLayer)
+    )
+    assert layer._filesystem_connection is not None  # type: ignore[attr-defined]
+    assert (
+        Path(layer._filesystem_connection.root)  # type: ignore[attr-defined]
+        == tmp_path / "workspace"
+    )
+    # The persistence connection still anchors at the robot home, not
+    # the sandbox -- the two roots are deliberately distinct.
+    recorder = next(c for c in robot.components if isinstance(c, BusRecorder))
+    assert _observer_path(recorder) == tmp_path / "logs" / "telemetry.jsonl"
+    # Filesystem tools are live (proves the connection was injected).
+    tool_names = {t.name for t in layer.list_tools()}
+    assert {"read_file", "write_file"}.issubset(tool_names)
+
+
+def test_builder_tool_execution_without_robot_home_has_no_fs_tools() -> None:
+    """No robot home -> no workspace sandbox -> the tool layer boots
+    without filesystem tools (clock/calculator still present)."""
+    from src.tool_execution import MCSToolExecutionLayer
+
+    robot = build_robot_from_config(
+        _cfg(
+            {
+                "kernel": {"name": "base"},
+                "bus_provider": [{"name": "tool-execution"}],
+            }
+        ),
+    )
+    layer = next(
+        c for c in robot.components if isinstance(c, MCSToolExecutionLayer)
+    )
+    assert layer._filesystem_connection is None  # type: ignore[attr-defined]
+    tool_names = {t.name for t in layer.list_tools()}
+    assert "read_file" not in tool_names
+    assert "current_time" in tool_names  # default drivers still wired
 
 
 def test_builder_rejects_unknown_persistence_type(tmp_path: Path) -> None:
@@ -567,7 +624,7 @@ def test_builder_rejects_unknown_persistence_type(tmp_path: Path) -> None:
                     "persistence": {"name": "redis"},
                 }
             ),
-            workspace=tmp_path,
+            robot_home=tmp_path,
         )
 
 
@@ -788,7 +845,7 @@ class TestBuilderChatKernel:
 
         robot = build_robot_from_config(
             self._chat_cfg(),
-            workspace=tmp_path,
+            robot_home=tmp_path,
         )
         kernel = next(c for c in robot.components if isinstance(c, ChatKernel))
         assert isinstance(kernel._firmware, FilesystemFirmwareStore)
@@ -803,7 +860,7 @@ class TestBuilderChatKernel:
 
         robot = build_robot_from_config(
             self._chat_cfg(),
-            workspace=tmp_path,
+            robot_home=tmp_path,
         )
         store = next(
             c
@@ -828,7 +885,7 @@ class TestBuilderChatKernel:
 
         robot = build_robot_from_config(
             self._chat_cfg(),
-            workspace=tmp_path,
+            robot_home=tmp_path,
         )
         store = next(
             c
@@ -846,11 +903,11 @@ class TestBuilderChatKernel:
         ]
         assert store._fs in connections
 
-    def test_firmware_seeded_into_empty_workspace(
+    def test_firmware_seeded_into_empty_robot_home(
         self, tmp_path: Path
     ) -> None:
-        """First build into a fresh workspace seeds the starter templates."""
-        build_robot_from_config(self._chat_cfg(), workspace=tmp_path)
+        """First build into a fresh robot home seeds the starter templates."""
+        build_robot_from_config(self._chat_cfg(), robot_home=tmp_path)
         firmware_dir = tmp_path / "firmware"
         assert firmware_dir.is_dir()
         assert (firmware_dir / "AGENTS.md").is_file()
@@ -869,7 +926,7 @@ class TestBuilderChatKernel:
         (firmware_dir / "AGENTS.md").write_text(custom, encoding="utf-8")
         # POLICY.md is missing entirely -- the builder must re-seed it.
 
-        build_robot_from_config(self._chat_cfg(), workspace=tmp_path)
+        build_robot_from_config(self._chat_cfg(), robot_home=tmp_path)
 
         # User-edited file untouched.
         assert (firmware_dir / "AGENTS.md").read_text(encoding="utf-8") == (
@@ -890,7 +947,7 @@ class TestBuilderChatKernel:
             {"name": "session-store"},
         ]
         with pytest.raises(ConfigError, match="firmware-store"):
-            build_robot_from_config(cfg, workspace=tmp_path)
+            build_robot_from_config(cfg, robot_home=tmp_path)
 
     def test_base_kernel_does_not_get_utility_injection(
         self, tmp_path: Path
@@ -913,7 +970,7 @@ class TestBuilderChatKernel:
                     "actor": {"name": "echo"},
                 }
             ),
-            workspace=tmp_path,
+            robot_home=tmp_path,
         )
         assert any(
             isinstance(c, FilesystemFirmwareStore) for c in robot.components
@@ -922,7 +979,7 @@ class TestBuilderChatKernel:
     def test_chatbot_template_resolves_to_chat_kernel(
         self, tmp_path: Path
     ) -> None:
-        """The shipped chatbot template builds end-to-end with workspace."""
+        """The shipped chatbot template builds end-to-end with a robot home."""
         import yaml as _yaml
 
         from pathlib import Path as _Path
@@ -951,7 +1008,7 @@ class TestBuilderChatKernel:
                 },
             },
             defaults=defaults,
-            workspace=tmp_path,
+            robot_home=tmp_path,
         )
         assert any(isinstance(c, ChatKernel) for c in robot.components)
 
@@ -1052,18 +1109,18 @@ class TestBuilderTemplates:
                 }
             }
         }
-        # Need a workspace for persistence to anchor; otherwise the
+        # Need a robot home for persistence to anchor; otherwise the
         # observer-skip-without-anchor logic kicks in instead.
         robot = build_robot_from_config(
             {"template": "demo", "audit": None},
             defaults=defaults,
-            workspace=Path(),
+            robot_home=Path(),
         )
         # The robot was built without crashing; assert audit specifically
         # is gone while telemetry remains (the sibling slot is kept).
-        # No workspace means the persistence anchor returns None for
+        # No robot home means the persistence anchor returns None for
         # relative path ``logs``, so both observers skip. We thus
-        # check the reverse: with workspace=None and persistence as
+        # check the reverse: with robot_home=None and persistence as
         # default, both skip; we already verify that elsewhere. Here
         # we assert the build succeeded and audit slot is absent.
         assert isinstance(robot, Robot)
@@ -1245,7 +1302,7 @@ class TestBuilderCredentials:
 
         robot = build_robot_from_config(
             _cfg({"kernel": {"name": "base"}}),
-            workspace=tmp_path,
+            robot_home=tmp_path,
         )
         providers = [
             c for c in robot.components if isinstance(c, CredentialProvider)
@@ -1270,7 +1327,7 @@ class TestBuilderCredentials:
                     "kernel": {"name": "base"},
                 }
             ),
-            workspace=tmp_path,
+            robot_home=tmp_path,
         )
         actor = next(
             c for c in robot.components if isinstance(c, LLMActorOpenAI)
@@ -1295,7 +1352,7 @@ class TestBuilderCredentials:
                         "kernel": {"name": "base"},
                     }
                 ),
-                workspace=tmp_path,
+                robot_home=tmp_path,
             )
         assert excinfo.value.key == "MISSING_KEY"
         assert excinfo.value.requester == "builder"
@@ -1319,7 +1376,7 @@ class TestBuilderCredentials:
                     "kernel": {"name": "base"},
                 }
             ),
-            workspace=tmp_path,
+            robot_home=tmp_path,
         )
         actor = next(
             c for c in robot.components if isinstance(c, LLMActorOpenAI)
@@ -1362,7 +1419,7 @@ class TestBuilderCredentials:
                     "kernel": {"name": "base"},
                 }
             ),
-            workspace=tmp_path,
+            robot_home=tmp_path,
         )
         actor = next(
             c for c in robot.components if isinstance(c, LLMActorOpenAI)
@@ -1394,7 +1451,7 @@ class TestBuilderCredentials:
                     "kernel": {"name": "base"},
                 }
             ),
-            workspace=tmp_path,
+            robot_home=tmp_path,
         )
         actor = next(
             c for c in robot.components if isinstance(c, LLMActorOpenAI)
@@ -1417,7 +1474,7 @@ class TestBuilderCredentials:
                     "kernel": {"name": "base"},
                 }
             ),
-            workspace=tmp_path,
+            robot_home=tmp_path,
         )
         actor = next(c for c in robot.components if isinstance(c, EchoActor))
         assert actor._prefix == "${OPENAI_KEY}: "  # type: ignore[attr-defined]
@@ -1438,7 +1495,7 @@ class TestBuilderCredentials:
                     "kernel": {"name": "base"},
                 }
             ),
-            workspace=tmp_path,
+            robot_home=tmp_path,
         )
         actor = next(c for c in robot.components if isinstance(c, EchoActor))
         assert actor._prefix == "${log.level}"  # type: ignore[attr-defined]
@@ -1479,7 +1536,7 @@ class TestBuilderCredentials:
                     "kernel": {"name": "base"},
                 }
             ),
-            workspace=tmp_path,
+            robot_home=tmp_path,
         )
         probe = next(
             c for c in robot.components if isinstance(c, CredentialProbingActor)
@@ -1501,7 +1558,7 @@ class TestBuilderCredentials:
                         "kernel": {"name": "base"},
                     }
                 ),
-                workspace=tmp_path,
+                robot_home=tmp_path,
             )
 
     def test_rejects_env_store_without_path(self, tmp_path: Path) -> None:
@@ -1516,7 +1573,7 @@ class TestBuilderCredentials:
                         "kernel": {"name": "base"},
                     }
                 ),
-                workspace=tmp_path,
+                robot_home=tmp_path,
             )
 
     def test_credentials_section_is_not_substituted(
@@ -1550,7 +1607,7 @@ class TestBuilderCredentials:
                     "kernel": {"name": "base"},
                 }
             ),
-            workspace=tmp_path,
+            robot_home=tmp_path,
         )
         # Build succeeded; the literal ${UNRESOLVED} was tolerated as
         # a path component (the file is missing, which is fine).

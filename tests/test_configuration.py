@@ -10,7 +10,7 @@ import yaml
 from src.configuration import (
     ComponentLibrary,
     deep_merge,
-    default_workspace_for,
+    default_robot_home_for,
     discover_robots,
     ensure_home_config,
     home_config_path,
@@ -23,6 +23,7 @@ from src.configuration import (
     resolve_robot_instance,
     robot_config_path,
     robot_env_path,
+    robot_workspace_path,
     robots_root,
     save_home_config,
     save_robot_config,
@@ -57,9 +58,14 @@ def test_robots_root_under_home(tmp_path: Path) -> None:
     assert root.exists()
 
 
-def test_default_workspace_for(tmp_path: Path) -> None:
-    ws = default_workspace_for("dreamgirl", tmp_path)
-    assert ws == tmp_path / "robots" / "dreamgirl"
+def test_default_robot_home_for(tmp_path: Path) -> None:
+    home = default_robot_home_for("dreamgirl", tmp_path)
+    assert home == tmp_path / "robots" / "dreamgirl"
+
+
+def test_robot_workspace_path_is_subdir_of_home(tmp_path: Path) -> None:
+    home = default_robot_home_for("dreamgirl", tmp_path)
+    assert robot_workspace_path(home) == home / "workspace"
 
 
 def test_robot_config_path_appends_filename(tmp_path: Path) -> None:
@@ -156,17 +162,17 @@ def test_save_and_load_robot_config(tmp_path: Path) -> None:
 
 
 def _make_bot(home: Path, robot_id: str, *, enabled: bool = True, name: str | None = None) -> Path:
-    workspace = default_workspace_for(robot_id, home)
-    workspace.mkdir(parents=True, exist_ok=True)
+    robot_home = default_robot_home_for(robot_id, home)
+    robot_home.mkdir(parents=True, exist_ok=True)
     save_robot_config(
-        workspace,
+        robot_home,
         {
             "id": robot_id,
             "name": name or robot_id.capitalize(),
             "enabled": enabled,
         },
     )
-    return workspace
+    return robot_home
 
 
 def test_discover_robots_empty(tmp_path: Path) -> None:
@@ -199,7 +205,7 @@ def test_discover_robots_dedupes_index_and_convention(tmp_path: Path) -> None:
     instances = discover_robots(tmp_path)
     assert len(instances) == 1
     assert instances[0].name == "Alpha-Override"
-    assert instances[0].workspace == other_ws
+    assert instances[0].home == other_ws
     assert instances[0].enabled is False
     assert convention_ws.exists()  # convention bot still on disk, just shadowed
 
@@ -209,7 +215,9 @@ def test_resolve_robot_instance_via_convention(tmp_path: Path) -> None:
     _make_bot(tmp_path, "alpha")
     inst = resolve_robot_instance("alpha", tmp_path)
     assert inst.id == "alpha"
-    assert inst.workspace == default_workspace_for("alpha", tmp_path)
+    assert inst.home == default_robot_home_for("alpha", tmp_path)
+    # The tool workspace is the sandbox sub-directory of the home.
+    assert inst.workspace == inst.home / "workspace"
 
 
 def test_resolve_robot_instance_via_index(tmp_path: Path) -> None:
@@ -219,7 +227,35 @@ def test_resolve_robot_instance_via_index(tmp_path: Path) -> None:
     save_robot_config(other_ws, {"id": "beta", "name": "Beta", "enabled": True})
     register_robot_override("beta", other_ws, tmp_path)
     inst = resolve_robot_instance("beta", tmp_path)
-    assert inst.workspace == other_ws
+    assert inst.home == other_ws
+
+
+def test_register_robot_override_writes_home_key(tmp_path: Path) -> None:
+    ensure_home_config(tmp_path)
+    other = tmp_path / "elsewhere" / "delta"
+    register_robot_override("delta", other, tmp_path)
+    entry = next(
+        e for e in load_home_config(tmp_path)["robots"] if e["id"] == "delta"
+    )
+    assert entry["home"] == str(other)
+    assert "workspace" not in entry
+
+
+def test_resolve_robot_instance_honours_legacy_workspace_key(tmp_path: Path) -> None:
+    """Index entries written before the rename used ``workspace:``;
+    they must still resolve."""
+    ensure_home_config(tmp_path)
+    legacy_home = tmp_path / "legacy" / "epsilon"
+    legacy_home.mkdir(parents=True)
+    save_robot_config(
+        legacy_home, {"id": "epsilon", "name": "Epsilon", "enabled": True}
+    )
+    cfg = load_home_config(tmp_path)
+    cfg["robots"] = [{"id": "epsilon", "workspace": str(legacy_home)}]
+    save_home_config(cfg, tmp_path)
+
+    inst = resolve_robot_instance("epsilon", tmp_path)
+    assert inst.home == legacy_home
 
 
 def test_resolve_robot_instance_missing_raises(tmp_path: Path) -> None:

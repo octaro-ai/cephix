@@ -9,25 +9,42 @@ Layout
     ├── cephix.yaml                  global defaults plus optional robots[] index
     ├── .env                         optional global secrets
     └── robots/
-        └── <slug>/                  default workspace per bot (auto-discovered)
+        └── <slug>/                  a bot's "robot home" (auto-discovered)
             ├── robot.yaml           required: a bot's full configuration
-            └── .env                 optional bot-local secrets
+            ├── .env                 optional bot-local secrets
+            ├── logs/                telemetry, audit, console log
+            ├── sessions/            session store
+            ├── firmware/            CONSTITUTION.md, POLICY.md, ...
+            ├── configs/             user-editable YAML (heartbeats.yaml, ...)
+            └── workspace/           files the robot reads/writes via its tools
 
 Conventions
 -----------
 
 - Any directory under ``~/.cephix/robots/`` that contains a
   ``robot.yaml`` is automatically a bot. No index entry required.
-- ``cephix.yaml#robots[]`` is **only** for bots whose workspace lives
-  somewhere else (and therefore can't be discovered).
-- Workspaces are self-contained: paths inside ``robot.yaml`` are
-  interpreted relative to the workspace, so a bot directory can be
+- ``cephix.yaml#robots[]`` is **only** for bots whose robot home lives
+  somewhere else (and therefore can't be discovered). The path is
+  stored under ``home:``; legacy entries using ``workspace:`` are
+  still read.
+- Robot homes are self-contained: paths inside ``robot.yaml`` are
+  interpreted relative to the robot home, so a bot directory can be
   moved or symlinked without breaking anything.
 
-This module deliberately avoids the heavier shape of the legacy
-``_reference`` configuration: there are no firmware/memory/sops/logs
-sub-directories yet because we don't have components that consume
-them.
+Robot home vs workspace
+-----------------------
+
+The **robot home** is the bot's whole on-disk presence -- config,
+secrets and all internal state (``logs/``, ``sessions/``,
+``firmware/``, ``configs/``). The **workspace** is the narrower
+``<robot_home>/workspace/`` sub-directory: the sandbox the robot's
+filesystem tools are rooted at, deliberately kept apart from the
+bot's own machinery so a tool call can't read ``.env`` or rewrite
+firmware.
+
+These sub-directories are created lazily by the components that
+consume them, not by this module -- it only knows about
+``robot.yaml`` and ``.env``.
 """
 
 from __future__ import annotations
@@ -47,6 +64,9 @@ logger = logging.getLogger(__name__)
 ROBOT_CONFIG_FILENAME = "robot.yaml"
 ROBOT_ENV_FILENAME = ".env"
 ROBOTS_DIRNAME = "robots"
+# Sandboxed sub-directory of a robot home that the filesystem tools
+# are rooted at. Separate from the bot's machinery (logs, .env, ...).
+ROBOT_WORKSPACE_DIRNAME = "workspace"
 HOME_CONFIG_FILENAME = "cephix.yaml"
 HOME_ENV_FILENAME = ".env"
 
@@ -93,12 +113,25 @@ def robots_root(home_override: str | Path | None = None) -> Path:
     return path
 
 
-def default_workspace_for(robot_id: str, home_override: str | Path | None = None) -> Path:
+def default_robot_home_for(
+    robot_id: str, home_override: str | Path | None = None
+) -> Path:
+    """Conventional robot home: ``~/.cephix/robots/<robot_id>/``."""
     return robots_root(home_override) / robot_id
 
 
-def robot_config_path(workspace: str | Path) -> Path:
-    return Path(workspace) / ROBOT_CONFIG_FILENAME
+def robot_workspace_path(robot_home: str | Path) -> Path:
+    """The robot's sandboxed tool workspace: ``<robot_home>/workspace/``.
+
+    This is the directory the filesystem tools are rooted at -- a
+    deliberately narrow slice of the robot home, kept apart from the
+    bot's own machinery (``logs/``, ``.env``, ``firmware/``).
+    """
+    return Path(robot_home) / ROBOT_WORKSPACE_DIRNAME
+
+
+def robot_config_path(robot_home: str | Path) -> Path:
+    return Path(robot_home) / ROBOT_CONFIG_FILENAME
 
 
 # ---------------------------------------------------------------------------
@@ -318,12 +351,12 @@ def home_defaults(home_override: str | Path | None = None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def load_robot_config(workspace: str | Path) -> dict[str, Any]:
-    return _load_yaml(robot_config_path(workspace))
+def load_robot_config(robot_home: str | Path) -> dict[str, Any]:
+    return _load_yaml(robot_config_path(robot_home))
 
 
-def save_robot_config(workspace: str | Path, config: dict[str, Any]) -> Path:
-    target = robot_config_path(workspace)
+def save_robot_config(robot_home: str | Path, config: dict[str, Any]) -> Path:
+    target = robot_config_path(robot_home)
     _dump_yaml(config, target)
     return target
 
@@ -333,25 +366,25 @@ def save_robot_config(workspace: str | Path, config: dict[str, Any]) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def robot_env_path(workspace: str | Path) -> Path:
-    return Path(workspace) / ROBOT_ENV_FILENAME
+def robot_env_path(robot_home: str | Path) -> Path:
+    return Path(robot_home) / ROBOT_ENV_FILENAME
 
 
-def load_robot_env(workspace: str | Path) -> dict[str, str]:
+def load_robot_env(robot_home: str | Path) -> dict[str, str]:
     """Load the bot-local ``.env`` next to ``robot.yaml`` (empty if missing).
 
     Backed by :func:`dotenv.dotenv_values` so we get the same parser
     behaviour everyone else in the Python ecosystem uses (quoted
     values, escapes, multi-line values, comments, ...).
     """
-    path = robot_env_path(workspace)
+    path = robot_env_path(robot_home)
     if not path.is_file():
         return {}
     parsed = dotenv_values(path)
     return {k: v for k, v in parsed.items() if v is not None}
 
 
-def write_robot_env(workspace: str | Path, values: dict[str, str]) -> Path:
+def write_robot_env(robot_home: str | Path, values: dict[str, str]) -> Path:
     """Merge ``values`` into the bot-local ``.env`` and rewrite the file.
 
     Existing variables are preserved with their original formatting;
@@ -363,7 +396,7 @@ def write_robot_env(workspace: str | Path, values: dict[str, str]) -> Path:
     typically holds secrets like the control-plane token. On Windows
     the call is best-effort.
     """
-    path = robot_env_path(workspace)
+    path = robot_env_path(robot_home)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         path.touch()
@@ -393,18 +426,32 @@ def _index_entries(home_override: str | Path | None = None) -> list[dict[str, An
     return [dict(entry) for entry in raw if isinstance(entry, dict)]
 
 
+def _index_entry_home(entry: dict[str, Any]) -> str | None:
+    """Read the robot-home path from a ``cephix.yaml#robots[]`` entry.
+
+    Prefers the current ``home:`` key; falls back to the legacy
+    ``workspace:`` key so configs written before the rename keep
+    resolving. Returns ``None`` when neither is set (the bot then
+    falls back to its conventional home).
+    """
+    raw = entry.get("home")
+    if raw is None:
+        raw = entry.get("workspace")  # legacy key
+    return str(raw) if raw else None
+
+
 def register_robot_override(
     robot_id: str,
-    workspace: str | Path,
+    robot_home: str | Path,
     home_override: str | Path | None = None,
 ) -> None:
-    """Record an out-of-convention workspace in ``cephix.yaml#robots[]``."""
+    """Record an out-of-convention robot home in ``cephix.yaml#robots[]``."""
     cfg = load_home_config(home_override)
     robots = cfg.get("robots") or []
     if not isinstance(robots, list):
         robots = []
     robots = [r for r in robots if not (isinstance(r, dict) and r.get("id") == robot_id)]
-    robots.append({"id": robot_id, "workspace": str(Path(workspace))})
+    robots.append({"id": robot_id, "home": str(Path(robot_home))})
     robots.sort(key=lambda r: str(r.get("id", "")))
     cfg["robots"] = robots
     save_home_config(cfg, home_override)
@@ -436,16 +483,21 @@ class RobotInstance:
     id: str
     name: str
     enabled: bool
-    workspace: Path
+    home: Path
     robot_yaml: Path
 
     @property
     def exists(self) -> bool:
         return self.robot_yaml.is_file()
 
+    @property
+    def workspace(self) -> Path:
+        """The robot's sandboxed tool workspace (``<home>/workspace/``)."""
+        return robot_workspace_path(self.home)
 
-def _instance_from_workspace(robot_id: str, workspace: Path) -> RobotInstance | None:
-    cfg_path = robot_config_path(workspace)
+
+def _instance_from_robot_home(robot_id: str, robot_home: Path) -> RobotInstance | None:
+    cfg_path = robot_config_path(robot_home)
     if not cfg_path.is_file():
         return None
     try:
@@ -459,7 +511,7 @@ def _instance_from_workspace(robot_id: str, workspace: Path) -> RobotInstance | 
         id=robot_id,
         name=name,
         enabled=enabled,
-        workspace=workspace,
+        home=robot_home,
         robot_yaml=cfg_path,
     )
 
@@ -469,7 +521,7 @@ def discover_robots(home_override: str | Path | None = None) -> list[RobotInstan
 
     Lookup order per id:
 
-    1. Index entries in ``cephix.yaml#robots[]`` (workspace overrides).
+    1. Index entries in ``cephix.yaml#robots[]`` (robot-home overrides).
     2. Auto-discovered directories under ``~/.cephix/robots/*/``.
 
     Index entries win when both a directory under the convention and an
@@ -481,12 +533,12 @@ def discover_robots(home_override: str | Path | None = None) -> list[RobotInstan
         robot_id = str(entry.get("id") or "").strip()
         if not robot_id:
             continue
-        workspace_raw = entry.get("workspace")
-        if workspace_raw:
-            workspace = Path(str(workspace_raw)).expanduser()
+        home_raw = _index_entry_home(entry)
+        if home_raw:
+            robot_home = Path(home_raw).expanduser()
         else:
-            workspace = default_workspace_for(robot_id, home_override)
-        instance = _instance_from_workspace(robot_id, workspace)
+            robot_home = default_robot_home_for(robot_id, home_override)
+        instance = _instance_from_robot_home(robot_id, robot_home)
         if instance is not None:
             seen[robot_id] = instance
 
@@ -498,7 +550,7 @@ def discover_robots(home_override: str | Path | None = None) -> list[RobotInstan
             robot_id = child.name
             if robot_id in seen:
                 continue
-            instance = _instance_from_workspace(robot_id, child)
+            instance = _instance_from_robot_home(robot_id, child)
             if instance is not None:
                 seen[robot_id] = instance
 
@@ -513,21 +565,21 @@ def resolve_robot_instance(
     for entry in _index_entries(home_override):
         if str(entry.get("id") or "") != robot_id:
             continue
-        workspace_raw = entry.get("workspace")
-        if workspace_raw:
-            workspace = Path(str(workspace_raw)).expanduser()
+        home_raw = _index_entry_home(entry)
+        if home_raw:
+            robot_home = Path(home_raw).expanduser()
         else:
-            workspace = default_workspace_for(robot_id, home_override)
-        instance = _instance_from_workspace(robot_id, workspace)
+            robot_home = default_robot_home_for(robot_id, home_override)
+        instance = _instance_from_robot_home(robot_id, robot_home)
         if instance is None:
             raise FileNotFoundError(
-                f"robot {robot_id!r} is registered with workspace {workspace}, "
+                f"robot {robot_id!r} is registered with home {robot_home}, "
                 f"but no robot.yaml was found there"
             )
         return instance
 
-    workspace = default_workspace_for(robot_id, home_override)
-    instance = _instance_from_workspace(robot_id, workspace)
+    robot_home = default_robot_home_for(robot_id, home_override)
+    instance = _instance_from_robot_home(robot_id, robot_home)
     if instance is None:
         raise FileNotFoundError(f"no such robot: {robot_id!r}")
     return instance

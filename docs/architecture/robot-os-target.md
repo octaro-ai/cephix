@@ -1029,7 +1029,7 @@ Beispiel:
 ```yaml
 persistence:
   name: jsonl
-  path: logs       # Roboter-weiter Persistenz-Root, relativ zum Workspace
+  path: logs       # Roboter-weiter Persistenz-Root, relativ zum Robot-Home
 telemetry:
   enabled: true    # writes to channel "telemetry"
 audit:
@@ -1049,21 +1049,33 @@ Mitgeliefert ist heute nur `JsonlPersistenceProvider`: ein Channel
 enthalten (`runs/2026-05-25`), absolute Namen sind verboten -- damit
 gibt es keine Path-Traversal-Verwirrung.
 
-#### `logs/` als Workspace-Konvention
+#### `logs/` als Robot-Home-Konvention
 
 Der Default-Persistenz-Root ist `logs/`, also relativ zum
-Workspace des Bots. Alle "Aufzeichnungen" eines Roboters liegen
-damit in einem einzigen Verzeichnis nebeneinander:
+**Robot-Home** des Bots (`~/.cephix/robots/<id>/`). Alle
+"Aufzeichnungen" eines Roboters liegen damit in einem einzigen
+Verzeichnis nebeneinander:
 
 ```
-<workspace>/
+<robot_home>/
   robot.yaml         # Konfiguration
   .env               # Secrets (nicht in Git)
   logs/
     cephix.log       # operationelles Console-Log (nur in detached/non-TTY runs)
     telemetry.jsonl  # Channel "telemetry" (rohe Bus-Spur, BusRecorder)
     audit.jsonl      # Channel "audit" (kuratierte RobotAuditNote)
+  sessions/          # Session-Store
+  firmware/          # CONSTITUTION.md, POLICY.md, ...
+  configs/           # heartbeats.yaml, ...
+  workspace/         # Datei-Sandbox der Robot-Tools (s.u.)
 ```
+
+> **Robot-Home vs. Workspace.** Das *Robot-Home* ist die gesamte
+> On-Disk-Praesenz des Bots (Config, Secrets, Maschinerie). Das
+> *Workspace* (`<robot_home>/workspace/`) ist die enge Sandbox, an
+> der die Filesystem-Tools des Bots verwurzelt sind -- bewusst
+> getrennt von Logs, Secrets und Firmware, damit ein Tool-Call die
+> Maschinerie des Bots weder lesen noch ueberschreiben kann.
 
 Das Console-Log (`logs/cephix.log`) ist *kein* Teil des Persistenz-
 Layers -- es ist menschlich lesbares stdlib-`logging` aus

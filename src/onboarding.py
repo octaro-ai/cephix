@@ -24,10 +24,11 @@ from src.components import ComponentCategory, RobotComponent
 from src.configuration import (
     CONTROL_PLANE_TOKEN_ENV,
     RobotInstance,
-    default_workspace_for,
+    default_robot_home_for,
     home_defaults,
     load_robot_config,
     load_robot_env,
+    robot_workspace_path,
     robots_root,
     save_robot_config,
     slugify_robot_id,
@@ -82,10 +83,10 @@ def run_wizard(
             console.print(f"[red]slug {slug!r} is already taken; aborting[/]")
             return None
 
-    workspace = default_workspace_for(slug, home_override)
-    if workspace.exists() and any(workspace.iterdir()):
+    robot_home = default_robot_home_for(slug, home_override)
+    if robot_home.exists() and any(robot_home.iterdir()):
         console.print(
-            f"[red]workspace {workspace} already exists and is not empty; aborting[/]"
+            f"[red]robot home {robot_home} already exists and is not empty; aborting[/]"
         )
         return None
 
@@ -128,19 +129,25 @@ def run_wizard(
     if channel_specs is not None:
         robot_yaml["channels"] = channel_specs
 
-    workspace.mkdir(parents=True, exist_ok=True)
-    save_robot_config(workspace, robot_yaml)
+    robot_home.mkdir(parents=True, exist_ok=True)
+    save_robot_config(robot_home, robot_yaml)
 
-    env_path = _ensure_control_plane_token(workspace)
+    # Create the filesystem-tool sandbox up front so it shows in the
+    # fresh robot home and the tool can list it immediately.
+    workspace = robot_workspace_path(robot_home)
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    env_path = _ensure_control_plane_token(robot_home)
 
     console.print()
     console.print(
         Panel(
             f"[bold]{name}[/] is ready.\n\n"
-            f"  ID:        {slug}\n"
-            f"  Workspace: {workspace}\n"
-            f"  Config:    {workspace / 'robot.yaml'}\n"
-            f"  Secrets:   {env_path}  [dim](control-plane token)[/]",
+            f"  ID:         {slug}\n"
+            f"  Robot home: {robot_home}\n"
+            f"  Config:     {robot_home / 'robot.yaml'}\n"
+            f"  Workspace:  {workspace}  [dim](robot's file sandbox)[/]\n"
+            f"  Secrets:    {env_path}  [dim](control-plane token)[/]",
             title="[green]Robot created[/]",
             border_style="green",
             padding=(0, 1),
@@ -151,8 +158,8 @@ def run_wizard(
         id=slug,
         name=name,
         enabled=True,
-        workspace=workspace,
-        robot_yaml=workspace / "robot.yaml",
+        home=robot_home,
+        robot_yaml=robot_home / "robot.yaml",
     )
 
 
@@ -162,7 +169,7 @@ def reconfigure(
     home_override: str | Path | None = None,
     console: Console | None = None,
 ) -> None:
-    """Re-run the wizard for an existing bot, preserving id / workspace."""
+    """Re-run the wizard for an existing bot, preserving id / robot home."""
     console = console or Console()
     console.print(
         Panel(
@@ -172,7 +179,7 @@ def reconfigure(
         )
     )
 
-    current = load_robot_config(instance.workspace)
+    current = load_robot_config(instance.home)
     name = Prompt.ask(
         "Robot name", default=str(current.get("name") or instance.name), console=console
     ).strip() or instance.name
@@ -227,10 +234,10 @@ def reconfigure(
     if channel_specs is not None:
         new_yaml["channels"] = channel_specs
 
-    save_robot_config(instance.workspace, new_yaml)
-    _ensure_control_plane_token(instance.workspace)
+    save_robot_config(instance.home, new_yaml)
+    _ensure_control_plane_token(instance.home)
     console.print(
-        f"[green]updated[/] {instance.workspace / 'robot.yaml'}"
+        f"[green]updated[/] {instance.home / 'robot.yaml'}"
     )
 
 
@@ -266,18 +273,18 @@ def _existing_slugs(home_override: str | Path | None) -> set[str]:
     return {p.name for p in root.iterdir() if p.is_dir()}
 
 
-def _ensure_control_plane_token(workspace: Path) -> Path:
+def _ensure_control_plane_token(robot_home: Path) -> Path:
     """Make sure ``CEPHIX_CONTROL_PLANE_TOKEN`` is in the bot-local .env.
 
     Existing tokens are kept (token rotation is then a deliberate
     manual step). Only generates a new value if the variable is
     missing. Returns the path to the ``.env`` file for display.
     """
-    existing = load_robot_env(workspace)
+    existing = load_robot_env(robot_home)
     if existing.get(CONTROL_PLANE_TOKEN_ENV):
-        return workspace / ".env"
+        return robot_home / ".env"
     token = secrets.token_hex(32)
-    return write_robot_env(workspace, {CONTROL_PLANE_TOKEN_ENV: token})
+    return write_robot_env(robot_home, {CONTROL_PLANE_TOKEN_ENV: token})
 
 
 def _pick_component(

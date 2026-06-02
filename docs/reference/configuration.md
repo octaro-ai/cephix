@@ -2,7 +2,7 @@
 
 Cephix configuration is layered at host and robot level. The host owns the
 central registry and defaults; each robot instance can then override or extend
-those values in its own workspace.
+those values in its own robot home.
 
 ## Layering
 
@@ -48,11 +48,16 @@ defaults:
 robots:
   - id: myrobot
     name: MyRobot
-    workspace: ~/.cephix/robots/myrobot
+    home: ~/.cephix/robots/myrobot   # legacy key `workspace:` is still read
     config_path: ~/.cephix/robots/myrobot/robot.yaml
     enabled: true
     autostart: false
 ```
+
+A `robots[]` entry is only needed when a robot's home lives outside the
+convention (`~/.cephix/robots/<id>/`). Bots inside the convention are
+auto-discovered. The path is stored under `home:`; entries written before
+the rename used `workspace:` and continue to resolve.
 
 The `robots` entry may also carry per-robot defaults such as `websocket` or
 `runtime`, but normal onboarding writes runtime values into the robot's
@@ -60,7 +65,7 @@ The `robots` entry may also carry per-robot defaults such as `websocket` or
 
 ## Robot config — `robot.yaml`
 
-`cephix init <robot_id>` creates the robot workspace and writes
+`cephix init <robot_id>` creates the robot home and writes
 `~/.cephix/robots/<robot_id>/robot.yaml`.
 
 ```yaml
@@ -159,21 +164,30 @@ The most commonly used:
 
 ## Runtime files
 
-Inside `~/.cephix/robots/<robot_id>/`:
+`~/.cephix/robots/<robot_id>/` is the robot's **home** - its whole on-disk
+presence. The directories below are created lazily by the components that
+consume them:
 
 ```
 robot.yaml       Robot-local config
 .env             Robot-local secrets
 firmware/        AGENTS.md, POLICY.md, CONSTITUTION.md, HEARTBEAT.md
-memory/          IDENTITY.md, USER.md, MEMORY.md, BOOTSTRAP.md, daily/
-sops/            SOP YAML files
-logs/            robot_events.jsonl and other event logs
+logs/            telemetry.jsonl, audit.jsonl, cephix.log
 sessions/        Runtime session data
-memory_data/     Persistent memory store
-notebooks/       Work/audit notebooks
-approvals        JSONL approval rules
+configs/         User-editable YAML lists (heartbeats.yaml, ...)
+workspace/       The robot's file sandbox (see below)
 runtime.json     Actual bind/port while the service is running
 ```
+
+### `workspace/` - the file-tool sandbox
+
+The `workspace/` sub-directory is the **only** part of the robot home the
+robot's own filesystem tools can reach. The tool-execution layer roots its
+`FilesystemConnection` there, deliberately apart from the bot's machinery
+(`.env`, `firmware/`, `logs/`, ...), so an LLM tool call can read and write
+the robot's working files but cannot touch its secrets or rewrite its
+firmware. Put files you want the robot to operate on under
+`~/.cephix/robots/<robot_id>/workspace/`.
 
 `runtime.json` is written by `cephix start` after the WebSocket server has
 bound its actual port. `cephix chat <robot_id>` prefers this file over the

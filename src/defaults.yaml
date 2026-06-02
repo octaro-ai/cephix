@@ -106,9 +106,11 @@ defaults:
         - {name: session-store}
         - {name: config-store}
       # Bus-attached MCS tool execution layer. Hosts ToolDrivers and
-      # routes ``tool.invoke`` requests. The default persistence
-      # FilesystemConnection is auto-injected so the upstream
-      # ``mcs-driver-filesystem`` driver lights up automatically.
+      # routes ``tool.invoke`` requests. A FilesystemConnection rooted
+      # at the bot's <robot_home>/workspace/ sandbox is auto-injected,
+      # so the upstream ``mcs-driver-filesystem`` driver lights up
+      # automatically -- scoped to the workspace, away from the bot's
+      # machinery (logs, secrets, firmware).
       bus_provider:
         - {name: tool-execution}
       kernel:
@@ -144,7 +146,7 @@ defaults:
     utility:
       # Off-bus helpers consumed by reference by other components.
       # The model catalog ships its bundled `llmprice` snapshot;
-      # the markdown firmware store reads <workspace>/firmware/;
+      # the markdown firmware store reads <robot_home>/firmware/;
       # the session store routes through the default persistence
       # connection and writes to its own bucket below the connection
       # root (default <connection-root>/sessions/). Override
@@ -169,7 +171,7 @@ defaults:
         path: /ws
       # Heartbeat: cron-scheduled, fire-and-forget. Schedule list
       # is loaded from the config-store at boot
-      # (<workspace>/configs/heartbeats.yaml -- a bare YAML list).
+      # (<robot_home>/configs/heartbeats.yaml -- a bare YAML list).
       # ``default_principal`` is the attribution used for every
       # emitted event whose entry does not override
       # ``emit.principal``.
@@ -181,14 +183,18 @@ defaults:
       # backend adapter (level 0), filesystem connection (level 1),
       # event-stream provider (level 2) -- synthesized by the builder
       # from a single line. The connection root defaults to the
-      # workspace; the provider writes its channels under the
-      # `directory:` subdir (default `logs/`) so a fresh workspace
-      # ends up with <workspace>/logs/telemetry.jsonl,
-      # <workspace>/logs/audit.jsonl, while sibling utilities like
+      # robot home; the provider writes its channels under the
+      # `directory:` subdir (default `logs/`) so a fresh robot home
+      # ends up with <robot_home>/logs/telemetry.jsonl,
+      # <robot_home>/logs/audit.jsonl, while sibling utilities like
       # the session store keep their own bucket
-      # (<workspace>/sessions/). Override `path:` to anchor the
-      # connection elsewhere (relative -> workspace, absolute as-is);
+      # (<robot_home>/sessions/). Override `path:` to anchor the
+      # connection elsewhere (relative -> robot home, absolute as-is);
       # override `adapter:` to swap the backend (future: `s3-fs`, ...).
+      #
+      # NOTE: this is the bot's machinery root, NOT the filesystem-tool
+      # sandbox. The LLM's file tools are rooted at the separate
+      # <robot_home>/workspace/ sub-directory (see tool-execution).
       # Records are written as JSONL inline.
       - {name: filesystem-events, directory: logs, adapter: local-fs}
 
@@ -216,12 +222,12 @@ defaults:
         port_range: [9876, 9999]
         path: /control
 
-# Optional list of bots whose workspace lives outside the convention
+# Optional list of bots whose robot home lives outside the convention
 # (~/.cephix/robots/<id>/). Bots inside the convention are auto-discovered
 # and do NOT need an entry here.
 #
 # Example:
 #   robots:
 #     - id: dreamgirl
-#       workspace: D:/special/dreamgirl
+#       home: D:/special/dreamgirl   # legacy key `workspace:` still read
 robots: []

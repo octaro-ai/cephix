@@ -106,7 +106,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
 
 
 def _cmd_remove(args: argparse.Namespace) -> int:
-    """Delete a robot for good: workspace and index entry both go.
+    """Delete a robot for good: robot home and index entry both go.
 
     For the soft case ("hide it from the smart default but keep the
     config"), use ``cephix disable`` instead.
@@ -122,7 +122,7 @@ def _cmd_remove(args: argparse.Namespace) -> int:
     if not args.yes:
         prompt = (
             f"this will permanently delete robot {instance.id!r} and its "
-            f"workspace at {instance.workspace}.\n"
+            f"home at {instance.home}.\n"
             "(use 'cephix disable' to keep it on disk.)\n"
             "continue? [y/N] "
         )
@@ -135,9 +135,9 @@ def _cmd_remove(args: argparse.Namespace) -> int:
             return 1
 
     unregister_robot_override(instance.id, home_override=home_override)
-    if instance.workspace.exists():
-        shutil.rmtree(instance.workspace, ignore_errors=False)
-        print(f"deleted workspace {instance.workspace}")
+    if instance.home.exists():
+        shutil.rmtree(instance.home, ignore_errors=False)
+        print(f"deleted robot home {instance.home}")
     print(f"removed robot {instance.id!r}")
     return 0
 
@@ -158,13 +158,13 @@ def _set_enabled(args: argparse.Namespace, *, enabled: bool) -> int:
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    cfg = load_robot_config(instance.workspace)
+    cfg = load_robot_config(instance.home)
     if cfg.get("enabled", True) == enabled:
         state = "enabled" if enabled else "disabled"
         print(f"robot {instance.id!r} is already {state}")
         return 0
     cfg["enabled"] = enabled
-    save_robot_config(instance.workspace, cfg)
+    save_robot_config(instance.home, cfg)
     state = "enabled" if enabled else "disabled"
     print(f"robot {instance.id!r} is now {state}")
     return 0
@@ -237,7 +237,7 @@ def _normalise_home(home: str | None) -> Path | None:
     return Path(home).expanduser()
 
 
-def _resolve_log_file(explicit: str | None, *, workspace: Path) -> str | None:
+def _resolve_log_file(explicit: str | None, *, robot_home: Path) -> str | None:
     """Decide where the operational console log goes.
 
     Precedence:
@@ -247,8 +247,8 @@ def _resolve_log_file(explicit: str | None, *, workspace: Path) -> str | None:
       Convenient for ``cephix start`` in a developer shell: logs
       stream to the terminal, no stale files left behind.
     - Detached / daemon-style runs (no TTY: systemd, Docker, pipe)
-      -> ``<workspace>/logs/cephix.log``. The directory is created
-      lazily so a fresh workspace doesn't need any pre-setup.
+      -> ``<robot_home>/logs/cephix.log``. The directory is created
+      lazily so a fresh robot home doesn't need any pre-setup.
 
     The structured persistence files (``logs/telemetry.jsonl``,
     ``logs/audit.jsonl``) live in the same ``logs/`` directory. The
@@ -259,7 +259,7 @@ def _resolve_log_file(explicit: str | None, *, workspace: Path) -> str | None:
         return explicit
     if sys.stderr.isatty():
         return None
-    log_dir = workspace / "logs"
+    log_dir = robot_home / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     return str(log_dir / "cephix.log")
 
@@ -269,13 +269,13 @@ def _print_instance_table(instances: Sequence[RobotInstance]) -> None:
     name_width = max((len(i.name) for i in instances), default=4)
     id_width = max(id_width, 2)
     name_width = max(name_width, 4)
-    header = f"{'ID':<{id_width}}  {'NAME':<{name_width}}  {'STATUS':<8}  WORKSPACE"
+    header = f"{'ID':<{id_width}}  {'NAME':<{name_width}}  {'STATUS':<8}  HOME"
     print(header)
     print("-" * len(header))
     for inst in instances:
         status = "enabled" if inst.enabled else "disabled"
         print(
-            f"{inst.id:<{id_width}}  {inst.name:<{name_width}}  {status:<8}  {inst.workspace}"
+            f"{inst.id:<{id_width}}  {inst.name:<{name_width}}  {status:<8}  {inst.home}"
         )
 
 
@@ -300,11 +300,11 @@ def _start_instance(
 ) -> int:
     from src.builder import build_robot_from_config
 
-    resolved_log_file = _resolve_log_file(log_file, workspace=instance.workspace)
+    resolved_log_file = _resolve_log_file(log_file, robot_home=instance.home)
     configure_logging(level=log_level, log_file=resolved_log_file)
-    home_override = instance.workspace.parent.parent
+    home_override = instance.home.parent.parent
     if home_override.name != "robots":
-        home_override = None  # workspace lives outside the convention; use defaults
+        home_override = None  # robot home lives outside the convention; use defaults
 
     try:
         defaults = home_defaults(home_override)
@@ -312,7 +312,7 @@ def _start_instance(
         logger.warning("ignoring cephix.yaml#defaults: %s", exc)
         defaults = {}
 
-    robot_yaml = load_robot_config(instance.workspace)
+    robot_yaml = load_robot_config(instance.home)
     declared_id = robot_yaml.get("id")
     if declared_id and declared_id != instance.id:
         logger.warning(
@@ -321,10 +321,14 @@ def _start_instance(
             instance.id,
         )
 
+    # Ensure the filesystem-tool sandbox exists so the tool can list
+    # an empty workspace cleanly on a fresh or pre-rename robot.
+    instance.workspace.mkdir(parents=True, exist_ok=True)
+
     robot = build_robot_from_config(
         robot_yaml,
         defaults=defaults,
-        workspace=instance.workspace,
+        robot_home=instance.home,
     )
     robot.run()
     return 0
@@ -382,7 +386,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     remove_parser = subparsers.add_parser(
         "remove",
-        help="Delete a robot and its workspace. Use 'disable' for a soft toggle.",
+        help="Delete a robot and its home directory. Use 'disable' for a soft toggle.",
     )
     remove_parser.add_argument("robot_id", help="Robot id to remove.")
     remove_parser.add_argument(

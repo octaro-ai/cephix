@@ -15,7 +15,7 @@ import pytest
 
 from src import cli
 from src.configuration import (
-    default_workspace_for,
+    default_robot_home_for,
     ensure_home_config,
     register_robot_override,
     save_robot_config,
@@ -30,10 +30,10 @@ def home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 def _make_bot(home_path: Path, robot_id: str, *, enabled: bool = True) -> None:
-    workspace = default_workspace_for(robot_id, home_path)
-    workspace.mkdir(parents=True, exist_ok=True)
+    robot_home = default_robot_home_for(robot_id, home_path)
+    robot_home.mkdir(parents=True, exist_ok=True)
     save_robot_config(
-        workspace,
+        robot_home,
         {
             "id": robot_id,
             "name": robot_id.capitalize(),
@@ -124,7 +124,7 @@ def test_smart_default_zero_bots_in_tty_runs_wizard(
     fake_instance = type(
         "FakeInstance",
         (),
-        {"id": "alpha", "name": "Alpha", "enabled": True, "workspace": home},
+        {"id": "alpha", "name": "Alpha", "enabled": True, "home": home},
     )()
 
     def fake_wizard(**kwargs: Any) -> Any:
@@ -194,10 +194,10 @@ def test_smart_default_many_bots_quit_returns_error(
 # ---------------------------------------------------------------------------
 
 
-def test_remove_unregisters_external_workspace(
+def test_remove_unregisters_external_home(
     home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Removing an out-of-convention bot deletes both index and workspace."""
+    """Removing an out-of-convention bot deletes both index and robot home."""
     other_ws = home / "elsewhere" / "alpha"
     other_ws.mkdir(parents=True)
     save_robot_config(
@@ -213,14 +213,14 @@ def test_remove_unregisters_external_workspace(
     assert rc == 1
 
 
-def test_remove_deletes_convention_workspace(home: Path) -> None:
-    """Default behaviour: workspace under ~/.cephix/robots/<id>/ is wiped."""
+def test_remove_deletes_convention_home(home: Path) -> None:
+    """Default behaviour: robot home under ~/.cephix/robots/<id>/ is wiped."""
     _make_bot(home, "alpha")
-    workspace = default_workspace_for("alpha", home)
-    assert workspace.exists()
+    robot_home = default_robot_home_for("alpha", home)
+    assert robot_home.exists()
     rc = cli.main(["remove", "alpha", "--yes"])
     assert rc == 0
-    assert not workspace.exists()
+    assert not robot_home.exists()
     # Re-running smart default in TTY mode should NOT find the bot any more.
     rc = cli.main(["list"])
     assert rc == 0
@@ -230,15 +230,15 @@ def test_remove_aborts_without_confirmation(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _make_bot(home, "alpha")
-    workspace = default_workspace_for("alpha", home)
+    robot_home = default_robot_home_for("alpha", home)
     inputs = iter([""])
     monkeypatch.setattr("builtins.input", lambda *args, **kwargs: next(inputs))
     rc = cli.main(["remove", "alpha"])
     out = capsys.readouterr().out
     assert rc == 1
     assert "aborted" in out
-    # Workspace must still be there when the user said no.
-    assert workspace.exists()
+    # Robot home must still be there when the user said no.
+    assert robot_home.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -254,11 +254,11 @@ def test_disable_flips_enabled_flag(
     out = capsys.readouterr().out
     assert rc == 0
     assert "disabled" in out
-    workspace = default_workspace_for("alpha", home)
+    robot_home = default_robot_home_for("alpha", home)
     cfg = save_robot_config  # avoid lint about unused import
     from src.configuration import load_robot_config
 
-    assert load_robot_config(workspace)["enabled"] is False
+    assert load_robot_config(robot_home)["enabled"] is False
 
 
 def test_enable_flips_enabled_flag(
@@ -269,10 +269,10 @@ def test_enable_flips_enabled_flag(
     out = capsys.readouterr().out
     assert rc == 0
     assert "enabled" in out
-    workspace = default_workspace_for("alpha", home)
+    robot_home = default_robot_home_for("alpha", home)
     from src.configuration import load_robot_config
 
-    assert load_robot_config(workspace)["enabled"] is True
+    assert load_robot_config(robot_home)["enabled"] is True
 
 
 def test_disable_is_idempotent(
@@ -303,7 +303,7 @@ def test_init_delegates_to_wizard(home: Path, monkeypatch: pytest.MonkeyPatch) -
     fake_instance = type(
         "FakeInstance",
         (),
-        {"id": "alpha", "name": "Alpha", "enabled": True, "workspace": home},
+        {"id": "alpha", "name": "Alpha", "enabled": True, "home": home},
     )()
 
     captured: dict[str, Any] = {}
@@ -336,9 +336,9 @@ def test_resolve_log_file_explicit_wins(
 ) -> None:
     """An explicit --log-file argument always wins, even on a TTY."""
     monkeypatch.setattr("sys.stderr.isatty", lambda: True)
-    resolved = cli._resolve_log_file("/var/log/custom.log", workspace=tmp_path)
+    resolved = cli._resolve_log_file("/var/log/custom.log", robot_home=tmp_path)
     assert resolved == "/var/log/custom.log"
-    # Workspace logs/ directory must NOT be auto-created in the
+    # The logs/ directory must NOT be auto-created in the
     # explicit-path case; the user is in charge.
     assert not (tmp_path / "logs").exists()
 
@@ -348,17 +348,17 @@ def test_resolve_log_file_tty_returns_none(
 ) -> None:
     """In an interactive terminal, default to stderr (None)."""
     monkeypatch.setattr("sys.stderr.isatty", lambda: True)
-    resolved = cli._resolve_log_file(None, workspace=tmp_path)
+    resolved = cli._resolve_log_file(None, robot_home=tmp_path)
     assert resolved is None
     assert not (tmp_path / "logs").exists()
 
 
-def test_resolve_log_file_non_tty_writes_to_workspace(
+def test_resolve_log_file_non_tty_writes_to_robot_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Detached / daemon runs auto-route to <workspace>/logs/cephix.log."""
+    """Detached / daemon runs auto-route to <robot_home>/logs/cephix.log."""
     monkeypatch.setattr("sys.stderr.isatty", lambda: False)
-    resolved = cli._resolve_log_file(None, workspace=tmp_path)
+    resolved = cli._resolve_log_file(None, robot_home=tmp_path)
     assert resolved == str(tmp_path / "logs" / "cephix.log")
     # The directory is created lazily so the file handler can attach
     # without further setup.

@@ -48,6 +48,7 @@ from src.configuration import (
     ComponentLibrary,
     home_dir,
     load_robot_env,
+    robot_workspace_path,
 )
 from src.credentials import (
     CredentialProvider,
@@ -75,8 +76,8 @@ _DEFAULT_TELEMETRY_CHANNEL = "telemetry"
 _DEFAULT_AUDIT_CHANNEL = "audit"
 
 # Packaged firmware templates that ship with cephix. Copied into the
-# robot workspace on a per-file copy-if-missing basis whenever a
-# ``firmware-store`` utility is built. Lives next to ``defaults.yaml``
+# robot's ``firmware/`` directory on a per-file copy-if-missing basis
+# whenever a ``firmware-store`` utility is built. Lives next to ``defaults.yaml``
 # under :mod:`src` so editable installs and wheels both find it.
 _PACKAGED_FIRMWARE_DIR: Path = Path(__file__).with_name("firmware")
 
@@ -105,7 +106,7 @@ def build_robot_from_config(
     robot_yaml: dict[str, Any],
     *,
     defaults: dict[str, Any] | None = None,
-    workspace: str | Path | None = None,
+    robot_home: str | Path | None = None,
 ) -> Robot:
     """Build a :class:`Robot` from a parsed ``robot.yaml`` mapping.
 
@@ -116,18 +117,21 @@ def build_robot_from_config(
     Legacy callers that pass a flat dict (without ``templates:``
     /``components:``) get only the lookup paths they provide.
 
-    ``workspace`` is the bot's directory (where ``robot.yaml``
+    ``robot_home`` is the bot's directory (where ``robot.yaml``
     lives). Used to locate the ``.env`` file for the control-plane
-    token *and* as the default first store for the credential
-    subsystem. If omitted, no ``.env`` is read and the control plane
-    refuses to start (deny-by-default).
+    token, as the default first store for the credential subsystem,
+    as the persistence anchor (``logs/``, ``sessions/``, ...), and
+    as the parent of the filesystem-tool sandbox
+    (``<robot_home>/workspace/``). If omitted, no ``.env`` is read,
+    the control plane refuses to start (deny-by-default), and the
+    filesystem tools stay off.
 
     Build order:
 
     1. **Template + slot-merge** produces the resolved configuration.
     2. **Credentials** are constructed from the ``credentials:``
-       section (or a default chain anchored at workspace/.env and
-       ``~/.cephix/.env``).
+       section (or a default chain anchored at ``<robot_home>/.env``
+       and ``~/.cephix/.env``).
     3. The remaining configuration is run through
        :func:`~src.credentials.substitution.resolve_secrets` so every
        ``${KEY}`` reference is replaced before any component
@@ -191,7 +195,7 @@ def build_robot_from_config(
     # object, which is exactly the mix we want to dissolve.
     credentials_spec = cfg.pop("credentials", None)
     builder_credentials = _build_credential_stores(
-        credentials_spec, workspace=workspace
+        credentials_spec, robot_home=robot_home
     )
 
     # Phase 3: substitution. Walks every remaining section and
@@ -214,7 +218,7 @@ def build_robot_from_config(
     # The :class:`CredentialProvider` is built next and holds them as
     # the runtime resolve chain.
     robot_credential_stores = _build_credential_stores(
-        credentials_spec, workspace=workspace
+        credentials_spec, robot_home=robot_home
     )
     credentials = CredentialProvider(stores=robot_credential_stores)
 
@@ -232,15 +236,26 @@ def build_robot_from_config(
         persistence_index,
         connection_index,
     ) = _build_persistence_components(
-        cfg.get("persistence"), workspace, library=library
+        cfg.get("persistence"), robot_home, library=library
     )
+
+    # The filesystem tools are sandboxed to ``<robot_home>/workspace/``
+    # -- a dedicated connection, separate from the persistence root
+    # (which holds logs, sessions, firmware and secrets). Without a
+    # robot home there is nowhere to sandbox, so the tool layer boots
+    # without filesystem tools.
+    workspace_connection: FilesystemConnection | None = None
+    if robot_home is not None:
+        workspace_connection = FilesystemConnection(
+            adapter=LocalFSAdapter(),
+            root=robot_workspace_path(robot_home),
+        )
 
     utilities = _build_components_list(
         cfg.get("utility"),
         section_name="utility",
         expected_category=ComponentCategory.UTILITY,
         library=library,
-        workspace=workspace,
         connections=connection_index,
     )
     bus_utilities = _build_components_list(
@@ -248,7 +263,6 @@ def build_robot_from_config(
         section_name="bus_utility",
         expected_category=ComponentCategory.BUS_UTILITY,
         library=library,
-        workspace=workspace,
         connections=connection_index,
     )
     bus_providers = _build_components_list(
@@ -256,8 +270,8 @@ def build_robot_from_config(
         section_name="bus_provider",
         expected_category=ComponentCategory.BUS_PROVIDER,
         library=library,
-        workspace=workspace,
         connections=connection_index,
+        workspace_connection=workspace_connection,
     )
 
     # Index utilities by ``component_name`` so the kernel builder can
@@ -325,8 +339,8 @@ def build_robot_from_config(
         cfg.get("control_plane"), library=library
     )
     control_plane_token: str | None = None
-    if workspace is not None:
-        env = load_robot_env(workspace)
+    if robot_home is not None:
+        env = load_robot_env(robot_home)
         control_plane_token = env.get(CONTROL_PLANE_TOKEN_ENV) or None
 
     # Robot-side credential stores live in the components list so
@@ -865,9 +879,11 @@ _CONNECTION_AUTO_DI: dict[str, tuple[str, bool]] = {
     "session-store": ("connection", True),
     "firmware-store": ("connection", True),
     "config-store": ("connection", True),
-    # tool-execution layer takes the default persistence connection
-    # to back its MCS filesystem adapter; without a persistence stack
-    # the layer simply boots without the filesystem tools.
+    # tool-execution layer takes the dedicated workspace/ connection
+    # (NOT the persistence connection) to back its MCS filesystem
+    # adapter, so the LLM's file tools are sandboxed away from the
+    # bot's machinery. Without a robot home the layer simply boots
+    # without the filesystem tools.
     "tool-execution": ("filesystem_connection", False),
 }
 
@@ -878,25 +894,33 @@ def _build_components_list(
     section_name: str,
     expected_category: ComponentCategory,
     library: ComponentLibrary,
-    workspace: str | Path | None = None,
     connections: dict[str, FilesystemConnection] | None = None,
+    workspace_connection: FilesystemConnection | None = None,
 ) -> list[RobotComponent]:
     """Build a list of components from a category-keyed YAML section.
 
-    Used for ``utility:`` and ``bus_utility:``. Each entry is a
-    regular component spec (resolved via :func:`build` with library
-    defaults). The builder verifies the resulting component's
-    category matches the section so a misconfigured channel can't
-    sneak into the utility list and vice versa.
+    Used for ``utility:``, ``bus_utility:`` and ``bus_provider:``.
+    Each entry is a regular component spec (resolved via
+    :func:`build` with library defaults). The builder verifies the
+    resulting component's category matches the section so a
+    misconfigured channel can't sneak into the utility list and vice
+    versa.
 
     Convention-DI for components that take a
     :class:`FilesystemConnection` is driven by
-    :data:`_CONNECTION_AUTO_DI` (name -> (kwarg, required)). The
-    persistence-stack connection is auto-injected when the spec
-    leaves the kwarg blank. ``required=True`` (stores) makes a
-    missing persistence stack a build error; ``required=False``
-    (the tool-execution layer) leaves the kwarg unset so the
-    constructor's optional path is taken.
+    :data:`_CONNECTION_AUTO_DI` (name -> (kwarg, required)):
+
+    - The stores (``session-store``, ``firmware-store``,
+      ``config-store``) bind to the **persistence** connection
+      (``connections``), so they share the robot-home root with
+      telemetry/audit. ``required=True`` makes a missing persistence
+      stack a build error.
+    - The ``tool-execution`` layer instead binds to the dedicated
+      ``workspace_connection`` (the ``<robot_home>/workspace/``
+      sandbox). ``required=False`` -- without a sandbox it boots
+      without filesystem tools.
+
+    An explicit kwarg on the spec always wins over auto-injection.
 
     Special case: ``firmware-store`` also gets its starter
     templates seeded into the resolved directory on first build
@@ -921,6 +945,13 @@ def _build_components_list(
             kwarg, required = _CONNECTION_AUTO_DI[name]
             if kwarg in item:
                 connection = item[kwarg]
+            elif name == "tool-execution":
+                # Filesystem tools are sandboxed to the workspace/
+                # sub-directory, NOT the persistence root. A robot
+                # without a home gets no sandbox, hence no fs tools.
+                connection = workspace_connection
+                if connection is not None:
+                    extras[kwarg] = connection
             else:
                 connection = _resolve_persistence_connection(
                     name, item, connections
@@ -1031,8 +1062,8 @@ def _index_components_by_name(
     return out
 
 
-def _seed_firmware(workspace_firmware_dir: Path) -> None:
-    """Copy packaged firmware templates into the workspace per file.
+def _seed_firmware(firmware_dir: Path) -> None:
+    """Copy packaged firmware templates into the firmware dir per file.
 
     Only ever ``copy-if-missing``: a file the user has edited or
     deleted stays whatever the user made of it. Runs on every build
@@ -1043,9 +1074,9 @@ def _seed_firmware(workspace_firmware_dir: Path) -> None:
     """
     if not _PACKAGED_FIRMWARE_DIR.exists():
         return
-    workspace_firmware_dir.mkdir(parents=True, exist_ok=True)
+    firmware_dir.mkdir(parents=True, exist_ok=True)
     for src_file in sorted(_PACKAGED_FIRMWARE_DIR.glob("*.md")):
-        dst = workspace_firmware_dir / src_file.name
+        dst = firmware_dir / src_file.name
         if not dst.exists():
             shutil.copyfile(src_file, dst)
 
@@ -1058,14 +1089,14 @@ def _seed_firmware(workspace_firmware_dir: Path) -> None:
 def _build_credential_stores(
     spec: Any,
     *,
-    workspace: str | Path | None,
+    robot_home: str | Path | None,
 ) -> list[CredentialStorePort]:
     """Build the credential store chain from a ``credentials:`` section.
 
     Two cases:
 
     - **No ``credentials:`` section** -- the default chain is
-      ``robot-workspace/.env`` (if a workspace is provided),
+      ``<robot_home>/.env`` (if a robot home is provided),
       ``~/.cephix/.env`` (if it exists) and ``process-env``.
     - **An explicit ``credentials:`` section** -- the user lists
       stores in resolution order. Each entry is a mapping with at
@@ -1088,7 +1119,7 @@ def _build_credential_stores(
     """
     stores: list[CredentialStorePort] = []
     if spec is None:
-        stores.extend(_default_credential_stores(workspace))
+        stores.extend(_default_credential_stores(robot_home))
         return stores
     if not isinstance(spec, dict):
         raise ConfigError(
@@ -1097,7 +1128,7 @@ def _build_credential_stores(
         )
     store_specs = spec.get("stores")
     if store_specs is None:
-        stores.extend(_default_credential_stores(workspace))
+        stores.extend(_default_credential_stores(robot_home))
         return stores
     if not isinstance(store_specs, list):
         raise ConfigError(
@@ -1106,7 +1137,7 @@ def _build_credential_stores(
     for index, store_spec in enumerate(store_specs):
         stores.append(
             _build_credential_store(
-                store_spec, index=index, workspace=workspace
+                store_spec, index=index, robot_home=robot_home
             )
         )
     return stores
@@ -1135,7 +1166,7 @@ def _resolve_via_stores(
 
 
 def _default_credential_stores(
-    workspace: str | Path | None,
+    robot_home: str | Path | None,
 ) -> list[CredentialStorePort]:
     """The default store chain when no ``credentials:`` section exists.
 
@@ -1145,10 +1176,10 @@ def _default_credential_stores(
     has a path even if the file is empty.
     """
     out: list[CredentialStorePort] = []
-    if workspace is not None:
+    if robot_home is not None:
         out.append(
             EnvCredentialStore(
-                Path(workspace) / ROBOT_ENV_FILENAME,
+                Path(robot_home) / ROBOT_ENV_FILENAME,
                 name="env:robot",
             )
         )
@@ -1166,7 +1197,7 @@ def _build_credential_store(
     spec: Any,
     *,
     index: int,
-    workspace: str | Path | None,
+    robot_home: str | Path | None,
 ) -> CredentialStorePort:
     """Build one :class:`CredentialStorePort` from a YAML entry."""
     if not isinstance(spec, dict):
@@ -1189,8 +1220,8 @@ def _build_credential_store(
                 "'path'"
             )
         path = Path(path_raw).expanduser()
-        if not path.is_absolute() and workspace is not None:
-            path = Path(workspace) / path
+        if not path.is_absolute() and robot_home is not None:
+            path = Path(robot_home) / path
         if spec:
             raise ConfigError(
                 f"credentials.stores[{index}] (env): unknown keys "
@@ -1226,7 +1257,7 @@ _DEFAULT_PERSISTENCE_ID = "default"
 
 def _build_persistence_components(
     spec: Any,
-    workspace: str | Path | None,
+    robot_home: str | Path | None,
     *,
     library: ComponentLibrary,
 ) -> tuple[
@@ -1264,7 +1295,7 @@ def _build_persistence_components(
 
     Path semantics:
 
-    - ``path:`` (default: the workspace) -- root of the
+    - ``path:`` (default: the robot home) -- root of the
       :class:`FilesystemConnection`. Every utility wired to this
       connection (events, sessions, ...) sees paths relative to it.
     - ``directory:`` (default: ``logs``) -- the provider's bucket
@@ -1312,25 +1343,25 @@ def _build_persistence_components(
         used_ids.add(persistence_id)
 
         # Resolve connection root. ``path:`` is the user override --
-        # relative paths anchor at the workspace, absolute paths
-        # land as-is. Default = workspace (so the connection is
+        # relative paths anchor at the robot home, absolute paths
+        # land as-is. Default = robot home (so the connection is
         # shared between events and the session store, each with
-        # its own bucket below). Without a workspace and no absolute
+        # its own bucket below). Without a robot home and no absolute
         # ``path:``, the entry is silently dropped so a
-        # workspace-less robot still boots.
+        # home-less robot still boots.
         raw_path = enriched.get("path")
         if raw_path is None:
-            if workspace is None:
+            if robot_home is None:
                 continue
-            root = Path(workspace)
+            root = Path(robot_home)
         else:
             candidate = Path(str(raw_path)).expanduser()
             if candidate.is_absolute():
                 root = candidate
             else:
-                if workspace is None:
+                if robot_home is None:
                     continue
-                root = Path(workspace) / candidate
+                root = Path(robot_home) / candidate
 
         # Adapter (BACKEND) -- ``adapter:`` may name a future
         # ``s3-fs`` etc.; today only the local FS adapter ships.
@@ -1347,7 +1378,7 @@ def _build_persistence_components(
 
         # Provider (PROVIDER) -- the DAO observers depend on. Its
         # ``directory:`` is the provider's bucket inside the shared
-        # root, defaulting to ``logs/`` so a fresh workspace ends up
+        # root, defaulting to ``logs/`` so a fresh robot home ends up
         # with ``<root>/logs/telemetry.jsonl``,
         # ``<root>/logs/audit.jsonl``, ... while sibling utilities
         # (session store) keep their own bucket.

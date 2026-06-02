@@ -3,9 +3,12 @@
 Implements ``mcs.driver.filesystem.FilesystemPort`` structurally
 (duck typing -- no inheritance, no import of the port type at
 runtime) and routes every operation against a Cephix
-:class:`FilesystemConnection`. That keeps MCS tool calls inside
-the same workspace tree as telemetry, audit, sessions, firmware
-and configs, and reuses the connection's traversal guard.
+:class:`FilesystemConnection`. The builder roots that connection
+at the robot's ``<robot_home>/workspace/`` sandbox, so MCS tool
+calls are confined to the robot's working files and cannot reach
+its machinery (telemetry, audit, sessions, firmware, configs,
+secrets), which live elsewhere under the robot home. The
+connection's traversal guard keeps calls inside that root.
 
 Method shapes (return JSON strings for list/read/write, ``bool``
 for ``exists``, ``list[str]`` for ``list_files``) match the
@@ -68,7 +71,7 @@ class MCSFilesystemAdapter:
         First the connection's own ``resolve()`` rejects absolute
         paths and ``..`` segments before any filesystem call. Then
         the final ``Path.resolve()`` catches symlink escapes that
-        would otherwise jump out of the workspace.
+        would otherwise jump out of the workspace sandbox.
         """
         rel = PurePath(path)
         # Connection-level guard (sync, raises ValueError on bad input).

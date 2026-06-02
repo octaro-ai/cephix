@@ -37,7 +37,7 @@ class FilesystemConnection(RobotComponent):
     - ``adapter`` -- a :class:`FilesystemPort` from level 0
       (``LocalFSAdapter`` today, ``S3FSAdapter`` later).
     - ``root`` -- where channel-relative paths land. Typically the
-      robot's workspace ``logs/`` directory; the builder injects it.
+      robot home's ``logs/`` directory; the builder injects it.
 
     The connection does *not* know about record formats or codecs.
     Its API is line-oriented byte IO (via :class:`AppendWriter`),
@@ -172,7 +172,7 @@ class FilesystemConnection(RobotComponent):
         """Return the leaf names of entries in ``<root>/rel_path``.
 
         Empty input lists ``root`` itself. Returns ``[]`` for a
-        missing directory rather than raising -- a fresh workspace
+        missing directory rather than raising -- a fresh robot home
         has no sessions yet, but that is not an error.
         """
         return await self._adapter.listdir(self.resolve(rel_path))
@@ -187,7 +187,7 @@ class FilesystemConnection(RobotComponent):
         """Log the adapter -> connection wiring, then ensure root exists.
 
         Includes the resolved ``root`` in the log line so two
-        connections in the same robot (e.g. a workspace-rooted one
+        connections in the same robot (e.g. a home-rooted one
         plus a ``~/.cephix``-rooted one) are distinguishable at a
         glance:
 

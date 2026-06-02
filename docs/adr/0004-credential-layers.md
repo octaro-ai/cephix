@@ -48,7 +48,7 @@ object.
 
 The builder owns its own ephemeral credential store chain. It is a
 plain `list[CredentialStorePort]` constructed by
-`_build_credential_stores(spec, workspace)`, used by
+`_build_credential_stores(spec, robot_home)`, used by
 `_resolve_via_stores(stores, key)` during the substitution pass, and
 deleted (`del builder_credentials`) the moment substitution finishes.
 
@@ -168,7 +168,7 @@ land like this:
 
 [ deploy host ]
   preboot
-    ├─ if filesystem: load <workspace>/.env
+    ├─ if filesystem: load <robot_home>/.env
     ├─ else: read os.environ
     └─ exposes resolved values to robot's runtime stores
 

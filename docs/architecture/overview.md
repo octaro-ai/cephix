@@ -14,7 +14,7 @@ For full diagrams (component graph, message flow, approval flow), see [Diagrams]
 | **Entrypoints** | CLI, `__main__`, scripts | `src/cli.py`, `src/__main__.py`, `cephix-drp.py` |
 | **Composition root** | Wires concrete adapters into ports | `src/app.py` |
 | **Runtime** | Kernel, event loop, service, control plane | `src/runtime/`, `src/robot.py`, `src/service.py` |
-| **Configuration** | Host config, robot config, workspace layout, secrets | `src/configuration.py`, `src/defaults.yaml` |
+| **Configuration** | Host config, robot config, robot-home layout, secrets | `src/configuration.py`, `src/defaults.yaml` |
 | **Gateways** | Channel adapters (WebSocket wired; Telegram/WhatsApp code exists) | `src/gateways/` |
 | **Context** | Assembler, firmware store, memory docs, SOP resolver | `src/context.py`, `src/sop/` |
 | **Planners** | LLM and keyword planners | `src/planners/` |

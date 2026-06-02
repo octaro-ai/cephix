@@ -33,7 +33,7 @@ hit the transport and which don't.
 Concurrency: ``append`` may be called concurrently for the same
 session_id from one event loop; the store guarantees ordered
 writes. Cross-process safety is out of scope -- one robot owns
-its workspace, period.
+its home, period.
 """
 
 from __future__ import annotations

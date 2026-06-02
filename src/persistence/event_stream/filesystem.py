@@ -89,7 +89,7 @@ class FilesystemEventStreamProvider(RobotComponent):
         # connection root: telemetry / audit / ... all land under
         # ``<root>/<directory>/``. An empty string means "channels
         # sit directly under root", which is fine for tests but not
-        # the default -- a workspace shared with other utilities
+        # the default -- a robot home shared with other utilities
         # would otherwise collide.
         if not isinstance(directory, str):
             raise TypeError(

@@ -56,7 +56,7 @@ Why:
   entry: "is this connecting client the owner of this robot?" --
   rather than a per-event tenant-access lookup throughout the
   system.
-- **Builder is the multi-user layer.** A workspace
+- **Builder is the multi-user layer.** A robot home
   `~/.cephix/robots/<user>/` per user is the right granularity.
   Scaling to 1000 users is 1000 robot processes, not one robot
   with 1000 sessions.
