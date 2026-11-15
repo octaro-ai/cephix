@@ -1,4 +1,4 @@
-# SOPs — Standard Operating Procedures
+# SOPs - Standard Operating Procedures
 
 > An SOP is a **named, versioned procedure** the robot can follow when it
 > recognises a matching situation. SOPs are the harness's main mechanism
@@ -26,7 +26,7 @@ A real example from the repo: [`robot/sops/order-export.yaml`](https://github.co
 
 ```yaml
 name: order-export
-description: Daily order export — fetch, convert XML → PDF, mail, archive.
+description: Daily order export - fetch, convert XML → PDF, mail, archive.
 version: "1.0"
 
 trigger_patterns:
@@ -66,7 +66,7 @@ steps:
 | `required_tools` | Tool subset the planner is restricted to during this SOP |
 | `required_skills` | Skills the planner may compose from |
 | `steps` | Ordered guidance handed to the planner as part of the system prompt |
-| `safe_actions` | Tools that may execute without approval inside this SOP (target model; not yet deterministic — see [Status](../project/status.md)) |
+| `safe_actions` | Tools that may execute without approval inside this SOP (target model; not yet deterministic - see [Status](../project/status.md)) |
 | `learnings_document` | The associated audit notebook the LLM appends to |
 
 ## How an SOP enters the run
@@ -90,7 +90,7 @@ LLMPlanner builds system prompt
 ```
 
 The planner sees the SOP, the constrained tool set, and the notebook
-entries from prior runs of the same SOP — all in one assembled prompt.
+entries from prior runs of the same SOP - all in one assembled prompt.
 
 ## SOP × AutonomyLevel matrix
 
@@ -99,7 +99,7 @@ The mount logic in `_mount_tools()` combines SOP presence with the
 
 | AutonomyLevel | With matched SOP | Without SOP |
 |---|---|---|
-| **SCRIPTED** | Only `required_tools` of the SOP | (nothing useful — needs an SOP) |
+| **SCRIPTED** | Only `required_tools` of the SOP | (nothing useful - needs an SOP) |
 | **GUIDED** | `required_tools` + system tools | (degenerates to system tools only) |
 | **AUTONOMOUS** | `required_tools` + system tools | Full catalogue + system tools |
 | **CREATIVE** | as AUTONOMOUS + `procedure.propose` | as AUTONOMOUS + `procedure.propose` |
@@ -140,6 +140,6 @@ Authoring guidelines that have proven useful:
 
 ## Related
 
-- [Memory](memory.md) — global, always loaded
-- [Notebooks](notebooks.md) — artefact-bound, including `work:sop:<id>` and `audit:sop:<id>`
-- [Governance & Approvals](governance.md) — `safe_actions` and the guard
+- [Memory](memory.md) - global, always loaded
+- [Notebooks](notebooks.md) - artefact-bound, including `work:sop:<id>` and `audit:sop:<id>`
+- [Governance & Approvals](governance.md) - `safe_actions` and the guard

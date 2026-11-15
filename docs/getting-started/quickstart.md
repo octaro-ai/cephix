@@ -27,11 +27,11 @@ uv run python -m src init myrobot --name "MyRobot"
 This creates a host config at `~/.cephix/cephix.yaml`, registers the robot,
 and creates `~/.cephix/robots/myrobot/` with:
 
-- `robot.yaml` — per-robot runtime config
-- `.env` — per-robot secrets
-- `firmware/` — immutable guardrails
-- `memory/` — global memory documents
-- `sops/` — standard operating procedures
+- `robot.yaml` - per-robot runtime config
+- `.env` - per-robot secrets
+- `firmware/` - immutable guardrails
+- `memory/` - global memory documents
+- `sops/` - standard operating procedures
 - `logs/`, `sessions/`, `memory_data/`, `notebooks/`
 
 `init` prints the generated access and admin tokens. Keep them if you plan to
@@ -100,15 +100,15 @@ uv run python -m src admin status --admin-token <admin-token>
 
 ## Where to look when something goes wrong
 
-- **Console output** — the planner streams its tokens, tool calls are logged
+- **Console output** - the planner streams its tokens, tool calls are logged
   inline, telemetry events are visible.
-- **`logs/robot_events.jsonl`** — the WideEvent audit trail. Every phase emits
+- **`logs/robot_events.jsonl`** - the WideEvent audit trail. Every phase emits
   a structured event. Open it with `jq` or any JSONL viewer.
-- **Approval flow** — if a tool requires approval, you'll see an
+- **Approval flow** - if a tool requires approval, you'll see an
   `ApprovalPrompt` in the chat client with four buttons (Once / Always /
   No / Never). Decisions are stored as JSONL in
   `~/.cephix/robots/myrobot/approvals`.
-- **Configuration** — host defaults and robot registry live in
+- **Configuration** - host defaults and robot registry live in
   `~/.cephix/cephix.yaml`; robot-specific overrides live in
   `~/.cephix/robots/myrobot/robot.yaml`.
 

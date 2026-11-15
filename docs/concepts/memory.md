@@ -12,7 +12,7 @@ Memory is the **global long-term store** of the robot. It holds stable,
 cross-context recollections that are not tied to a single artefact (SOP,
 skill, tool).
 
-Memory is **always loaded into consciousness** — regardless of which SOP,
+Memory is **always loaded into consciousness** - regardless of which SOP,
 skill, or tool is currently active.
 
 ## Model of consciousness
@@ -21,19 +21,19 @@ skill, or tool is currently active.
 |---|---|
 | **Consciousness** | Everything loaded into the current prompt |
 | **Short-term memory** | Chat history of the running conversation |
-| **Memory** | Permanent knowledge — always loaded into consciousness |
-| **Subconsciousness** | Archived conversation tails, old notebooks, rotated memory — reachable only via search |
+| **Memory** | Permanent knowledge - always loaded into consciousness |
+| **Subconsciousness** | Archived conversation tails, old notebooks, rotated memory - reachable only via search |
 
 ### Composition of consciousness
 
 Consciousness is not a single store; it is the sum of everything the context
 assembler loads into the current prompt:
 
-1. **Firmware** — immutable guardrails (always loaded)
-2. **Memory** — global knowledge: `identity`, `user`, `memory` (always loaded)
-3. **Active notebooks** — `work` / `audit` entries of the currently active
+1. **Firmware** - immutable guardrails (always loaded)
+2. **Memory** - global knowledge: `identity`, `user`, `memory` (always loaded)
+3. **Active notebooks** - `work` / `audit` entries of the currently active
    SOPs, skills, and tools (loaded only when the artefact is active)
-4. **Chat history** — the running conversation (subject to compaction)
+4. **Chat history** - the running conversation (subject to compaction)
 
 A consequence: `memory.read` is obsolete. The LLM does not need to query its
 own memory via a tool, because memory is already in the prompt.
@@ -81,7 +81,7 @@ Removes a recollection or document.
 
 ### `memory.search(query)`
 
-Searches the **subconsciousness** — everything that is not currently in
+Searches the **subconsciousness** - everything that is not currently in
 consciousness (the prompt):
 
 - Archived conversation tails (after compaction)
@@ -111,11 +111,11 @@ does not change.
 
 | Concept | Status | Reason |
 |---|---|---|
-| `core_memory` | Dropped without replacement | Memory is never compacted — a separate "protected" area is unnecessary |
-| `memory.read` | Discarded | Memory is loaded into consciousness automatically — an explicit read tool is redundant |
+| `core_memory` | Dropped without replacement | Memory is never compacted - a separate "protected" area is unnecessary |
+| `memory.read` | Discarded | Memory is loaded into consciousness automatically - an explicit read tool is redundant |
 | `memory.write_document` | Discarded | Backend transparency: `memory.write(scope, content)` is enough, regardless of whether files or a DB sit behind it |
 | `memory.delete_document` | Discarded | Replaced by `memory.delete(scope, identifier)` |
-| `document.*` tools | Discarded | Were technical (file-based), not semantic — replaced by `memory.write` with scopes |
+| `document.*` tools | Discarded | Were technical (file-based), not semantic - replaced by `memory.write` with scopes |
 
 ## Compaction and archival
 
@@ -126,7 +126,7 @@ does not change.
 - The raw, uncompressed conversation tails are permanently archived and
   reachable via `memory.search` (the subconsciousness).
 
-## Convergence — a unified knowledge store
+## Convergence - a unified knowledge store
 
 Over the course of analysis it became clear that memory and notebook are
 **not two different systems**, but **two views of the same store** with
@@ -141,16 +141,16 @@ Logically, the target perspective converges on a **unified agent API**:
 
 | Tool | Purpose |
 |---|---|
-| `remember(scope, content)` | Store an entry — memory or notebook depends on the scope |
+| `remember(scope, content)` | Store an entry - memory or notebook depends on the scope |
 | `forget(scope, identifier)` | Delete an entry |
 | `recall(query)` | Search the entire subconsciousness (memory, notebooks, archived tails) |
 
 The scope determines the load policy:
 
-- `identity`, `user`, `memory` — always loaded into consciousness
-- `work:sop:<id>`, `audit:sop:<id>` — loaded when SOP is active
-- `work:skill:<id>`, `audit:skill:<id>` — loaded when skill is active
-- `work:tool:<id>`, `audit:tool:<id>` — loaded when tool is active
+- `identity`, `user`, `memory` - always loaded into consciousness
+- `work:sop:<id>`, `audit:sop:<id>` - loaded when SOP is active
+- `work:skill:<id>`, `audit:skill:<id>` - loaded when skill is active
+- `work:tool:<id>`, `audit:tool:<id>` - loaded when tool is active
 
 The split between memory and notebook then exists only in the
 **context assembler**, no longer in the agent API.
@@ -172,11 +172,11 @@ The split between memory and notebook then exists only in the
 - **Sub-agent recall**: sub-agents can use `memory.search` to retrieve
   information from the subconsciousness for specialised tasks.
 
-## Reference — OpenClaw comparison
+## Reference - OpenClaw comparison
 
 The architecture is informed by lessons from analysing OpenClaw:
 
-- OpenClaw injects `MEMORY.md` entirely into the system prompt — equivalent
+- OpenClaw injects `MEMORY.md` entirely into the system prompt - equivalent
   to our "always load into consciousness".
 - OpenClaw has no dedicated memory-write tool type; it uses generic file
   tools. Cephix abstracts this via `memory.write(scope, content)`.

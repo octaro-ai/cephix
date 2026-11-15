@@ -4,7 +4,7 @@
 
 Boot-Levels sind **kontiguierlich nummeriert** (0…11, keine Luecken).
 Drei universelle off-bus Stufen modellieren *jede* externe Ressource
-(Persistenz, Playwright, Docker, SSH, …) — nicht nur Storage:
+(Persistenz, Playwright, Docker, SSH, …) - nicht nur Storage:
 
 | Level | Category | Bus? | Rolle |
 |------:|----------|------|-------|
@@ -31,7 +31,7 @@ Drei universelle off-bus Stufen modellieren *jede* externe Ressource
 | `PROVIDER` | `BUS_PROVIDER` |
 
 - **PROVIDER** (Level 2): DAO-Factory, per Konstruktor injiziert. Kein Bus.
-- **BUS_PROVIDER** (Level 5): dieselbe Rolle auf dem Bus — Konsumenten
+- **BUS_PROVIDER** (Level 5): dieselbe Rolle auf dem Bus - Konsumenten
   koennen ueber Bus-Protokoll statt Injection zugreifen. Heute noch
   unbesetzt; leere Kategorie erzeugt keinen Log-Laerm
   (`_group_by_category` druckt nur Kategorien mit Komponenten).

@@ -1,4 +1,4 @@
-# 0003 - Wire-format codec is not abstracted (for now)
+# ADR-0003 - Wire-format codec is not abstracted (for now)
 
 - Status: accepted
 - Date: 2026-05-30

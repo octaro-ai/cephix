@@ -112,8 +112,19 @@ nav:
       - Run Flow (Detailed): architecture/run-flow.md
       - Decisions (ADR):
           - Overview: adr/index.md
-          - "0001 — Use MkDocs Material": adr/0001-use-mkdocs-material.md
-          - "0002 — Mermaid + C4 via Structurizr": adr/0002-diagrams-mermaid-and-c4.md
+          - "ADR-0001 - Use MkDocs Material": adr/0001-use-mkdocs-material.md
+          - "ADR-0002 - Mermaid in-tree; C4 deferred": adr/0002-diagrams-mermaid-and-c4.md
+          - "ADR-0003 - No codec abstraction (yet)": adr/0003-no-codec-abstraction-yet.md
+          - "ADR-0004 - Credential layers": adr/0004-credential-layers.md
+          - "ADR-0005 - Robot per user": adr/0005-robot-per-user-and-multi-mailbox-tenancy.md
+          - "ADR-0006 - Central time source (UTC)": adr/0006-central-time-source.md
+          - "ADR-0007 - Robot home vs. workspace": adr/0007-robot-home-and-workspace.md
+      - Design (FRD):
+          - Overview: design/index.md
+          - "FRD-0001 - Mail-triage tenancy": design/0001-mail-triage-tenancy.md
+          - "FRD-0002 - Central clock port": design/0002-clock-port.md
+          - "FRD-0003 - Compile mode": design/0003-compile-mode.md
+          - "FRD-0004 - C4 architecture views": design/0004-c4-architecture-views.md
   - Project:
       - Status: project/status.md
       - Roadmap: project/roadmap.md

@@ -11,7 +11,7 @@ and **traceability** (semantic bus, telemetry, event log).
 
 - **New to the project?** Read [Concepts › Harness Model](concepts/harness-model.md),
   then skim the [Diagrams](architecture/diagrams.md).
-- **Coming back after a break?** Open [Current State](state.md) — what is in
+- **Coming back after a break?** Open [Current State](state.md) - what is in
   flight, what is done, what is next.
 - **Want to run it?** Jump to the [Quickstart](getting-started/quickstart.md).
 - **Why was X decided that way?** Browse the [ADRs](adr/index.md).
@@ -19,13 +19,13 @@ and **traceability** (semantic bus, telemetry, event log).
 
 ## Core ideas
 
-- **Deterministic kernel** — `DigitalRobotKernel` runs an explicit
+- **Deterministic kernel** - `DigitalRobotKernel` runs an explicit
   OBSERVE → PLAN → EXECUTE → RESPOND loop.
-- **Governed tools** — every tool call passes through a policy guard with
+- **Governed tools** - every tool call passes through a policy guard with
   risk classification and approvals.
-- **Semantic bus + telemetry** — all interesting events are emitted,
+- **Semantic bus + telemetry** - all interesting events are emitted,
   observable, replayable.
-- **Markdown-first context** — firmware, memory, SOPs are plain files.
+- **Markdown-first context** - firmware, memory, SOPs are plain files.
   Humans and the robot read the same source.
 
 ## Reading paths

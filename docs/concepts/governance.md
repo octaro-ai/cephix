@@ -8,9 +8,9 @@
 
 Every governance check answers two questions:
 
-1. **Is this action allowed at all?** — based on risk class, system-tool
+1. **Is this action allowed at all?** - based on risk class, system-tool
    status, and prior approval rules.
-2. **If not allowed automatically — should we ask the user?** — and if the
+2. **If not allowed automatically - should we ask the user?** - and if the
    user says "always", remember that for next time.
 
 The result is one of three outcomes, encoded as `GuardDecision`:
@@ -35,7 +35,7 @@ Every tool carries a `risk_class` in its metadata:
 The `MetadataRiskClassifier` reads this from `ToolDefinition.metadata` at
 mount time. Tool authors set the class once; the guard enforces it everywhere.
 
-## System tools — the bypass
+## System tools - the bypass
 
 Internal tools like `memory.write`, `notebook.work`, `task.update` are
 flagged as `system_tool=true`. They bypass the approval flow because:
@@ -110,7 +110,7 @@ The `ActorResolver` maps an event to an `ActorContext`:
 
 Today only basic roles are resolved (`ConfigBasedActorResolver`). The
 approval store keys rules by `principal_id`, so different actors can have
-different rule sets — useful when an enterprise robot serves multiple users.
+different rule sets - useful when an enterprise robot serves multiple users.
 
 ## What is wired vs. what is not
 
@@ -124,11 +124,11 @@ The state-of-the-world for governance is summarised here; full breakdown in
 | `FileApprovalStore` (JSONL) | Wired |
 | Approval prompt + button → rule | Wired end-to-end |
 | `ConfigBasedActorResolver` | Wired (basic roles only) |
-| `InputGuardPort` (pre-LLM check) | **Not wired** — port exists, kernel does not call it |
+| `InputGuardPort` (pre-LLM check) | **Not wired** - port exists, kernel does not call it |
 | `OutputGuardPort` (pre-send check) | **Not wired** |
-| SOP `safe_actions` as hard policy | **Docs only** — the docstring claims enforcement, the implementation does not |
+| SOP `safe_actions` as hard policy | **Docs only** - the docstring claims enforcement, the implementation does not |
 
-## Coming next — approval self-learning
+## Coming next - approval self-learning
 
 The next planned subsystem builds *on top* of the existing approval flow:
 
@@ -142,6 +142,6 @@ See [Project › Roadmap](../project/roadmap.md) for the order of work.
 
 ## Related
 
-- [Runtime Lifecycle](runtime-lifecycle.md) — where the guard sits in the run
-- [SOPs](sops.md) — the `safe_actions` story
-- [Architecture › Diagrams](../architecture/diagrams.md) — visual sequences
+- [Runtime Lifecycle](runtime-lifecycle.md) - where the guard sits in the run
+- [SOPs](sops.md) - the `safe_actions` story
+- [Architecture › Diagrams](../architecture/diagrams.md) - visual sequences

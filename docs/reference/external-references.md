@@ -6,27 +6,27 @@
 
 ---
 
-## Robotics — ROS and the physical-robot heritage
+## Robotics - ROS and the physical-robot heritage
 
 Even though cephix is a *digital* robot, the architectural vocabulary
 ("kernel", "channels", "actors", "audit trail") borrows liberally from
 real-world robotics middleware.
 
-### ROS 2 — the current robotics middleware standard
+### ROS 2 - the current robotics middleware standard
 
 [ROS 2 (Robot Operating System 2)](https://docs.ros.org/) is the
 industry-standard middleware for building robot software. It is **not** a
 traditional OS but a structured software layer running on Linux, Windows,
 or macOS, with the following building blocks:
 
-- **Topics** — typed publish/subscribe channels for continuous data
+- **Topics** - typed publish/subscribe channels for continuous data
   (sensor readings, odometry).
-- **Services** — synchronous request/reply for stateful queries.
-- **Actions** — long-running tasks with feedback and pre-emption.
-- **Nodes** — the unit of computation; one process can host many.
+- **Services** - synchronous request/reply for stateful queries.
+- **Actions** - long-running tasks with feedback and pre-emption.
+- **Nodes** - the unit of computation; one process can host many.
 
 ROS 2 uses [**DDS (Data Distribution Service)**](https://www.dds-foundation.org/)
-as its underlying middleware — a decentralised pub/sub system with
+as its underlying middleware - a decentralised pub/sub system with
 proven use in defence and avionics.
 
 **Mapping to cephix:**
@@ -40,7 +40,7 @@ proven use in defence and avionics.
 | `rclpy` (Python client) | The whole cephix package | We *are* a single-node super-agent |
 
 A cephix robot is, in ROS terms, **one ROS 2 node that hosts a planner, a
-governance guard, and several tool drivers** — packaged as a coherent
+governance guard, and several tool drivers** - packaged as a coherent
 agent. The parallels are not accidental: a digital robot needs the same
 discipline (deterministic kernel, clear ingress/egress, observability)
 that physical robots have practiced for two decades.
@@ -53,24 +53,24 @@ that physical robots have practiced for two decades.
     called) lands, the alignment between cephix and the robotics world
     should be revisited.
 
-### Related — physical-world background reading
+### Related - physical-world background reading
 
-- [SMED — Single-Minute Exchange of Die](https://en.wikipedia.org/wiki/Single-minute_exchange_of_die)
+- [SMED - Single-Minute Exchange of Die](https://en.wikipedia.org/wiki/Single-minute_exchange_of_die)
   (Shigeo Shingo). The original lean-manufacturing technique for rapid
   re-tooling. Conceptually parallels what cephix's **AutonomyLevel +
   SOP-bound tool mounting** achieves at runtime: switching the robot's
   "tools" without reconfiguring the kernel.
-- [Cellular manufacturing](https://en.wikipedia.org/wiki/Cellular_manufacturing) —
+- [Cellular manufacturing](https://en.wikipedia.org/wiki/Cellular_manufacturing) -
   grouping related processes into a cell. Analogous to a per-SOP tool subset.
 
 ---
 
-## Standard Operating Procedures — the industrial heritage
+## Standard Operating Procedures - the industrial heritage
 
 SOPs in cephix are not a new invention; they descend directly from
 quality-management and lean-manufacturing practice.
 
-### ISO 9001 — the formal definition
+### ISO 9001 - the formal definition
 
 In [ISO 9001 quality management](https://www.iso.org/iso-9001-quality-management.html),
 the standard distinguishes three artefacts that map cleanly onto cephix:
@@ -79,15 +79,15 @@ the standard distinguishes three artefacts that map cleanly onto cephix:
 |---|---|---|
 | **Process** | A set of interrelated activities producing an output | The harness lifecycle (Observe → Plan → Execute → Respond) |
 | **Procedure (SOP)** | A specific way to carry out a process; *what* is done, by *whom*, *when* | `SOPDefinition` YAML files |
-| **Work instruction** | The detailed *how* — tools, methods, equipment, measurements | `steps` inside an SOP, plus the planner's runtime decisions |
+| **Work instruction** | The detailed *how* - tools, methods, equipment, measurements | `steps` inside an SOP, plus the planner's runtime decisions |
 
 The ISO model also names **Betriebsmittel** (operating resources /
 equipment) as a first-class concept of a work instruction. In cephix that
 is the `required_tools` and `required_skills` fields of an
-`SOPDefinition` — the explicit list of capabilities the procedure is
+`SOPDefinition` - the explicit list of capabilities the procedure is
 allowed to draw on.
 
-### Lean — standardised work
+### Lean - standardised work
 
 [Standardised work](https://www.lean.org/lexicon-terms/standardized-work/)
 in the Toyota Production System captures the *current best known way* to
@@ -102,7 +102,7 @@ do a job. Two ideas transfer directly:
 
 ---
 
-## Digital work — the workforce heritage
+## Digital work - the workforce heritage
 
 Cephix is a software system, but the design problem is organisational:
 how can digital workers perform bounded work with visible instructions,
@@ -131,7 +131,7 @@ judgement-heavy process steps.
 
 Useful follow-up references:
 
-- [RPA in Business Process Management — systematic literature review](https://www.mdpi.com/2227-7080/14/4/225)
+- [RPA in Business Process Management - systematic literature review](https://www.mdpi.com/2227-7080/14/4/225)
 - [A Survey on Intelligent Process Automation](https://arxiv.org/pdf/2007.13257)
 - [Artificial Intelligence and the Future of Work](https://www.nationalacademies.org/publications/27644)
 
@@ -153,7 +153,7 @@ also become a system that hides control.
 
 ---
 
-## LLM agents — the Anthropic and OpenAI heritage
+## LLM agents - the Anthropic and OpenAI heritage
 
 ### Anthropic Agent SDK and Agent Skills
 
@@ -181,12 +181,12 @@ GitHub provides authoring examples.
 The architectural intent is **the same**: ship a *capability* as a
 self-contained, discoverable artefact rather than as bespoke code.
 Cephix's tiering (Tool → Skill → SOP) is a more layered take on the same
-idea — see [Tools, Skills & Toolbuilder](../concepts/toolbuilder.md).
+idea - see [Tools, Skills & Toolbuilder](../concepts/toolbuilder.md).
 
 ### Tool use / function calling
 
-The underlying mechanism — letting the model emit structured calls that
-the runtime executes — is shared with:
+The underlying mechanism - letting the model emit structured calls that
+the runtime executes - is shared with:
 
 - [Anthropic tool use](https://docs.claude.com/en/docs/agents-and-tools/tool-use/overview)
 - [OpenAI function calling](https://platform.openai.com/docs/guides/function-calling)
@@ -195,7 +195,7 @@ the runtime executes — is shared with:
 
 Cephix wraps all of these behind `PlannerPort`. The
 `GovernedToolExecutor` then adds risk classification, approval flow, and
-telemetry on top of the raw tool-use loop — the cross-vendor concerns
+telemetry on top of the raw tool-use loop - the cross-vendor concerns
 none of the SDKs handle natively.
 
 ### Language-programmed agent systems
@@ -207,12 +207,12 @@ runtime.
 
 The closest research lines:
 
-- [ReAct — Synergizing Reasoning and Acting in Language Models](https://arxiv.org/abs/2210.03629):
+- [ReAct - Synergizing Reasoning and Acting in Language Models](https://arxiv.org/abs/2210.03629):
   interleaves reasoning traces, tool actions, and environment
   observations.
 - [Toolformer](https://arxiv.org/abs/2302.04761): trains language models
   to decide when and how to call external APIs.
-- [CoRE / AIOS Compiler — LLM as Interpreter for Natural Language
+- [CoRE / AIOS Compiler - LLM as Interpreter for Natural Language
   Programming](https://arxiv.org/html/2405.06907v1): explicitly frames
   LLMs as interpreters for natural-language, pseudo-code, and flow-based
   agent programs.
@@ -227,7 +227,7 @@ The closest research lines:
   frames deterministic LLM agents as frozen models inside an adaptive
   runtime harness. The paper's Life-Harness adapts environment contracts,
   procedural skills, action realization, and trajectory regulation without
-  changing model weights — very close to cephix's harness-first premise.
+  changing model weights - very close to cephix's harness-first premise.
 
 Karpathy's [Software 2.0](https://karpathy.medium.com/software-2-0-a64152b37c35)
 is not an academic paper, but it is a useful framing essay: some software
@@ -238,13 +238,13 @@ planning behind `PlannerPort`.
 
 ---
 
-## Memory — agent memory architectures
+## Memory - agent memory architectures
 
 The cephix memory model (consciousness / subconsciousness, scopes
 identity/user/memory, notebook tiers) is informed by several public lines
 of work.
 
-### MemGPT and Letta — memory as an OS
+### MemGPT and Letta - memory as an OS
 
 [**MemGPT**](https://memgpt.ai/) (UC Berkeley, 2023) and its commercial
 successor [**Letta**](https://www.letta.com/) treat the LLM context window
@@ -264,7 +264,7 @@ the same files, and the load policy lives in the context assembler.
 See [Concepts › Memory](../concepts/memory.md#model-of-consciousness) for
 how the layers compose.
 
-### OpenClaw — the personal-agent reference
+### OpenClaw - the personal-agent reference
 
 OpenClaw (mentioned in the [Memory concept doc](../concepts/memory.md#reference-openclaw-comparison))
 is the personal-agent design that directly informed several cephix
@@ -280,9 +280,9 @@ decisions:
 The naming (working memory, episodic vs. semantic memory) borrows from
 cognitive science. Two accessible jumping-off points:
 
-- [Atkinson–Shiffrin multi-store model](https://en.wikipedia.org/wiki/Atkinson%E2%80%93Shiffrin_memory_model) —
+- [Atkinson-Shiffrin multi-store model](https://en.wikipedia.org/wiki/Atkinson%E2%80%93Shiffrin_memory_model) -
   the classic short-term / long-term distinction.
-- [Working memory (Baddeley)](https://en.wikipedia.org/wiki/Working_memory) —
+- [Working memory (Baddeley)](https://en.wikipedia.org/wiki/Working_memory) -
   the modern refinement that maps reasonably onto an LLM's context window.
 
 The point is not to claim cephix is a cognitive model; it is to recognise
@@ -291,7 +291,7 @@ vs. global) have an established shape outside AI.
 
 ---
 
-## Software architecture — the design heritage
+## Software architecture - the design heritage
 
 The way cephix is *constructed* (not just what it does) follows several
 well-documented patterns. Knowing the references makes the source code
@@ -310,9 +310,9 @@ wires ports to adapters; the kernel never sees concrete implementations.
 The local style is closest to the SOLID family of object-oriented design
 principles, especially:
 
-- **SRP** — keep modules focused on one reason to change.
-- **ISP** — prefer small, client-specific ports over wide interfaces.
-- **DIP** — depend on abstractions, not concrete details.
+- **SRP** - keep modules focused on one reason to change.
+- **ISP** - prefer small, client-specific ports over wide interfaces.
+- **DIP** - depend on abstractions, not concrete details.
 
 Robert C. Martin's [Principles of Object Oriented
 Design](http://butunclebob.com/ArticleS.UncleBob.PrinciplesOfOod) is the
@@ -345,11 +345,11 @@ stable object so business code does not depend on storage mechanics.
 
 Related patterns to keep nearby:
 
-- [Repository](https://martinfowler.com/eaaCatalog/repository.html) —
+- [Repository](https://martinfowler.com/eaaCatalog/repository.html) -
   collection-like access to domain objects.
-- [Data Mapper](https://martinfowler.com/eaaCatalog/dataMapper.html) —
+- [Data Mapper](https://martinfowler.com/eaaCatalog/dataMapper.html) -
   mapping between domain objects and storage without coupling either side.
-- [Unit of Work](https://martinfowler.com/eaaCatalog/unitOfWork.html) —
+- [Unit of Work](https://martinfowler.com/eaaCatalog/unitOfWork.html) -
   tracking changed objects and coordinating writes.
 
 ### Architecture Decision Records
@@ -362,11 +362,13 @@ tooling references.
 ### C4 model
 
 [Simon Brown's C4 model](https://c4model.com/) (Context, Container,
-Component, Code) is the diagram vocabulary we are adopting incrementally.
-See [ADR 0002](../adr/0002-diagrams-mermaid-and-c4.md) for when we plan
-to bring in [Structurizr DSL](https://structurizr.com/).
+Component, Code) is the diagram vocabulary we plan to adopt incrementally.
+See [Design › C4 architecture views](../design/0004-c4-architecture-views.md) for
+the concept and tool comparison (the [Structurizr DSL](https://structurizr.com/)
+leaning), and [ADR-0002](../adr/0002-diagrams-mermaid-and-c4.md) for the
+current deferral decision.
 
-### Diátaxis — the documentation framework
+### Diátaxis - the documentation framework
 
 This doc site is structured around [Diátaxis](https://diataxis.fr/)
 (Daniele Procida): the four-quadrant model of tutorials, how-to guides,
@@ -383,37 +385,37 @@ tools a maintainer needs when debugging the docs site or runtime surface.
 
 ### Documentation stack
 
-- [MkDocs](https://www.mkdocs.org/) — static documentation build.
-- [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/) —
+- [MkDocs](https://www.mkdocs.org/) - static documentation build.
+- [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/) -
   theme, navigation, search, admonitions, and code UX.
-- [mkdocstrings](https://mkdocstrings.github.io/) — API reference from
+- [mkdocstrings](https://mkdocstrings.github.io/) - API reference from
   Python docstrings.
-- [pymdown-extensions](https://facelessuser.github.io/pymdown-extensions/) —
+- [pymdown-extensions](https://facelessuser.github.io/pymdown-extensions/) -
   Markdown extensions used for tabs, highlighting, superfences, and tasks.
-- [Mermaid](https://mermaid.js.org/) — diagram source embedded in docs.
-- [mkdocs-panzoom-plugin](https://github.com/PLAYG0N/mkdocs-panzoom) —
+- [Mermaid](https://mermaid.js.org/) - diagram source embedded in docs.
+- [mkdocs-panzoom-plugin](https://github.com/PLAYG0N/mkdocs-panzoom) -
   zoom support for Mermaid diagrams.
 
 ### Runtime and operations stack
 
-- [aiohttp](https://docs.aiohttp.org/) — WebSocket server and CLI client
+- [aiohttp](https://docs.aiohttp.org/) - WebSocket server and CLI client
   transport. Cephix does **not** use FastAPI/Uvicorn today.
 - [WebSocket protocol / RFC 6455](https://www.rfc-editor.org/rfc/rfc6455)
   and [MDN WebSocket API](https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API)
-  — useful when documenting `/ws`, scopes, and client behaviour.
-- [PyYAML](https://pyyaml.org/wiki/PyYAMLDocumentation) — YAML-backed
+  - useful when documenting `/ws`, scopes, and client behaviour.
+- [PyYAML](https://pyyaml.org/wiki/PyYAMLDocumentation) - YAML-backed
   defaults, SOPs, and robot configuration.
-- [Python asyncio](https://docs.python.org/3/library/asyncio.html) —
+- [Python asyncio](https://docs.python.org/3/library/asyncio.html) -
   event loop, service host, and queue-driven runtime behaviour.
-- [JSON Lines](https://jsonlines.org/) — event logs and approval/audit
+- [JSON Lines](https://jsonlines.org/) - event logs and approval/audit
   files.
-- [uv](https://docs.astral.sh/uv/) and the [Python Packaging User Guide](https://packaging.python.org/) —
+- [uv](https://docs.astral.sh/uv/) and the [Python Packaging User Guide](https://packaging.python.org/) -
   installation, `pyproject.toml`, and script entry points.
-- [pytest](https://docs.pytest.org/) — behaviour tests as executable
+- [pytest](https://docs.pytest.org/) - behaviour tests as executable
   specification.
 - [Docker](https://docs.docker.com/), [docker-py](https://docker-py.readthedocs.io/),
   [nginx](https://nginx.org/en/docs/), [GitHub Actions](https://docs.github.com/en/actions),
-  and [Coolify](https://coolify.io/docs) — docs image, workstation backend,
+  and [Coolify](https://coolify.io/docs) - docs image, workstation backend,
   CI, and deployment.
 
 ---
@@ -424,15 +426,15 @@ These are not direct influences but inhabit overlapping problem spaces.
 Useful for sanity-checking design decisions:
 
 - [**LangChain**](https://www.langchain.com/) and
-  [**LlamaIndex**](https://www.llamaindex.ai/) — agent frameworks that
+  [**LlamaIndex**](https://www.llamaindex.ai/) - agent frameworks that
   take a very different (highly composable, lots of moving parts)
   approach to the same problem.
-- [**AutoGen**](https://microsoft.github.io/autogen/) (Microsoft) —
+- [**AutoGen**](https://microsoft.github.io/autogen/) (Microsoft) -
   multi-agent orchestration; instructive on planner/critic separation.
-- [**Open-RMF**](https://www.open-rmf.org/) — Open Robotics' multi-robot
+- [**Open-RMF**](https://www.open-rmf.org/) - Open Robotics' multi-robot
   fleet coordination. The cross-fleet protocol style is relevant if
   cephix ever runs as a fleet rather than as one robot.
-- [**Octaro**](https://octaro.io) — the company building digital workers
+- [**Octaro**](https://octaro.io) - the company building digital workers
   on cephix-style architecture (Octaro is the commercial home of this
   project; see the [README](https://github.com/your-org/cephix/blob/main/README.md)).
 
@@ -450,8 +452,8 @@ documentation at the time of writing.
   [Agent Skills overview](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview),
   [public skills repo](https://github.com/anthropics/skills)
 - ISO 9001 SOP vs. work instruction:
-  [9000 Store — Processes, Procedures, Work Instructions](https://the9000store.com/iso-9001-2015-requirements/iso-9001-2015-context-of-the-organization/processes-procedures-work-instructions/),
-  [SafetyCulture — ISO 9001 work instructions](https://safetyculture.com/topics/work-instruction/iso-9001-work-instructions)
+  [9000 Store - Processes, Procedures, Work Instructions](https://the9000store.com/iso-9001-2015-requirements/iso-9001-2015-context-of-the-organization/processes-procedures-work-instructions/),
+  [SafetyCulture - ISO 9001 work instructions](https://safetyculture.com/topics/work-instruction/iso-9001-work-instructions)
 - Digital work / workforce:
   [Fuchs and Sevignani, "What Is Digital Labour?"](https://www.triple-c.at/index.php/tripleC/article/view/461),
   [Altenried, "The platform as factory"](https://journals.sagepub.com/doi/10.1177/0309816819899410),

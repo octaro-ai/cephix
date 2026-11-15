@@ -1,4 +1,4 @@
-# 0001 — Use MkDocs Material for documentation
+# ADR-0001 - Use MkDocs Material for documentation
 
 - Status: accepted
 - Date: 2026-05-22
@@ -15,11 +15,11 @@ The project needs a documentation site that is:
 
 Alternatives considered:
 
-- **Docusaurus** — strong, but Node toolchain and MDX add complexity that is not
+- **Docusaurus** - strong, but Node toolchain and MDX add complexity that is not
   paid back for a single-language, single-version site.
-- **Sphinx + Read the Docs theme** — capable but heavier and rST-flavored;
+- **Sphinx + Read the Docs theme** - capable but heavier and rST-flavored;
   Markdown support via MyST is fine but adds a layer.
-- **Starlight (Astro)** — modern, fast, but again a JS toolchain.
+- **Starlight (Astro)** - modern, fast, but again a JS toolchain.
 
 ## Decision
 

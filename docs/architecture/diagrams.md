@@ -2,14 +2,14 @@
 
 Three views of the cephix harness:
 
-1. **Component diagram** — all building blocks, grouped by layer.
-2. **Sequence — RobotEvent flow** — a single event from arrival to audit.
-3. **Sequence — approval flow** — what happens when a tool is blocked
+1. **Component diagram** - all building blocks, grouped by layer.
+2. **Sequence - RobotEvent flow** - a single event from arrival to audit.
+3. **Sequence - approval flow** - what happens when a tool is blocked
    and the user is asked.
 
 Click any diagram to zoom and pan (Alt + scroll wheel).
 
-## 1. Component diagram — all building blocks
+## 1. Component diagram - all building blocks
 
 ```mermaid
 graph TB
@@ -139,7 +139,7 @@ graph TB
   Fanout --> LogSink
 ```
 
-## 2. Sequence diagram — RobotEvent flow with reply and BusPort
+## 2. Sequence diagram - RobotEvent flow with reply and BusPort
 
 ```mermaid
 sequenceDiagram
@@ -204,7 +204,7 @@ sequenceDiagram
   Kernel ->> Tel: emit("run.completed")
 ```
 
-## 3. Sequence diagram — approval flow (tool is blocked)
+## 3. Sequence diagram - approval flow (tool is blocked)
 
 ```mermaid
 sequenceDiagram

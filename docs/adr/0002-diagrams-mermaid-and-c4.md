@@ -1,46 +1,43 @@
-# 0002 — Diagrams: Mermaid for flows, C4 via Structurizr for architecture
+# ADR-0002 - Diagrams: Mermaid in-tree; C4 toolchain deferred
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-05-22
 
 ## Context
 
-The project already uses **Mermaid** for component, sequence, and approval-flow
-diagrams (see [Diagrams](../architecture/diagrams.md)). Mermaid renders natively in
-GitHub and in MkDocs Material via `pymdownx.superfences`.
+The project uses **Mermaid** for component, sequence, and approval-flow
+diagrams (see [Diagrams](../architecture/diagrams.md)). Mermaid renders
+natively in GitHub and in MkDocs Material via `pymdownx.superfences`, so
+diagrams stay co-located with prose at zero toolchain cost.
 
-As the architecture grows (governance, toolbuilder, skill/SOP repositories), we
-expect more **static architecture views**: context, container, component. The
-C4 model is the de-facto vocabulary for that.
+The question was whether to additionally adopt a heavier C4 toolchain
+(C4-PlantUML, Mermaid-C4, or Structurizr DSL) for static architecture views
+(Context / Container / Component).
 
-Options for C4:
+## Decision
 
-- **C4-PlantUML** — established, requires the PlantUML toolchain (Java/server).
-- **Mermaid C4** — built-in, marked experimental, weaker layout.
-- **Structurizr DSL** — one DSL file describes the model; views (Context,
-  Container, Component, Deployment) are generated automatically and stay
-  consistent with each other.
+- **Mermaid is the diagram tool** for sequence diagrams, state machines,
+  flowcharts, and any ad-hoc diagram co-located with prose.
+- **PlantUML is not adopted** as a primary tool. `pyreverse` may be used
+  ad-hoc for class diagrams when reviewing a module.
 
-## Decision (proposed)
-
-- **Keep Mermaid** for sequence diagrams, state machines, flowcharts, and any
-  ad-hoc diagrams co-located with prose.
-- **Adopt Structurizr DSL** for the C4 architecture views once we add a second
-  major subsystem (planned: approval self-learning, toolbuilder chain). The DSL
-  file lives at `docs/architecture/cephix.dsl` and CI renders it to SVG that the
-  Markdown pages embed.
-- **Do not adopt PlantUML** as a primary tool. `pyreverse` may be used ad-hoc
-  for class diagrams when reviewing a module.
+Adopting a dedicated **C4 toolchain** (the leaning is Structurizr DSL) is
+**deferred**, not rejected - until a second major subsystem makes the cost
+worth it. The C4 concept, the tool comparison, and the trigger condition are
+captured in [Design › C4 architecture views](../design/0004-c4-architecture-views.md);
+the roadmap tracks the ordering. When C4 is adopted, that decision graduates
+into its own ADR superseding this deferral.
 
 ## Consequences
 
 **Easier:**
 
-- One model → multiple consistent C4 views (no manual sync between Context and Container).
-- Mermaid stays the low-friction default for everything procedural.
+- One low-friction default for everything procedural; no extra CLI/Docker
+  rendering step in CI.
+- Diagrams live next to the code they describe and render in GitHub.
 
 **Harder / accepted trade-offs:**
 
-- Structurizr is one more tool to learn; rendering needs a CLI/Docker step in CI.
-- Decision deferred until the next subsystem lands, so we do not pay the cost
-  before the value.
+- No single-source-of-truth C4 model today: Context and Container views, if
+  drawn in Mermaid, are hand-synced. Accepted until the architecture grows
+  enough to justify a model-driven tool.

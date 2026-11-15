@@ -25,7 +25,7 @@ phase. For a concrete file-by-file trace, see
             └──────────────┘
 ```
 
-## Phase 1 — Observe
+## Phase 1 - Observe
 
 The kernel takes the incoming event and builds the *world the planner will see*.
 
@@ -43,7 +43,7 @@ What happens:
 
 Telemetry emitted: `input.received`, `memory.context_loaded`, `tools.mounted`.
 
-## Phase 2 — Plan
+## Phase 2 - Plan
 
 The planner turns the PlanningContext into concrete steps.
 
@@ -58,7 +58,7 @@ What happens:
 
 Telemetry emitted: `plan.created`.
 
-## Phase 3 — Execute
+## Phase 3 - Execute
 
 Each `tool_call` step is sent through the governed executor.
 
@@ -66,11 +66,11 @@ What happens for each tool call:
 
 1. The `GovernedToolExecutor` first checks the guard.
 2. The `PolicyToolExecutionGuard` decides one of three outcomes:
-    - **Allow** — risk-class is `read_only`, or it is a system tool, or an
+    - **Allow** - risk-class is `read_only`, or it is a system tool, or an
       existing approval rule applies.
-    - **Approval required** — no matching rule; the kernel prepares an
+    - **Approval required** - no matching rule; the kernel prepares an
       `ApprovalPrompt` to be sent to the user in the response phase.
-    - **Deny** — an explicit deny rule applies.
+    - **Deny** - an explicit deny rule applies.
 3. On allow, the `ToolCollector` delegates to the appropriate `ToolDriverPort`.
 4. After all tool calls in the batch, the planner is asked to revise the plan
    in light of the results (`revise_plan_after_tool`).
@@ -78,7 +78,7 @@ What happens for each tool call:
 
 Telemetry emitted: `tool.requested`, `tool.completed`, `plan.revised`.
 
-## Phase 4 — Respond
+## Phase 4 - Respond
 
 The kernel delivers the answer and persists what was learned.
 
@@ -90,13 +90,13 @@ What happens:
 - The interaction is written to memory (`remember_interaction`).
 - Final telemetry: `output.sent`, `memory.updated`, `run.completed`.
 
-## Special case — Approval decisions
+## Special case - Approval decisions
 
 Approval button clicks are **not** plan-driven; they are handled
 deterministically:
 
 1. An event with `event_type = "approval.decision"` arrives.
-2. `handle_event` recognises the type and returns early — no LLM call.
+2. `handle_event` recognises the type and returns early - no LLM call.
 3. The decision is written to the `ApprovalStore` as a rule (`once`,
    `persistent`, `deny_once`, `deny_persistent`).
 4. A short confirmation is sent ("Approval saved.").
@@ -119,5 +119,5 @@ harness can intervene independently of the LLM:
 | After Respond | Memory persistence, telemetry sinks |
 
 If you ever want to swap in a different planner, harden a guard, or change
-the audit pipeline, you do it at one of these boundaries — not by editing
+the audit pipeline, you do it at one of these boundaries - not by editing
 the prompt.

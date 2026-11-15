@@ -1,4 +1,4 @@
-# 0004 - Credential layers: build-time, preboot, runtime
+# ADR-0004 - Credential layers: build-time, preboot, runtime
 
 - Status: accepted
 - Date: 2026-05-30
@@ -93,28 +93,21 @@ deliberate and load-bearing for the current single-process build:
   file is small, eager parsing is cheap, the file location is known
   at build time.
 
-This is a constraint the compile-mode refactor (below) must respect:
-when build and boot are split processes, the **robot-side** stores
-can be reworked to use the same `FilesystemConnection` DI as
-sibling utilities -- they no longer have to satisfy the builder's
-sync requirement, because by then the builder has already exited.
-The build-time stores stay as plain eager-loading value objects in
-the builder process; the runtime stores join the filesystem-stack
-symmetry on the robot side.
+The runtime stores mirror this direct-path pattern today purely for
+code simplicity. Lifting that concession -- routing runtime stores
+through a `FilesystemConnection` like the rest of the filesystem
+stack -- is part of the deferred build/boot split and is not decided
+here. See [compile-mode design](../design/0003-compile-mode.md).
 
-In other words: the direct-path pattern is a build-time concession
-that runtime-side stores currently mirror for code simplicity. The
-compile-mode split is the trigger to lift the concession from the
-runtime side.
+### Preboot layer (deferred)
 
-### Preboot layer
-
-Not implemented today, deliberately left as a future refactor. When
-the compile / deployment mode arrives, the robot will load its
-prepared `.env` (or fall back to `os.environ`) in a pre-phase-1 step
-before any RobotComponent runs. The runtime layer is unchanged --
-the robot's credential stores still construct from whatever the
-preboot step exposed.
+The third layer is **named but not implemented**. When the build
+splits from the boot, the robot will load its prepared `.env` (or
+fall back to `os.environ`) in a pre-phase-1 step, runtime layer
+unchanged. The decision recorded here is to *shape the runtime layer
+so that split is possible* without a rewrite; the split itself is
+future work, designed in
+[compile-mode design](../design/0003-compile-mode.md).
 
 ### No central preflight
 
@@ -152,40 +145,9 @@ What gets harder:
   audit log will not show the build-time misses (no bus exists yet)
   -- this is correct, not a gap.
 
-## Compile-mode (future, not implemented)
-
-When the build splits from the boot (CI produces a deployable
-image, the image is started later on a different host), the layers
-land like this:
-
-```
-[ build host ]
-  builder
-    ├─ reads source ${KEY} references
-    ├─ constructs build-time stores
-    ├─ substitutes / writes prepared .env into the image
-    └─ emits robot bauplan + .env as artefact
-
-[ deploy host ]
-  preboot
-    ├─ if filesystem: load <robot_home>/.env
-    ├─ else: read os.environ
-    └─ exposes resolved values to robot's runtime stores
-
-  robot.start()
-    ├─ phase 1: control plane
-    ├─ phase 2: skeleton (UTILITY-level credential stores included)
-    ├─ phase 3: userspace (BUS_UTILITY-level CredentialProvider)
-    └─ runtime: components call provider.resolve(...) with audit
-```
-
-The runtime layer in this ADR is already shaped for that
-split -- only the preboot step is missing, and that is a robot.py
-change, not a builder change.
-
 ## Relationship to other ADRs
 
-- [0003 - Wire-format codec is not abstracted](0003-no-codec-abstraction-yet.md)
+- [ADR-0003 - Wire-format codec is not abstracted](0003-no-codec-abstraction-yet.md)
   rejected a pattern because the use case was speculative. This ADR
   embraces a pattern (the three-layer separation) because the use
   case is real *today* (build vs runtime) and the future case

@@ -303,7 +303,7 @@ def _pick_component(
     if len(options) == 1:
         chosen = options[0]
         console.print(
-            f"[dim]{label}: only one option ([bold]{chosen.component_name}[/bold]) — using it.[/]"
+            f"[dim]{label}: only one option ([bold]{chosen.component_name}[/bold]) - using it.[/]"
         )
     else:
         _show_component_table(console, label, options, default_name)

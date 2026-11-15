@@ -11,7 +11,7 @@
 Notebooks are **artefact-bound notes**. They are loaded into consciousness
 only when the associated artefact (SOP, skill, tool) is currently active.
 
-In contrast to memory — which is always loaded — notebooks are
+In contrast to memory - which is always loaded - notebooks are
 **context-dependent**: they appear and disappear with their artefact.
 
 ## Two modes
@@ -129,7 +129,7 @@ The context assembler decides which notebooks are loaded into consciousness:
    also** be loaded (policy open, see above).
 5. Work entries are filtered by `user_id`; audit entries are visible to all.
 
-Notebook entries that are not loaded are **not lost** — they remain
+Notebook entries that are not loaded are **not lost** - they remain
 reachable via `memory.search` (the subconsciousness).
 
 ## Delineation from memory
@@ -150,7 +150,7 @@ reachable via `memory.search` (the subconsciousness).
 | `notebook.task` | Discarded as notebook axis | Was always `work@sop`. `task` survives as a **runtime concept** (later `task.plan` / `task.update`), but not as a persistent notebook axis. |
 | `NotebookType.AUDIT` (old) | Discarded | Audit logging is the job of the structured log, not of notebooks |
 | `NotebookType.USER` (old) | Discarded | User information belongs in memory (`scope=user`), not in notebooks |
-| `NotebookType.ARTIFACT` (old) | Renamed | Became `audit@sop/skill/tool` — more precise semantics |
+| `NotebookType.ARTIFACT` (old) | Renamed | Became `audit@sop/skill/tool` - more precise semantics |
 
 ## Symmetry with memory
 
@@ -160,7 +160,7 @@ Memory and notebook share the same basic structure:
 |---|---|---|
 | Write | `memory.write(scope, content)` | `notebook.work/audit(content, target?)` |
 | Delete | `memory.delete(scope, id)` | `notebook.delete(...)` (later) |
-| Search | `memory.search(query)` | `memory.search(query)` — searches both |
+| Search | `memory.search(query)` | `memory.search(query)` - searches both |
 | Atomic entries | Yes | Yes |
 | Backend-neutral | Yes | Yes |
 
@@ -171,14 +171,14 @@ the **load policy**, not the backend:
 - Notebook scopes (`work:sop:*`, `audit:tool:*`, ...) are loaded **only
   when the artefact is active**.
 
-### Convergence direction — unified API
+### Convergence direction - unified API
 
 The API symmetry is not coincidental. In the target picture, a single agent
 API could cover both areas:
 
-- `remember(scope, content)` — scope decides memory vs. notebook
-- `forget(scope, identifier)` — deletes regardless of area
-- `recall(query)` — searches everywhere (memory, notebooks, archive)
+- `remember(scope, content)` - scope decides memory vs. notebook
+- `forget(scope, identifier)` - deletes regardless of area
+- `recall(query)` - searches everywhere (memory, notebooks, archive)
 
 See [Memory › Convergence](memory.md#convergence-a-unified-knowledge-store)
 for details.

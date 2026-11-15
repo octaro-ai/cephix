@@ -2,7 +2,7 @@
 
 Cephix is structured as a set of layers around a deterministic kernel. The kernel
 runs an explicit lifecycle (OBSERVE → PLAN → EXECUTE → RESPOND) and delegates
-to ports — interfaces — that are wired together in the composition root
+to ports - interfaces - that are wired together in the composition root
 ([`src/app.py`](https://github.com/your-org/cephix/blob/main/src/app.py)).
 
 For full diagrams (component graph, message flow, approval flow), see [Diagrams](diagrams.md).
@@ -25,10 +25,10 @@ For full diagrams (component graph, message flow, approval flow), see [Diagrams]
 
 ## Reading order for newcomers
 
-1. [Diagrams](diagrams.md) — get the visual.
-2. [Run Flow](run-flow.md) — follow one event end-to-end.
-3. [Code Map](code-map.md) — find your way around the source tree.
-4. [Status](../project/status.md) — what is wired, what is port-only, what is missing.
+1. [Diagrams](diagrams.md) - get the visual.
+2. [Run Flow](run-flow.md) - follow one event end-to-end.
+3. [Code Map](code-map.md) - find your way around the source tree.
+4. [Status](../project/status.md) - what is wired, what is port-only, what is missing.
 
 ## Key design decisions
 

@@ -29,7 +29,7 @@ deep-merges `src/defaults.yaml` with `~/.cephix/cephix.yaml`.
 `resolve_robot_instance()` then combines host defaults, the matching robot
 entry, `robot.yaml`, secrets, and CLI overrides.
 
-## Host config — `~/.cephix/cephix.yaml`
+## Host config - `~/.cephix/cephix.yaml`
 
 The host config is created from `src/defaults.yaml` on first use. It contains
 defaults for all robots on this machine and the registry of known robot
@@ -63,7 +63,7 @@ The `robots` entry may also carry per-robot defaults such as `websocket` or
 `runtime`, but normal onboarding writes runtime values into the robot's
 `robot.yaml`.
 
-## Robot config — `robot.yaml`
+## Robot config - `robot.yaml`
 
 `cephix init <robot_id>` creates the robot home and writes
 `~/.cephix/robots/<robot_id>/robot.yaml`.

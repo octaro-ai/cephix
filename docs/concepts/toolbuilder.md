@@ -31,16 +31,16 @@ of **reuse boundaries**:
 
 | Tier | Reuse | Iteration cycle |
 |---|---|---|
-| Tool | Across many skills and SOPs | Slow — tools are infrastructure |
-| Skill | Across multiple SOPs | Medium — skills are recipes |
-| SOP | Per use case | Fast — SOPs evolve with operations |
+| Tool | Across many skills and SOPs | Slow - tools are infrastructure |
+| Skill | Across multiple SOPs | Medium - skills are recipes |
+| SOP | Per use case | Fast - SOPs evolve with operations |
 
 A learning about a *tool* (e.g. "this API returns 500 when the timeout is
 below 5s") belongs at the tool tier so every skill using it benefits.
 A learning about an *SOP* (e.g. "for client X, route to Finance instead
 of Archive") belongs at the SOP tier and does not pollute the tool.
 
-This is also why notebook entries are scoped by artefact — see
+This is also why notebook entries are scoped by artefact - see
 [Notebooks](notebooks.md).
 
 ## Repositories (planned)
@@ -55,9 +55,9 @@ Each tier gets its own repository:
 
 The repositories solve three problems:
 
-1. **Discovery** — what tools/skills/SOPs are available right now?
-2. **Versioning** — which version of an SOP did this run use?
-3. **Distribution** — pull tools/skills/SOPs from a remote repo, not just from a local folder.
+1. **Discovery** - what tools/skills/SOPs are available right now?
+2. **Versioning** - which version of an SOP did this run use?
+3. **Distribution** - pull tools/skills/SOPs from a remote repo, not just from a local folder.
 
 ## The toolbuilder chain (planned)
 
@@ -98,7 +98,7 @@ spec and validate it before letting the robot use it.
 Key design properties:
 
 - **Reuses governance.** The approval gate is the same `ApprovalStore`
-  used at runtime — no parallel mechanism.
+  used at runtime - no parallel mechanism.
 - **Reuses telemetry.** Each chain step emits WideEvents, just like a
   normal run. The whole chain is auditable.
 - **Idempotent.** Running the chain twice for the same spec converges to
@@ -111,12 +111,12 @@ Key design properties:
 |---|---|
 | Should tools and skills live in the same monorepo or separate ones? | Same repo, separate folders. Reuse the cephix layout for symmetry. |
 | Does the synthesis step need a constrained DSL or free-form Python? | Likely a Python skeleton + constrained section, like SOP YAML today. |
-| How are tool versions referenced from skills and SOPs? | Open — leaning toward semver, pinned in YAML, with optional `>=` ranges. |
+| How are tool versions referenced from skills and SOPs? | Open - leaning toward semver, pinned in YAML, with optional `>=` ranges. |
 | Where does the approval rule for a new tool come from? | Probably new rule kind: `tool_definition_approval` with the tool spec hash as the action key. |
 
 ## Related
 
-- [Memory](memory.md) — `audit:tool:<id>` is where the toolbuilder reads from
-- [Notebooks](notebooks.md) — `work:tool:<id>` and `audit:tool:<id>` capture iteration
-- [Governance & Approvals](governance.md) — the approval gate reused at build time
-- [Project › Roadmap](../project/roadmap.md) — when this subsystem is targeted
+- [Memory](memory.md) - `audit:tool:<id>` is where the toolbuilder reads from
+- [Notebooks](notebooks.md) - `work:tool:<id>` and `audit:tool:<id>` capture iteration
+- [Governance & Approvals](governance.md) - the approval gate reused at build time
+- [Project › Roadmap](../project/roadmap.md) - when this subsystem is targeted

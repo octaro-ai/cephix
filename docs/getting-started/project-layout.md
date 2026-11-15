@@ -16,7 +16,7 @@ cephix/
 └── uv.lock           ← Resolved dependency lockfile
 ```
 
-## `src/` — framework code
+## `src/` - framework code
 
 Organised by the five harness layers:
 
@@ -70,10 +70,10 @@ src/
 For a deeper file-by-file role assignment, see
 [Architecture › Code Map](../architecture/code-map.md).
 
-## `robot/` — robot-specific assets
+## `robot/` - robot-specific assets
 
 This is what makes one cephix instance different from another. Everything
-here is Markdown or YAML — humans and the robot read the same files.
+here is Markdown or YAML - humans and the robot read the same files.
 
 ```
 robot/
@@ -98,7 +98,7 @@ copied into `~/.cephix/robots/<robot_id>/`. The host registry lives in
 `~/.cephix/cephix.yaml`; the per-robot runtime config lives next to those
 assets as `robot.yaml`.
 
-## `docs/` — this site
+## `docs/` - this site
 
 ```
 docs/
@@ -114,7 +114,7 @@ docs/
 
 The site is built with MkDocs Material (`mkdocs serve` for local preview,
 `mkdocs build` for static output). See
-[ADR 0001](../adr/0001-use-mkdocs-material.md) for the rationale.
+[ADR-0001](../adr/0001-use-mkdocs-material.md) for the rationale.
 
 ## Where to look for what
 

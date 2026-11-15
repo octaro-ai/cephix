@@ -1,4 +1,4 @@
-# Status — actual vs. target
+# Status - actual vs. target
 
 > What is wired, what exists only as a port or in docs, and what is missing entirely.
 
@@ -70,7 +70,7 @@
 | FanoutEventSink | Wired | Combines multiple sinks |
 | **Notebook as audit trail** | **Fragmentary** | `NotebookEntryKind.APPROVAL_LOG` exists in the enum but is unused. The real audit trail runs through WideEvent telemetry, not through notebooks. |
 
-## 6. Memory / Notebook — target vs. actual
+## 6. Memory / Notebook - target vs. actual
 
 | Component | Status | Details |
 |---|---|---|
@@ -86,16 +86,16 @@
 
 ## The three biggest gaps
 
-1. **SOP resolver is not wired** — without it, the harness always runs in
+1. **SOP resolver is not wired** - without it, the harness always runs in
    "general mode". SOPs, SOP-bound notebooks, and tool subset mounting have
    no effect. This is the central harness dynamic, and it currently does not
    engage.
 
-2. **Input / output guards are not wired** — the ports exist, but the kernel
+2. **Input / output guards are not wired** - the ports exist, but the kernel
    does not call them. Incoming events and outgoing messages do not pass
    through any deterministic check.
 
-3. **`safe_actions` is not deterministic** — the guard docstring claims to
+3. **`safe_actions` is not deterministic** - the guard docstring claims to
    check SOP `safe_actions`, but the implementation does not. It is only an
    LLM-prompt hint, not a hard safety mechanism.
 
@@ -162,21 +162,21 @@ and have to migrate later.
 
 Recommended order:
 
-1. **F1 (SOP resolver)** — unlocks the harness dynamics without breaking
+1. **F1 (SOP resolver)** - unlocks the harness dynamics without breaking
    existing code. Can run in parallel with everything else.
-2. **F3 (`safe_actions`)** — small fix, large effect. Either implement it
+2. **F3 (`safe_actions`)** - small fix, large effect. Either implement it
    or fix the docstring so no false safety assumption is made.
-3. **F4 (memory / notebook API)** — prerequisite for clean SOP-notebook
+3. **F4 (memory / notebook API)** - prerequisite for clean SOP-notebook
    integration.
-4. **F2 (input / output guards)** — important for enterprise, but not
+4. **F2 (input / output guards)** - important for enterprise, but not
    blocking for the test phase.
 
 ### What is NOT foundational
 
 These can wait without endangering the foundation:
 
-- **Dreaming / pre-compaction flush** — feature, not foundation.
-- **Convergence API (remember / forget / recall)** — design goal, not blocking.
-- **General sandboxing** — Docker workstation is enough for the MVP. General
+- **Dreaming / pre-compaction flush** - feature, not foundation.
+- **Convergence API (remember / forget / recall)** - design goal, not blocking.
+- **General sandboxing** - Docker workstation is enough for the MVP. General
   sandboxing is an infrastructure topic, not an architecture topic.
-- **Skill resolver** — only relevant once SOPs with skills are actually used.
+- **Skill resolver** - only relevant once SOPs with skills are actually used.

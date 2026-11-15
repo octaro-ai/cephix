@@ -27,7 +27,7 @@ each section lists what was **Added**, **Changed**, **Fixed**, or **Removed**.
 
 This is a development-stage project. Pre-1.0 releases may include
 backwards-incompatible changes. The first tagged release will reset this
-changelog into a `## [0.1.0] — YYYY-MM-DD` section and begin the regular
+changelog into a `## [0.1.0] - YYYY-MM-DD` section and begin the regular
 cadence.
 
 ---
@@ -37,10 +37,10 @@ cadence.
 When merging a non-trivial change, append a bullet to **Unreleased** under
 the appropriate category. Keep entries:
 
-- **Short** — one line where possible.
-- **User-facing** — describe the change in terms a reader unfamiliar with
+- **Short** - one line where possible.
+- **User-facing** - describe the change in terms a reader unfamiliar with
   the PR can understand. Link to the relevant doc or ADR.
-- **Actionable** — if a change requires user action (e.g. config update),
+- **Actionable** - if a change requires user action (e.g. config update),
   say so explicitly.
 
 Avoid:

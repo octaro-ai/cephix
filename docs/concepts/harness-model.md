@@ -2,7 +2,7 @@
 
 > **What is a harness?** The deterministic frame that decides *which LLM*
 > operates with *which context*, *which tools*, and *which limits*. The LLM
-> is not the harness — it is a replaceable planner *inside* the harness.
+> is not the harness - it is a replaceable planner *inside* the harness.
 
 ## Five load-bearing layers
 
@@ -22,7 +22,7 @@
   Effect on the world
 ```
 
-### 1. Runtime — the outer frame
+### 1. Runtime - the outer frame
 
 Accepts events, keeps the kernel alive, delivers responses.
 
@@ -31,30 +31,30 @@ Accepts events, keeps the kernel alive, delivers responses.
 - **DigitalRobotKernel** deterministically runs Observe → Plan → Execute → Respond.
 - **DigitalRobot** is the composition facade: builds kernel, runtime, and control plane from injected ports.
 
-### 2. Context — the dynamic harness context
+### 2. Context - the dynamic harness context
 
 Determines **what** the planner sees and **which tools** it may operate.
 
-- **Firmware** (`AGENTS.md`, `POLICY.md`, `CONSTITUTION.md`) — immutable
+- **Firmware** (`AGENTS.md`, `POLICY.md`, `CONSTITUTION.md`) - immutable
   guardrails, always loaded.
-- **Memory documents** (`IDENTITY.md`, `USER.md`, `MEMORY.md`, `BOOTSTRAP.md`) —
+- **Memory documents** (`IDENTITY.md`, `USER.md`, `MEMORY.md`, `BOOTSTRAP.md`) -
   global robot knowledge, always loaded.
-- **Memory context** (facts, `conversation_summary`, `recent_interactions`) —
+- **Memory context** (facts, `conversation_summary`, `recent_interactions`) -
   structured knowledge from the memory store.
-- **SOPs** — standard operating procedures the context assembler loads on
+- **SOPs** - standard operating procedures the context assembler loads on
   event match. Determine `required_tools` and `required_skills`.
-- **Notebooks** — artefact-bound notes (`work` / `audit`), loaded when the
+- **Notebooks** - artefact-bound notes (`work` / `audit`), loaded when the
   associated artefact is active.
-- **Tool mounting** — the context assembler decides which tools are available
+- **Tool mounting** - the context assembler decides which tools are available
   to the planner based on `AutonomyLevel`:
     - SCRIPTED: only SOP tools
     - GUIDED: SOP tools + system tools
     - AUTONOMOUS: SOP tools or (without SOP) the full catalogue + system tools
     - CREATIVE: as AUTONOMOUS, plus `procedure.propose`
 
-The result is a **PlanningContext** — the complete worldview for the planner.
+The result is a **PlanningContext** - the complete worldview for the planner.
 
-### 3. Planner — the LLM layer
+### 3. Planner - the LLM layer
 
 Turns a PlanningContext into a concrete plan.
 
@@ -64,7 +64,7 @@ Turns a PlanningContext into a concrete plan.
 - The result is a **Plan** with **PlanSteps** (`tool_call` or `finalize`).
 - The planner can revise after tool results via `revise_plan_after_tool`.
 
-### 4. Governance — deterministic limits
+### 4. Governance - deterministic limits
 
 Checks **before** each tool execution whether the action is allowed.
 
@@ -79,7 +79,7 @@ Checks **before** each tool execution whether the action is allowed.
 - The kernel processes `approval.decision` events deterministically, without
   invoking the LLM.
 
-### 5. Audit — traceable runs
+### 5. Audit - traceable runs
 
 Every step emits structured telemetry.
 

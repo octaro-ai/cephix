@@ -1,4 +1,4 @@
-# Run Flow — Detailed Trace
+# Run Flow - Detailed Trace
 
 > A concrete walk-through of a single event with files, classes, and methods.
 > Example: the user sends "Sort my new mail" via WebSocket.
@@ -31,7 +31,7 @@ DigitalRobotKernel.handle_event(event)   [src/runtime/kernel.py]
 
 ---
 
-## Phase 1 — Event ingress
+## Phase 1 - Event ingress
 
 **Files:** `src/gateways/websocket.py`, `src/gateways/hub.py`
 
@@ -50,12 +50,12 @@ DigitalRobotKernel.handle_event(event)   [src/runtime/kernel.py]
 
 ---
 
-## Phase 2 — Observe
+## Phase 2 - Observe
 
 **File:** `src/runtime/kernel.py` → `_observe()`
 
 1. An `ExecutionContext` is created with `run_id`, `trace_id`, `user_id`.
-2. **Telemetry:** `input.received` — event metadata.
+2. **Telemetry:** `input.received` - event metadata.
 3. If `actor_resolver` is set: `ActorResolver.resolve(event)` → `ActorContext`.
    The result is attached to `event.actor_context` and `ctx.actor_context`.
 4. `context_assembler.assemble(event, user_id)` is invoked.
@@ -80,7 +80,7 @@ DigitalRobotKernel.handle_event(event)   [src/runtime/kernel.py]
 
 ---
 
-## Phase 3 — Plan
+## Phase 3 - Plan
 
 **File:** `src/runtime/kernel.py` → `_plan()`
 
@@ -107,13 +107,13 @@ DigitalRobotKernel.handle_event(event)   [src/runtime/kernel.py]
 
 ---
 
-## Phase 4 — Execute
+## Phase 4 - Execute
 
 **File:** `src/runtime/kernel.py` → `_execute_plan()`, `_act_on_tool_calls()`
 
 For each `tool_call` step:
 
-1. **Telemetry:** `tool.requested` — tool name + arguments.
+1. **Telemetry:** `tool.requested` - tool name + arguments.
 2. `tool_executor.execute(ctx, tool_name, arguments)` is invoked.
 
 **File:** `src/tools/executor.py` → `GovernedToolExecutor.execute()`
@@ -138,13 +138,13 @@ Three possible outcomes:
 - **Denied:** returns `{"status": "denied", ...}`.
 
 8. **Telemetry:** `tool.completed`.
-9. After all tool calls: `planner.revise_plan_after_tool()` — the LLM evaluates the results.
+9. After all tool calls: `planner.revise_plan_after_tool()` - the LLM evaluates the results.
 10. **Telemetry:** `plan.revised`.
 11. Loop until a `finalize` step appears.
 
 ---
 
-## Phase 5 — Respond
+## Phase 5 - Respond
 
 **File:** `src/runtime/kernel.py` → `_respond()`
 
@@ -158,7 +158,7 @@ Three possible outcomes:
 
 ---
 
-## Special case — Approval decision
+## Special case - Approval decision
 
 When the user clicks an approval button:
 
