@@ -83,6 +83,13 @@ Design: [FRD-0001 - Mail-triage tenancy](../design/0001-mail-triage-tenancy.md).
   runtime layer is already shaped for it
   ([ADR-0004](../adr/0004-credential-layers.md)). Design:
   [FRD-0003 - Compile mode](../design/0003-compile-mode.md).
+- **Agent workstation (a computer for the robot)** - hand each robot a
+  persistent, pre-provisioned computer (shell, files, headed browser,
+  optional desktop) behind one backend-neutral port, so the same robot can
+  work on its own host, in a container, on a server, or on a home computer.
+  MCS already has the port with Docker and SSH adapters; missing are a local
+  adapter, the provisioning recipe, and the wiring into the tool layer.
+  Design: [FRD-0005 - Agent workstation](../design/0005-agent-workstation.md).
 - **Harness Intervention Catalog from audit trails** - turn recurring
   trajectory failures into versioned runtime interventions: environment
   contracts, SOP learnings, action canonicalizers, and recovery rules. This

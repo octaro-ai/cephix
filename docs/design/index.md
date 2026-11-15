@@ -37,3 +37,7 @@ commitments live in the ADRs.
 - [FRD-0004 - C4 architecture views](0004-c4-architecture-views.md) - the
   deferred C4 concept and Structurizr-DSL leaning behind the accepted
   [ADR-0002 - Mermaid in-tree](../adr/0002-diagrams-mermaid-and-c4.md).
+- [FRD-0005 - Agent workstation](0005-agent-workstation.md) - a persistent,
+  pre-provisioned computer for the robot (shell, headed browser, optional
+  desktop) behind one backend-neutral port, next to the file sandbox of the
+  accepted [ADR-0007 - robot home vs. workspace](../adr/0007-robot-home-and-workspace.md).

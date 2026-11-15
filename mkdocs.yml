@@ -125,6 +125,7 @@ nav:
           - "FRD-0002 - Central clock port": design/0002-clock-port.md
           - "FRD-0003 - Compile mode": design/0003-compile-mode.md
           - "FRD-0004 - C4 architecture views": design/0004-c4-architecture-views.md
+          - "FRD-0005 - Agent workstation": design/0005-agent-workstation.md
   - Project:
       - Status: project/status.md
       - Roadmap: project/roadmap.md
