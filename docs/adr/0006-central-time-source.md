@@ -24,7 +24,8 @@ across the robot and they look the same until they don't:
   NTP corrections, DST, leap seconds, or a manual clock change.
 
 The codebase silently encoded "we use UTC everywhere" in one helper
-([`_now_iso()`][_now_iso] -> `datetime.now(UTC).isoformat()`), but the
+(`_now_iso()` in `src/bus/messages.py` ->
+`datetime.now(UTC).isoformat()`), but the
 convention was never written down, so each new component re-decided what "now"
 means. A grep of `datetime.now`, `time.time`, `time.monotonic`, `tzinfo`
 finds call sites in ~7 files already, and the count grows with scheduling,
@@ -32,8 +33,6 @@ TTLs, replay windows, idle detection, rate limiting, and time-bucketed
 metrics. Each is a place a one-line bug like the heartbeat's can hide -- and
 the next one (a timestamp 5 minutes off, a session aging out 8 hours early)
 will not be as visible.
-
-[_now_iso]: ../../src/bus/messages.py
 
 ## Decision
 

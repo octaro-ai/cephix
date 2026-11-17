@@ -107,7 +107,7 @@ Important keys:
 | `governance.delegate_ids` | Actor IDs treated as delegates. |
 | `governance.operator_ids` | Actor IDs treated as operators. |
 | `mail` | Optional mail-driver config consumed by `src/tools/mail_driver_factory.py`. |
-| `workstation` | Optional Docker workstation config consumed by `src/app.py`. |
+| `workstation` | Not read by the current code. A `workstation:` block is part of the planned agent workstation, see [FRD-0005](../design/0005-agent-workstation.md). |
 
 Robot config overrides host defaults only for that robot. This is the intended
 model: a central host config for all robots, plus robot-local override and

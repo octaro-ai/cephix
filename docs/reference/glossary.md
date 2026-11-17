@@ -160,8 +160,9 @@ registered `EventSinkPort`s.
 **ToolCollector** - Aggregates `ToolDriver`s into one catalogue +
 registry + execution surface.
 
-**ToolDriverPort** - A backend providing one or more tools (e.g.
-`IMAPMailToolDriver`, `WorkstationToolDriver`).
+**ToolDriver** - An MCS tool driver (`MCSToolDriver`) providing one or more
+tools, hosted by `MCSToolExecutionLayer` in `src/tool_execution/mcs_layer.py`
+(e.g. `ClockToolDriver`, `CalculatorToolDriver`, `FilesystemDriver`).
 
 ## W
 

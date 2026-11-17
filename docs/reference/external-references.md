@@ -415,8 +415,9 @@ tools a maintainer needs when debugging the docs site or runtime surface.
   specification.
 - [Docker](https://docs.docker.com/), [docker-py](https://docker-py.readthedocs.io/),
   [nginx](https://nginx.org/en/docs/), [GitHub Actions](https://docs.github.com/en/actions),
-  and [Coolify](https://coolify.io/docs) - docs image, workstation backend,
-  CI, and deployment.
+  and [Coolify](https://coolify.io/docs) - docs image, CI, deployment, and
+  the planned workstation backend
+  ([FRD-0005](../design/0005-agent-workstation.md)).
 
 ---
 

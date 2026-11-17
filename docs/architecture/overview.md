@@ -18,7 +18,7 @@ For full diagrams (component graph, message flow, approval flow), see [Diagrams]
 | **Gateways** | Channel adapters (WebSocket wired; Telegram/WhatsApp code exists) | `src/gateways/` |
 | **Context** | Assembler, firmware store, memory docs, SOP resolver | `src/context.py`, `src/sop/` |
 | **Planners** | LLM and keyword planners | `src/planners/` |
-| **Tools** | Executor, collector, tool drivers | `src/tools/`, `src/workstation/` |
+| **Tools** | Tool execution layer (`MCSToolExecutionLayer`) hosting MCS ToolDrivers | `src/tool_execution/` |
 | **Governance** | Policy guard, risk classifier, approval store | `src/governance/` |
 | **Audit** | Telemetry, semantic bus, event log | `src/telemetry.py`, `src/bus.py` |
 | **Knowledge** | Persistent memory, firmware files, SOP definitions | `src/memory/`, `robot/firmware/`, `robot/memory/`, `robot/sops/` |

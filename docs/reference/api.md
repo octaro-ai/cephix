@@ -8,11 +8,25 @@ section below to render the docs for any module.
 
 ::: src.robot
 
-::: src.runtime.kernel
+::: src.components
 
-::: src.runtime.event_loop
+::: src.kernel.base
+
+::: src.kernel.chat
+
+::: src.kernel.run
+
+## System bus
+
+::: src.bus.asyncio_bus
+
+::: src.bus.messages
 
 ## Composition root
+
+::: src.builder
+
+::: src.registry
 
 ::: src.app
 
@@ -22,24 +36,38 @@ section below to render the docs for any module.
 
 ::: src.configuration
 
-::: src.service
+## Control plane
 
-::: src.control
+::: src.ops.server
 
-## Domain
+::: src.ops.operations
 
-::: src.domain
+## Ports
 
-::: src.ports
+::: src.bus.ports
 
-## Gateways
+::: src.kernel.ports
 
-::: src.gateways.websocket
+::: src.channels.ports
 
-::: src.gateways.hub
+::: src.actor.ports
+
+::: src.tool_execution.ports
+
+## Channels
+
+::: src.channels.websocket
+
+::: src.channels.heartbeat
+
+## Tool execution
+
+::: src.tool_execution.mcs_layer
 
 ## LLM
 
-::: src.llm.factory
+::: src.actor.llm.actor_base
 
-::: src.llm.catalog
+::: src.actor.llm.openai_actor
+
+::: src.utility.model_catalog.catalog

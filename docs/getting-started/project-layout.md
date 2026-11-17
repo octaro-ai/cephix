@@ -61,7 +61,7 @@ src/
 │   ├── approval_store.py
 │   └── composite.py
 │
-├── workstation/      ← Docker-backed sandboxed tools
+├── tool_execution/   ← MCSToolExecutionLayer hosting MCS ToolDrivers
 ├── telemetry.py      ← WideEvent, EventLog, sinks
 ├── bus.py            ← SemanticBus
 └── llm/              ← LLM provider adapters

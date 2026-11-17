@@ -66,9 +66,9 @@ Known limits found while reading the adapters:
   ToolDrivers. The sandbox driver is not a dependency and not wired.
 - Tool calls already hop to a worker thread (`asyncio.to_thread`), so a
   blocking `shell_exec` does not stall the bus.
-- Several docs still describe a `src/workstation/` package with a
-  `DockerWorkstationBackend`. That code no longer exists on the bus-centric
-  branch; this FRD replaces that concept.
+- An earlier `src/workstation/` package with a `DockerWorkstationBackend`
+  no longer exists on the bus-centric branch; this FRD replaces that
+  concept.
 
 ## Landscape (as of 2026-11-15)
 

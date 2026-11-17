@@ -4,8 +4,11 @@
 
 - **Python 3.11+**
 - **[uv](https://docs.astral.sh/uv/)** (recommended) or a standard `pip`-based setup
-- **Docker** (only required if you want to use workstation tools, which run
-  isolated containers)
+
+Docker is not required: today's tools run in-process inside the tool execution
+layer (`MCSToolExecutionLayer` in `src/tool_execution/mcs_layer.py`). A
+container-backed workstation is designed but not built, see
+[FRD-0005 - Agent workstation](../design/0005-agent-workstation.md).
 
 ## Install dependencies
 

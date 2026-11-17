@@ -121,9 +121,11 @@ Design: [FRD-0001 - Mail-triage tenancy](../design/0001-mail-triage-tenancy.md).
   before. Concept + tool comparison in
   [FRD-0004 - C4 architecture views](../design/0004-c4-architecture-views.md);
   the deferral decision is [ADR-0002](../adr/0002-diagrams-mermaid-and-c4.md).
-- **General sandboxing across all tools** - Docker workstation is enough
-  for the MVP. General sandboxing is an infrastructure topic, not an
-  architecture one.
+- **General sandboxing across all tools** - file tools are already
+  confined to the robot's `workspace/`; container-level isolation is part
+  of the agent workstation
+  ([FRD-0005](../design/0005-agent-workstation.md)) and not built. General
+  sandboxing is an infrastructure topic, not an architecture one.
 - **Skill resolver wiring** - meaningful only once SOPs with skills are
   actually used in production.
 - **Convergence API (`remember` / `forget` / `recall`)** - design goal,

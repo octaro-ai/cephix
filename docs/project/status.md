@@ -58,7 +58,7 @@
 | **SOP `safe_actions` as hard policy** | **Docs / prompt only** | `safe_actions` exists in `SOPDefinition` and is mentioned in the planner prompt. The `PolicyToolExecutionGuard` docstring claims to enforce `safe_actions`, but the `check()` implementation does **not**. It is only an LLM hint. |
 | **InputGuardPort** | **Port / code present, NOT wired** | `InputGuardPort`, `CompositeInputGuard` exist. Never invoked from `DigitalRobotKernel` or `app.py`. |
 | **OutputGuardPort** | **Port / code present, NOT wired** | `OutputGuardPort`, `CompositeOutputGuard` exist. Never invoked. |
-| **Sandboxing** | **Partial** | `DockerWorkstationBackend` isolates workstation tools in a Docker container. No general sandbox concept for all tool executions. |
+| **Sandboxing** | **Partial** | File tools are confined to `<robot_home>/workspace/` ([ADR-0007](../adr/0007-robot-home-and-workspace.md)); all tools run in-process inside `MCSToolExecutionLayer` (`src/tool_execution/mcs_layer.py`). No container or VM isolation exists; the agent workstation is a design only ([FRD-0005](../design/0005-agent-workstation.md)). No general sandbox concept for all tool executions. |
 
 ## 5. Audit
 
@@ -177,6 +177,9 @@ These can wait without endangering the foundation:
 
 - **Dreaming / pre-compaction flush** - feature, not foundation.
 - **Convergence API (remember / forget / recall)** - design goal, not blocking.
-- **General sandboxing** - Docker workstation is enough for the MVP. General
-  sandboxing is an infrastructure topic, not an architecture topic.
+- **General sandboxing** - file tools are already confined to the robot's
+  `workspace/`; container-level isolation is designed in
+  [FRD-0005 - Agent workstation](../design/0005-agent-workstation.md) and not
+  built. General sandboxing is an infrastructure topic, not an architecture
+  topic.
 - **Skill resolver** - only relevant once SOPs with skills are actually used.

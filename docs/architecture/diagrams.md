@@ -58,7 +58,6 @@ graph TB
     SystemTools["SystemToolDriver<br/>memory.* notebook.* task.*"]
     MailTools["MailToolDriver<br/>IMAP + MCS"]
     SOPTools["SOPToolDriver"]
-    WorkstationTools["WorkstationToolDriver<br/>Docker"]
   end
 
   subgraph GovernanceLayer ["Governance layer"]
@@ -127,7 +126,6 @@ graph TB
   Collector --> SystemTools
   Collector --> MailTools
   Collector --> SOPTools
-  Collector --> WorkstationTools
 
   Kernel --> ActorResolver
   Kernel -->|send| Hub

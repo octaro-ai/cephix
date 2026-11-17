@@ -58,6 +58,14 @@ steps:
   # ... more steps
 ```
 
+!!! note "The tools in this example are not available today"
+    The current tool layer (`MCSToolExecutionLayer` in
+    `src/tool_execution/mcs_layer.py`) hosts the clock, calculator and
+    filesystem ToolDrivers and provides none of the tools this SOP requires.
+    `shell.exec`, `file.get` and `workstation.start` describe a robot-owned
+    computer that is designed but not built, see
+    [FRD-0005 - Agent workstation](../design/0005-agent-workstation.md).
+
 ### Fields that matter for the harness
 
 | Field | Used for |
